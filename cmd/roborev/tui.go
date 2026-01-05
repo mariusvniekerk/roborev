@@ -68,11 +68,18 @@ func newTuiModel(serverAddr string) tuiModel {
 		serverAddr:  serverAddr,
 		jobs:        []storage.ReviewJob{},
 		currentView: tuiViewQueue,
+		width:       80,  // sensible defaults until we get WindowSizeMsg
+		height:      24,
 	}
 }
 
 func (m tuiModel) Init() tea.Cmd {
-	return tea.Batch(m.tick(), m.fetchJobs(), m.fetchStatus())
+	return tea.Batch(
+		tea.WindowSize(), // request initial window size
+		m.tick(),
+		m.fetchJobs(),
+		m.fetchStatus(),
+	)
 }
 
 func (m tuiModel) tick() tea.Cmd {
@@ -237,10 +244,11 @@ func (m tuiModel) renderQueueView() string {
 	b.WriteString("\n")
 
 	// Status line
-	statusLine := fmt.Sprintf("Workers: %d/%d | Queued: %d | Running: %d | Done: %d | Failed: %d",
+	statusLine := fmt.Sprintf("Workers: %d/%d | Queued: %d | Running: %d | Done: %d | Failed: %d | Size: %dx%d",
 		m.status.ActiveWorkers, m.status.MaxWorkers,
 		m.status.QueuedJobs, m.status.RunningJobs,
-		m.status.CompletedJobs, m.status.FailedJobs)
+		m.status.CompletedJobs, m.status.FailedJobs,
+		m.width, m.height)
 	b.WriteString(tuiStatusStyle.Render(statusLine))
 	b.WriteString("\n\n")
 
