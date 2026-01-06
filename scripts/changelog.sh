@@ -1,11 +1,12 @@
 #!/bin/bash
 # Generate a changelog since the last release using codex
-# Usage: ./scripts/changelog.sh [version]
+# Usage: ./scripts/changelog.sh [version] [extra_instructions]
 # If version is not provided, uses "NEXT" as placeholder
 
 set -e
 
 VERSION="${1:-NEXT}"
+EXTRA_INSTRUCTIONS="$2"
 
 # Find the previous tag
 PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
@@ -34,8 +35,11 @@ echo "Using codex to generate changelog..." >&2
 TMPFILE=$(mktemp)
 trap 'rm -f "$TMPFILE"' EXIT
 
-codex exec --skip-git-repo-check -c reasoning_effort=high -o "$TMPFILE" - >/dev/null <<EOF
+codex exec --skip-git-repo-check --sandbox read-only -c reasoning_effort=high -o "$TMPFILE" - >/dev/null <<EOF
 You are generating a changelog for roborev version $VERSION.
+
+IMPORTANT: Do NOT use any tools. Do NOT run any shell commands. Do NOT search or read any files.
+All the information you need is provided below. Simply analyze the commit messages and output the changelog.
 
 Here are the commits since the last release:
 $COMMITS
@@ -51,6 +55,11 @@ Please generate a concise, user-focused changelog. Group changes into sections l
 Focus on user-visible changes. Skip internal refactoring unless it affects users.
 Keep descriptions brief (one line each). Use present tense.
 Do NOT mention bugs that were introduced and fixed within this same release cycle.
+${EXTRA_INSTRUCTIONS:+
+
+When writing the changelog, look for these features or improvements in the commit log above: $EXTRA_INSTRUCTIONS
+Do NOT search files, read code, or do any analysis outside of the commit log provided above.
+Do NOT search for .roborev.toml or any other files. .roborev.toml is simply a feature of the project mentioned in commits.}
 Output ONLY the changelog content, no preamble.
 EOF
 

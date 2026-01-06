@@ -4,10 +4,12 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 VERSION="$1"
+EXTRA_INSTRUCTIONS="$2"
 
 if [ -z "$VERSION" ]; then
-    echo "Usage: $0 <version>"
+    echo "Usage: $0 <version> [extra_instructions]"
     echo "Example: $0 0.2.0"
+    echo "Example: $0 0.2.0 \"Focus on TUI improvements\""
     exit 1
 fi
 
@@ -36,7 +38,7 @@ CHANGELOG_FILE=$(mktemp)
 trap 'rm -f "$CHANGELOG_FILE"' EXIT
 
 # Use changelog.sh to generate the changelog
-"$SCRIPT_DIR/changelog.sh" "$VERSION" > "$CHANGELOG_FILE"
+"$SCRIPT_DIR/changelog.sh" "$VERSION" "$EXTRA_INSTRUCTIONS" > "$CHANGELOG_FILE"
 
 echo ""
 echo "=========================================="
