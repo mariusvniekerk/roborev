@@ -227,6 +227,26 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.promptScroll++
 			}
 
+		case "pgup":
+			pageSize := max(1, m.height-10)
+			if m.currentView == tuiViewQueue {
+				m.selectedIdx = max(0, m.selectedIdx-pageSize)
+			} else if m.currentView == tuiViewReview {
+				m.reviewScroll = max(0, m.reviewScroll-pageSize)
+			} else if m.currentView == tuiViewPrompt {
+				m.promptScroll = max(0, m.promptScroll-pageSize)
+			}
+
+		case "pgdown":
+			pageSize := max(1, m.height-10)
+			if m.currentView == tuiViewQueue {
+				m.selectedIdx = min(len(m.jobs)-1, m.selectedIdx+pageSize)
+			} else if m.currentView == tuiViewReview {
+				m.reviewScroll += pageSize
+			} else if m.currentView == tuiViewPrompt {
+				m.promptScroll += pageSize
+			}
+
 		case "enter":
 			if m.currentView == tuiViewQueue && len(m.jobs) > 0 {
 				job := m.jobs[m.selectedIdx]
@@ -415,7 +435,7 @@ func (m tuiModel) renderQueueView() string {
 	}
 
 	// Help
-	b.WriteString(tuiHelpStyle.Render("up/down: navigate | enter: review | p: prompt | q: quit"))
+	b.WriteString(tuiHelpStyle.Render("up/down/pgup/pgdn: navigate | enter: review | p: prompt | q: quit"))
 
 	return b.String()
 }
