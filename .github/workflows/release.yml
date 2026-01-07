@@ -70,8 +70,17 @@ jobs:
       - name: Get tag message
         id: tag_message
         run: |
-          # Get the tag message (our changelog), skipping the first line ("Release X.Y.Z")
           TAG_NAME="${GITHUB_REF#refs/tags/}"
+
+          # Only extract message from annotated tags (type "tag"), not lightweight tags (type "commit")
+          TAG_TYPE=$(git cat-file -t "$TAG_NAME")
+          if [ "$TAG_TYPE" != "tag" ]; then
+            echo "Warning: $TAG_NAME is a lightweight tag, using auto-generated notes"
+            echo "has_body=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Get the tag message body (our changelog), skipping the first line ("Release X.Y.Z")
           TAG_MSG=$(git tag -l --format='%(contents:body)' "$TAG_NAME")
 
           if [ -n "$TAG_MSG" ]; then
