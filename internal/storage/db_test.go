@@ -442,6 +442,113 @@ func TestRetryJobAtomic(t *testing.T) {
 	}
 }
 
+func TestCancelJob(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	repo, _ := db.GetOrCreateRepo("/tmp/test-repo")
+
+	t.Run("cancel queued job", func(t *testing.T) {
+		commit, _ := db.GetOrCreateCommit(repo.ID, "cancel-queued", "A", "S", time.Now())
+		job, _ := db.EnqueueJob(repo.ID, commit.ID, "cancel-queued", "codex")
+
+		err := db.CancelJob(job.ID)
+		if err != nil {
+			t.Fatalf("CancelJob failed: %v", err)
+		}
+
+		updated, _ := db.GetJobByID(job.ID)
+		if updated.Status != JobStatusCanceled {
+			t.Errorf("Expected status 'canceled', got '%s'", updated.Status)
+		}
+	})
+
+	t.Run("cancel running job", func(t *testing.T) {
+		commit, _ := db.GetOrCreateCommit(repo.ID, "cancel-running", "A", "S", time.Now())
+		job, _ := db.EnqueueJob(repo.ID, commit.ID, "cancel-running", "codex")
+		db.ClaimJob("worker-1")
+
+		err := db.CancelJob(job.ID)
+		if err != nil {
+			t.Fatalf("CancelJob failed: %v", err)
+		}
+
+		updated, _ := db.GetJobByID(job.ID)
+		if updated.Status != JobStatusCanceled {
+			t.Errorf("Expected status 'canceled', got '%s'", updated.Status)
+		}
+	})
+
+	t.Run("cancel done job fails", func(t *testing.T) {
+		commit, _ := db.GetOrCreateCommit(repo.ID, "cancel-done", "A", "S", time.Now())
+		job, _ := db.EnqueueJob(repo.ID, commit.ID, "cancel-done", "codex")
+		db.ClaimJob("worker-1")
+		db.CompleteJob(job.ID, "codex", "prompt", "output")
+
+		err := db.CancelJob(job.ID)
+		if err == nil {
+			t.Error("CancelJob should fail for done jobs")
+		}
+	})
+
+	t.Run("cancel failed job fails", func(t *testing.T) {
+		commit, _ := db.GetOrCreateCommit(repo.ID, "cancel-failed", "A", "S", time.Now())
+		job, _ := db.EnqueueJob(repo.ID, commit.ID, "cancel-failed", "codex")
+		db.ClaimJob("worker-1")
+		db.FailJob(job.ID, "some error")
+
+		err := db.CancelJob(job.ID)
+		if err == nil {
+			t.Error("CancelJob should fail for failed jobs")
+		}
+	})
+
+	t.Run("complete respects canceled status", func(t *testing.T) {
+		commit, _ := db.GetOrCreateCommit(repo.ID, "complete-canceled", "A", "S", time.Now())
+		job, _ := db.EnqueueJob(repo.ID, commit.ID, "complete-canceled", "codex")
+		db.ClaimJob("worker-1")
+		db.CancelJob(job.ID)
+
+		// CompleteJob should not overwrite canceled status
+		db.CompleteJob(job.ID, "codex", "prompt", "output")
+
+		updated, _ := db.GetJobByID(job.ID)
+		if updated.Status != JobStatusCanceled {
+			t.Errorf("CompleteJob should not overwrite canceled status, got '%s'", updated.Status)
+		}
+	})
+
+	t.Run("fail respects canceled status", func(t *testing.T) {
+		commit, _ := db.GetOrCreateCommit(repo.ID, "fail-canceled", "A", "S", time.Now())
+		job, _ := db.EnqueueJob(repo.ID, commit.ID, "fail-canceled", "codex")
+		db.ClaimJob("worker-1")
+		db.CancelJob(job.ID)
+
+		// FailJob should not overwrite canceled status
+		db.FailJob(job.ID, "some error")
+
+		updated, _ := db.GetJobByID(job.ID)
+		if updated.Status != JobStatusCanceled {
+			t.Errorf("FailJob should not overwrite canceled status, got '%s'", updated.Status)
+		}
+	})
+
+	t.Run("canceled jobs counted correctly", func(t *testing.T) {
+		// Create and cancel a new job
+		commit, _ := db.GetOrCreateCommit(repo.ID, "cancel-count", "A", "S", time.Now())
+		job, _ := db.EnqueueJob(repo.ID, commit.ID, "cancel-count", "codex")
+		db.CancelJob(job.ID)
+
+		_, _, _, _, canceled, err := db.GetJobCounts()
+		if err != nil {
+			t.Fatalf("GetJobCounts failed: %v", err)
+		}
+		if canceled < 1 {
+			t.Errorf("Expected at least 1 canceled job, got %d", canceled)
+		}
+	})
+}
+
 func openTestDB(t *testing.T) *DB {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
