@@ -517,10 +517,12 @@ func TestCancelJob(t *testing.T) {
 			t.Errorf("CompleteJob should not overwrite canceled status, got '%s'", updated.Status)
 		}
 
-		// Verify no review was inserted
+		// Verify no review was inserted (should get sql.ErrNoRows)
 		_, err := db.GetReviewByJobID(job.ID)
 		if err == nil {
 			t.Error("No review should be inserted for canceled job")
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("Expected sql.ErrNoRows, got: %v", err)
 		}
 	})
 
