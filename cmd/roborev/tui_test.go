@@ -2555,3 +2555,115 @@ func TestTUINavigateDownNoLoadMoreWhenFiltered(t *testing.T) {
 		t.Error("Should not return command when filter is active")
 	}
 }
+
+func TestTUIResizeDuringPaginationNoRefetch(t *testing.T) {
+	m := newTuiModel("http://localhost")
+
+	// Set up with jobs loaded and pagination in flight
+	m.jobs = []storage.ReviewJob{{ID: 1}, {ID: 2}, {ID: 3}}
+	m.hasMore = true
+	m.loadingMore = true // Pagination in progress
+	m.heightDetected = false
+	m.height = 24 // Default height
+
+	// Simulate WindowSizeMsg arriving while pagination is in flight
+	updated, cmd := m.Update(tea.WindowSizeMsg{Width: 120, Height: 80})
+	m2 := updated.(tuiModel)
+
+	// Height should be updated
+	if m2.height != 80 {
+		t.Errorf("Expected height 80, got %d", m2.height)
+	}
+	if !m2.heightDetected {
+		t.Error("heightDetected should be true after WindowSizeMsg")
+	}
+
+	// Should NOT trigger a re-fetch because loadingMore is true
+	if cmd != nil {
+		t.Error("Should not return command when loadingMore is true (pagination in flight)")
+	}
+}
+
+func TestTUIResizeTriggersRefetchWhenNeeded(t *testing.T) {
+	m := newTuiModel("http://localhost")
+
+	// Set up with few jobs loaded, more available, no pagination in flight
+	m.jobs = []storage.ReviewJob{{ID: 1}, {ID: 2}, {ID: 3}}
+	m.hasMore = true
+	m.loadingMore = false
+	m.heightDetected = false
+	m.height = 24 // Default height
+
+	// Simulate WindowSizeMsg arriving - tall terminal can show more jobs
+	updated, cmd := m.Update(tea.WindowSizeMsg{Width: 120, Height: 80})
+	m2 := updated.(tuiModel)
+
+	// Height should be updated
+	if m2.height != 80 {
+		t.Errorf("Expected height 80, got %d", m2.height)
+	}
+	if !m2.heightDetected {
+		t.Error("heightDetected should be true after WindowSizeMsg")
+	}
+
+	// Should trigger a re-fetch because we can show more rows than we have jobs
+	// newVisibleRows = 80 - 9 + 10 = 81, which is > len(jobs)=3
+	if cmd == nil {
+		t.Error("Should return fetchJobs command when terminal can show more jobs")
+	}
+}
+
+func TestTUIResizeNoRefetchWhenEnoughJobs(t *testing.T) {
+	m := newTuiModel("http://localhost")
+
+	// Set up with enough jobs to fill the terminal
+	jobs := make([]storage.ReviewJob, 100)
+	for i := range jobs {
+		jobs[i] = storage.ReviewJob{ID: int64(i + 1)}
+	}
+	m.jobs = jobs
+	m.hasMore = true
+	m.loadingMore = false
+	m.heightDetected = true
+	m.height = 60
+
+	// Simulate WindowSizeMsg - terminal grows but we already have enough jobs
+	// newVisibleRows = 80 - 9 + 10 = 81, which is < len(jobs)=100
+	updated, cmd := m.Update(tea.WindowSizeMsg{Width: 120, Height: 80})
+	m2 := updated.(tuiModel)
+
+	// Height should be updated
+	if m2.height != 80 {
+		t.Errorf("Expected height 80, got %d", m2.height)
+	}
+
+	// Should NOT trigger a re-fetch because we have enough jobs already
+	if cmd != nil {
+		t.Error("Should not return command when we already have enough jobs to fill screen")
+	}
+}
+
+func TestTUIResizeRefetchOnLaterResize(t *testing.T) {
+	m := newTuiModel("http://localhost")
+
+	// Set up with few jobs, height already detected from earlier resize
+	m.jobs = []storage.ReviewJob{{ID: 1}, {ID: 2}, {ID: 3}}
+	m.hasMore = true
+	m.loadingMore = false
+	m.heightDetected = true
+	m.height = 30
+
+	// Simulate terminal growing larger - can now show more jobs
+	// newVisibleRows = 80 - 9 + 10 = 81, which is > len(jobs)=3
+	updated, cmd := m.Update(tea.WindowSizeMsg{Width: 120, Height: 80})
+	m2 := updated.(tuiModel)
+
+	if m2.height != 80 {
+		t.Errorf("Expected height 80, got %d", m2.height)
+	}
+
+	// Should trigger a re-fetch because terminal can show more jobs than we have
+	if cmd == nil {
+		t.Error("Should return fetchJobs command when terminal grows and can show more jobs")
+	}
+}

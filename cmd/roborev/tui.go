@@ -80,8 +80,9 @@ type tuiModel struct {
 	updateAvailable string // Latest version if update available, empty if up to date
 
 	// Pagination state
-	hasMore       bool // true if there are more jobs to load
-	loadingMore   bool // true if currently loading more jobs
+	hasMore        bool // true if there are more jobs to load
+	loadingMore    bool // true if currently loading more jobs
+	heightDetected bool // true after first WindowSizeMsg (real terminal height known)
 
 	// Filter modal state
 	filterRepos       []repoFilterItem // Available repos with counts
@@ -155,18 +156,27 @@ func (m tuiModel) tick() tea.Cmd {
 }
 
 func (m tuiModel) fetchJobs() tea.Cmd {
+	// Calculate limit based on terminal height - fetch enough to fill the visible area
+	// Reserve 9 lines for header/footer, add buffer for safety
+	// Use minimum of 100 only before first WindowSizeMsg (when height is default 24)
+	visibleRows := m.height - 9 + 10
+	if !m.heightDetected {
+		visibleRows = max(100, visibleRows)
+	}
+	currentJobCount := len(m.jobs)
+
 	return func() tea.Msg {
 		// Determine limit:
 		// - No limit (limit=0) when filtering to show full repo history
-		// - If we've paginated (more than 50 jobs), maintain current view size
-		// - Otherwise default to 50
+		// - If we've paginated beyond visible area, maintain current view size
+		// - Otherwise fetch enough to fill visible area
 		var url string
 		if m.activeRepoFilter != "" {
 			url = fmt.Sprintf("%s/api/jobs?limit=0&repo=%s", m.serverAddr, neturl.QueryEscape(m.activeRepoFilter))
 		} else {
-			limit := 50
-			if len(m.jobs) > 50 {
-				limit = len(m.jobs) // Maintain paginated view on refresh
+			limit := visibleRows
+			if currentJobCount > visibleRows {
+				limit = currentJobCount // Maintain paginated view on refresh
 			}
 			url = fmt.Sprintf("%s/api/jobs?limit=%d", m.serverAddr, limit)
 		}
@@ -1010,6 +1020,16 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.heightDetected = true
+
+		// If terminal can show more jobs than we have, re-fetch to fill screen
+		// Gate on !loadingMore to avoid race conditions with pagination in flight
+		if !m.loadingMore && len(m.jobs) > 0 && m.hasMore && m.activeRepoFilter == "" {
+			newVisibleRows := m.height - 9 + 10
+			if newVisibleRows > len(m.jobs) {
+				return m, m.fetchJobs()
+			}
+		}
 
 	case tuiTickMsg:
 		// Skip job refresh while pagination is in flight to prevent race conditions
@@ -1546,10 +1566,7 @@ func (m tuiModel) renderReviewView() string {
 		if review.Addressed {
 			addressedStr = " [ADDRESSED]"
 		}
-		idStr := ""
-		if review.ID > 0 {
-			idStr = fmt.Sprintf("#%d ", review.ID)
-		}
+		idStr := fmt.Sprintf("#%d ", review.Job.ID)
 		repoStr := ""
 		if review.Job.RepoName != "" {
 			repoStr = review.Job.RepoName + " "
