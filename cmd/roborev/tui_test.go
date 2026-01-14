@@ -1134,9 +1134,9 @@ func TestTUIFilterSelectRepo(t *testing.T) {
 	}
 	m.currentView = tuiViewFilter
 	m.filterRepos = []repoFilterItem{
-		{name: "", rootPath: "", count: 3},
-		{name: "repo-a", rootPath: "/path/to/repo-a", count: 2},
-		{name: "repo-b", rootPath: "/path/to/repo-b", count: 1},
+		{name: "", rootPaths: nil, count: 3},
+		{name: "repo-a", rootPaths: []string{"/path/to/repo-a"}, count: 2},
+		{name: "repo-b", rootPaths: []string{"/path/to/repo-b"}, count: 1},
 	}
 	m.filterSelectedIdx = 1 // repo-a
 
@@ -1147,8 +1147,8 @@ func TestTUIFilterSelectRepo(t *testing.T) {
 	if m2.currentView != tuiViewQueue {
 		t.Errorf("Expected tuiViewQueue, got %d", m2.currentView)
 	}
-	if m2.activeRepoFilter != "/path/to/repo-a" {
-		t.Errorf("Expected activeRepoFilter='/path/to/repo-a', got '%s'", m2.activeRepoFilter)
+	if len(m2.activeRepoFilter) != 1 || m2.activeRepoFilter[0] != "/path/to/repo-a" {
+		t.Errorf("Expected activeRepoFilter=['/path/to/repo-a'], got %v", m2.activeRepoFilter)
 	}
 	// Selection is invalidated until refetch completes (prevents race condition)
 	if m2.selectedIdx != -1 {
@@ -1166,14 +1166,14 @@ func TestTUIFilterClearWithEsc(t *testing.T) {
 	m.selectedIdx = 0
 	m.selectedJobID = 1
 	m.currentView = tuiViewQueue
-	m.activeRepoFilter = "/path/to/repo-a"
+	m.activeRepoFilter = []string{"/path/to/repo-a"}
 
 	// Press Esc to clear filter
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
 	m2 := updated.(tuiModel)
 
-	if m2.activeRepoFilter != "" {
-		t.Errorf("Expected activeRepoFilter to be cleared, got '%s'", m2.activeRepoFilter)
+	if len(m2.activeRepoFilter) != 0 {
+		t.Errorf("Expected activeRepoFilter to be cleared, got %v", m2.activeRepoFilter)
 	}
 	// Selection is invalidated until refetch completes (prevents race condition)
 	if m2.selectedIdx != -1 {
@@ -1250,7 +1250,7 @@ func TestTUIQueueNavigationWithFilter(t *testing.T) {
 	m.selectedIdx = 0
 	m.selectedJobID = 1
 	m.currentView = tuiViewQueue
-	m.activeRepoFilter = "/path/to/repo-a" // Filter to only repo-a jobs
+	m.activeRepoFilter = []string{"/path/to/repo-a"} // Filter to only repo-a jobs
 
 	// Navigate down - should skip repo-b jobs
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
@@ -1300,7 +1300,7 @@ func TestTUIGetVisibleJobs(t *testing.T) {
 	}
 
 	// Filter to repo-a
-	m.activeRepoFilter = "/path/to/repo-a"
+	m.activeRepoFilter = []string{"/path/to/repo-a"}
 	visible = m.getVisibleJobs()
 	if len(visible) != 2 {
 		t.Errorf("Filter repo-a: expected 2 visible, got %d", len(visible))
@@ -1310,7 +1310,7 @@ func TestTUIGetVisibleJobs(t *testing.T) {
 	}
 
 	// Filter to non-existent repo
-	m.activeRepoFilter = "/path/to/repo-xyz"
+	m.activeRepoFilter = []string{"/path/to/repo-xyz"}
 	visible = m.getVisibleJobs()
 	if len(visible) != 0 {
 		t.Errorf("Filter repo-xyz: expected 0 visible, got %d", len(visible))
@@ -1339,7 +1339,7 @@ func TestTUIGetVisibleSelectedIdx(t *testing.T) {
 	}
 
 	// With filter, selectedIdx=-1 returns -1
-	m.activeRepoFilter = "/path/to/repo-a"
+	m.activeRepoFilter = []string{"/path/to/repo-a"}
 	m.selectedIdx = -1
 	if idx := m.getVisibleSelectedIdx(); idx != -1 {
 		t.Errorf("Filter active, selectedIdx=-1: expected -1, got %d", idx)
@@ -1369,7 +1369,7 @@ func TestTUIJobsRefreshWithFilter(t *testing.T) {
 	}
 	m.selectedIdx = 2
 	m.selectedJobID = 3
-	m.activeRepoFilter = "/path/to/repo-a"
+	m.activeRepoFilter = []string{"/path/to/repo-a"}
 
 	// Jobs refresh - same jobs
 	newJobs := tuiJobsMsg{jobs: []storage.ReviewJob{
@@ -1410,12 +1410,12 @@ func TestTUIJobsRefreshWithFilter(t *testing.T) {
 func TestTUIFilterPreselectsCurrent(t *testing.T) {
 	m := newTuiModel("http://localhost")
 	m.currentView = tuiViewFilter
-	m.activeRepoFilter = "/path/to/repo-b" // Already filtering to repo-b
+	m.activeRepoFilter = []string{"/path/to/repo-b"} // Already filtering to repo-b
 
 	// Simulate receiving repos from API (should pre-select repo-b)
 	repos := []repoFilterItem{
-		{name: "repo-a", rootPath: "/path/to/repo-a", count: 1},
-		{name: "repo-b", rootPath: "/path/to/repo-b", count: 1},
+		{name: "repo-a", rootPaths: []string{"/path/to/repo-a"}, count: 1},
+		{name: "repo-b", rootPaths: []string{"/path/to/repo-b"}, count: 1},
 	}
 	msg := tuiReposMsg{repos: repos, totalCount: 2}
 
@@ -1441,9 +1441,9 @@ func TestTUIFilterToZeroVisibleJobs(t *testing.T) {
 	m.selectedJobID = 1
 	m.currentView = tuiViewFilter
 	m.filterRepos = []repoFilterItem{
-		{name: "", rootPath: "", count: 2},
-		{name: "repo-a", rootPath: "/path/to/repo-a", count: 2},
-		{name: "repo-b", rootPath: "/path/to/repo-b", count: 0}, // No jobs
+		{name: "", rootPaths: nil, count: 2},
+		{name: "repo-a", rootPaths: []string{"/path/to/repo-a"}, count: 2},
+		{name: "repo-b", rootPaths: []string{"/path/to/repo-b"}, count: 0}, // No jobs
 	}
 	m.filterSelectedIdx = 2 // Select repo-b
 
@@ -1452,8 +1452,8 @@ func TestTUIFilterToZeroVisibleJobs(t *testing.T) {
 	m2 := updated.(tuiModel)
 
 	// Filter should be applied and a fetchJobs command should be returned
-	if m2.activeRepoFilter != "/path/to/repo-b" {
-		t.Errorf("Expected activeRepoFilter='/path/to/repo-b', got '%s'", m2.activeRepoFilter)
+	if len(m2.activeRepoFilter) != 1 || m2.activeRepoFilter[0] != "/path/to/repo-b" {
+		t.Errorf("Expected activeRepoFilter=['/path/to/repo-b'], got %v", m2.activeRepoFilter)
 	}
 	if cmd == nil {
 		t.Error("Expected fetchJobs command to be returned")
@@ -1479,6 +1479,99 @@ func TestTUIFilterToZeroVisibleJobs(t *testing.T) {
 	}
 }
 
+func TestTUIFilterAggregatedDisplayName(t *testing.T) {
+	m := newTuiModel("http://localhost")
+
+	// Jobs from two repos that share a display name
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, RepoName: "backend-dev", RepoPath: "/path/to/backend-dev", Status: storage.JobStatusDone},
+		{ID: 2, RepoName: "backend-prod", RepoPath: "/path/to/backend-prod", Status: storage.JobStatusDone},
+		{ID: 3, RepoName: "frontend", RepoPath: "/path/to/frontend", Status: storage.JobStatusFailed},
+	}
+	m.currentView = tuiViewFilter
+	// Aggregated group: "backend" covers both backend-dev and backend-prod
+	m.filterRepos = []repoFilterItem{
+		{name: "", rootPaths: nil, count: 3},
+		{name: "backend", rootPaths: []string{"/path/to/backend-dev", "/path/to/backend-prod"}, count: 2},
+		{name: "frontend", rootPaths: []string{"/path/to/frontend"}, count: 1},
+	}
+	m.filterSelectedIdx = 1 // Select "backend" group
+
+	// Press enter to select
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m2 := updated.(tuiModel)
+
+	// Should have both paths in the filter
+	if len(m2.activeRepoFilter) != 2 {
+		t.Errorf("Expected 2 paths in activeRepoFilter, got %d", len(m2.activeRepoFilter))
+	}
+
+	// Both backend repos should be visible
+	if !m2.repoMatchesFilter("/path/to/backend-dev") {
+		t.Error("Expected backend-dev to match filter")
+	}
+	if !m2.repoMatchesFilter("/path/to/backend-prod") {
+		t.Error("Expected backend-prod to match filter")
+	}
+	// Frontend should not be visible
+	if m2.repoMatchesFilter("/path/to/frontend") {
+		t.Error("Expected frontend to NOT match filter")
+	}
+}
+
+func TestTUIFilterSearchByRepoPath(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.filterRepos = []repoFilterItem{
+		{name: "", rootPaths: nil, count: 3},
+		{name: "backend", rootPaths: []string{"/path/to/backend-dev", "/path/to/backend-prod"}, count: 2},
+		{name: "frontend", rootPaths: []string{"/path/to/frontend"}, count: 1},
+	}
+
+	// Search by underlying repo path basename (not display name)
+	m.filterSearch = "backend-dev"
+	visible := m.getVisibleFilterRepos()
+
+	// Should find the "backend" group (contains backend-dev path)
+	if len(visible) != 2 { // "All repos" + "backend"
+		t.Errorf("Expected 2 visible repos (All + backend), got %d", len(visible))
+	}
+	if visible[1].name != "backend" {
+		t.Errorf("Expected to find 'backend' group, got '%s'", visible[1].name)
+	}
+}
+
+func TestTUIMultiPathFilterStatusCounts(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.height = 20
+	m.daemonVersion = "test"
+
+	// Jobs from multiple repos
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, RepoPath: "/path/to/backend-dev", Status: storage.JobStatusDone},
+		{ID: 2, RepoPath: "/path/to/backend-prod", Status: storage.JobStatusDone},
+		{ID: 3, RepoPath: "/path/to/backend-prod", Status: storage.JobStatusFailed},
+		{ID: 4, RepoPath: "/path/to/frontend", Status: storage.JobStatusDone},
+		{ID: 5, RepoPath: "/path/to/frontend", Status: storage.JobStatusCanceled},
+	}
+
+	// Multi-path filter (backend group)
+	m.activeRepoFilter = []string{"/path/to/backend-dev", "/path/to/backend-prod"}
+
+	output := m.renderQueueView()
+
+	// Status line should show counts only for backend repos (2 done, 1 failed, 0 canceled)
+	// Not frontend (1 done, 1 canceled)
+	if !strings.Contains(output, "Done: 2") {
+		t.Errorf("Expected status to show 'Done: 2' for filtered repos, got: %s", output)
+	}
+	if !strings.Contains(output, "Failed: 1") {
+		t.Errorf("Expected status to show 'Failed: 1' for filtered repos, got: %s", output)
+	}
+	if !strings.Contains(output, "Canceled: 0") {
+		t.Errorf("Expected status to show 'Canceled: 0' for filtered repos, got: %s", output)
+	}
+}
+
 func TestTUIRefreshWithZeroVisibleJobs(t *testing.T) {
 	m := newTuiModel("http://localhost")
 
@@ -1486,7 +1579,7 @@ func TestTUIRefreshWithZeroVisibleJobs(t *testing.T) {
 	m.jobs = []storage.ReviewJob{
 		{ID: 1, RepoName: "repo-a", RepoPath: "/path/to/repo-a"},
 	}
-	m.activeRepoFilter = "/path/to/repo-b" // Filter to repo with no jobs
+	m.activeRepoFilter = []string{"/path/to/repo-b"} // Filter to repo with no jobs
 	m.selectedIdx = 0
 	m.selectedJobID = 1
 
@@ -1514,7 +1607,7 @@ func TestTUIActionsNoOpWithZeroVisibleJobs(t *testing.T) {
 	m.jobs = []storage.ReviewJob{
 		{ID: 1, RepoName: "repo-a", RepoPath: "/path/to/repo-a", Status: storage.JobStatusDone},
 	}
-	m.activeRepoFilter = "/path/to/repo-b"
+	m.activeRepoFilter = []string{"/path/to/repo-b"}
 	m.selectedIdx = -1
 	m.selectedJobID = 0
 	m.currentView = tuiViewQueue
@@ -2542,7 +2635,7 @@ func TestTUINavigateDownNoLoadMoreWhenFiltered(t *testing.T) {
 	m.selectedJobID = 1
 	m.hasMore = true
 	m.loadingMore = false
-	m.activeRepoFilter = "/path/to/repo" // Filter active
+	m.activeRepoFilter = []string{"/path/to/repo"} // Filter active
 	m.currentView = tuiViewQueue
 
 	// Press down at bottom - should NOT trigger load more (filtered view loads all)
@@ -2921,7 +3014,7 @@ func TestTUIHideAddressedWithRepoFilter(t *testing.T) {
 	m := newTuiModel("http://localhost")
 	m.currentView = tuiViewQueue
 	m.hideAddressed = true
-	m.activeRepoFilter = "/repo/a"
+	m.activeRepoFilter = []string{"/repo/a"}
 
 	addressedTrue := true
 	addressedFalse := false
