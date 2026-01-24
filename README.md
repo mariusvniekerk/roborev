@@ -10,7 +10,7 @@ Continuous, non-invasive background code review using AI agents
 (Claude Code, Codex, Gemini, Copilot, OpenCode). Work smarter and
 faster with immediate critical feedback on your agents' work.
 
-![TUI Queue View](https://raw.githubusercontent.com/roborev-dev/roborev-docs/main/src/assets/screenshots/tui-queue.png)
+https://github.com/user-attachments/assets/7789eb79-8176-4f6b-a9db-f3e4a328ceb9
 
 ## Features
 
@@ -24,14 +24,14 @@ faster with immediate critical feedback on your agents' work.
 
 ## Installation
 
-**Homebrew (macOS / Linux):**
-```bash
-brew install roborev-dev/tap/roborev
-```
-
 **Shell Script (macOS / Linux):**
 ```bash
 curl -fsSL https://roborev.io/install.sh | bash
+```
+
+**Homebrew (macOS / Linux):**
+```bash
+brew install roborev-dev/tap/roborev
 ```
 
 **Windows (PowerShell):**
@@ -52,6 +52,8 @@ roborev init          # Install post-commit hook
 git commit -m "..."   # Reviews happen automatically
 roborev tui           # View reviews in interactive UI
 ```
+
+https://github.com/user-attachments/assets/5657b98c-de24-41d4-99f2-bf1aeae34c63
 
 ## Commands
 
