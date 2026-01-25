@@ -293,7 +293,7 @@ func TestRefineNoChangeRetryLogic(t *testing.T) {
 		}))
 		defer cleanup()
 
-		responses, _ := getResponsesForJob(1)
+		responses, _ := getCommentsForJob(1)
 
 		// Count no-change attempts
 		noChangeAttempts := 0
@@ -350,7 +350,7 @@ func TestRunRefineSurfacesResponseErrors(t *testing.T) {
 			json.NewEncoder(w).Encode(storage.Review{
 				ID: 1, JobID: 1, Output: "**Bug found**: fail", Addressed: false,
 			})
-		case r.URL.Path == "/api/responses":
+		case r.URL.Path == "/api/comments":
 			w.WriteHeader(http.StatusInternalServerError)
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -634,7 +634,7 @@ func createMockRefineHandler(state *mockRefineState) http.Handler {
 			}
 			json.NewEncoder(w).Encode(reviewCopy)
 
-		case r.URL.Path == "/api/responses" && r.Method == "GET":
+		case r.URL.Path == "/api/comments" && r.Method == "GET":
 			jobIDStr := r.URL.Query().Get("job_id")
 			var jobID int64
 			fmt.Sscanf(jobIDStr, "%d", &jobID)
@@ -648,7 +648,7 @@ func createMockRefineHandler(state *mockRefineState) http.Handler {
 				"responses": responses,
 			})
 
-		case r.URL.Path == "/api/respond" && r.Method == "POST":
+		case r.URL.Path == "/api/comment" && r.Method == "POST":
 			var req struct {
 				JobID     int64  `json:"job_id"`
 				Responder string `json:"responder"`
@@ -807,7 +807,7 @@ func TestRefineLoopNoChangeRetryScenario(t *testing.T) {
 		_, cleanup := setupMockDaemon(t, createMockRefineHandler(state))
 		defer cleanup()
 
-		responses, err := getResponsesForJob(42)
+		responses, err := getCommentsForJob(42)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -834,7 +834,7 @@ func TestRefineLoopNoChangeRetryScenario(t *testing.T) {
 		_, cleanup := setupMockDaemon(t, createMockRefineHandler(state))
 		defer cleanup()
 
-		responses, _ := getResponsesForJob(42)
+		responses, _ := getCommentsForJob(42)
 		noChangeAttempts := countNoChangeAttempts(responses)
 
 		// Should not give up yet (first attempt)
@@ -856,7 +856,7 @@ func TestRefineLoopNoChangeRetryScenario(t *testing.T) {
 		_, cleanup := setupMockDaemon(t, createMockRefineHandler(state))
 		defer cleanup()
 
-		responses, _ := getResponsesForJob(42)
+		responses, _ := getCommentsForJob(42)
 		noChangeAttempts := countNoChangeAttempts(responses)
 
 		// Should only count the 1 response from roborev-refine, not the others
@@ -1068,7 +1068,7 @@ func TestRefineLoopStaysOnFailedFixChain(t *testing.T) {
 			}
 			json.NewEncoder(w).Encode(review)
 
-		case r.URL.Path == "/api/responses" && r.Method == http.MethodGet:
+		case r.URL.Path == "/api/comments" && r.Method == http.MethodGet:
 			jobIDStr := r.URL.Query().Get("job_id")
 			var jobID int64
 			fmt.Sscanf(jobIDStr, "%d", &jobID)
@@ -1080,7 +1080,7 @@ func TestRefineLoopStaysOnFailedFixChain(t *testing.T) {
 				"responses": responses,
 			})
 
-		case r.URL.Path == "/api/respond" && r.Method == http.MethodPost:
+		case r.URL.Path == "/api/comment" && r.Method == http.MethodPost:
 			var req struct {
 				JobID     int64  `json:"job_id"`
 				Responder string `json:"responder"`

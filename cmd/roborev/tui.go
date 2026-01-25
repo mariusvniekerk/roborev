@@ -65,6 +65,26 @@ var (
 // fullSHAPattern matches a 40-character hex git SHA (not ranges or branch names)
 var fullSHAPattern = regexp.MustCompile(`(?i)^[0-9a-f]{40}$`)
 
+// ansiEscapePattern matches ANSI escape sequences (colors, cursor movement, etc.)
+// Handles CSI sequences (\x1b[...X) and OSC sequences terminated by BEL (\x07) or ST (\x1b\\)
+var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]|\x1b\]([^\x07\x1b]|\x1b[^\\])*(\x07|\x1b\\)`)
+
+// sanitizeForDisplay strips ANSI escape sequences and control characters from text
+// to prevent terminal injection when displaying untrusted content (e.g., commit messages).
+func sanitizeForDisplay(s string) string {
+	// Strip ANSI escape sequences
+	s = ansiEscapePattern.ReplaceAllString(s, "")
+	// Strip control characters except newline (\n) and tab (\t)
+	var result strings.Builder
+	result.Grow(len(s))
+	for _, r := range s {
+		if r == '\n' || r == '\t' || !unicode.IsControl(r) {
+			result.WriteRune(r)
+		}
+	}
+	return result.String()
+}
+
 type tuiView int
 
 const (
@@ -72,7 +92,9 @@ const (
 	tuiViewReview
 	tuiViewPrompt
 	tuiViewFilter
-	tuiViewRespond
+	tuiViewComment
+	tuiViewCommitMsg
+	tuiViewHelp
 )
 
 // repoFilterItem represents a repo (or group of repos with same display name) in the filter modal
@@ -115,11 +137,11 @@ type tuiModel struct {
 	filterSelectedIdx int              // Currently highlighted repo in filter list
 	filterSearch      string           // Search/filter text typed by user
 
-	// Respond modal state
-	respondText     string  // The response text being typed
-	respondJobID    int64   // Job ID we're responding to
-	respondCommit   string  // Short commit SHA for display
-	respondFromView tuiView // View to return to after respond modal closes
+	// Comment modal state
+	commentText     string  // The response text being typed
+	commentJobID    int64   // Job ID we're responding to
+	commentCommit   string  // Short commit SHA for display
+	commentFromView tuiView // View to return to after comment modal closes
 
 	// Active filter (applied to queue view)
 	activeRepoFilter []string // Empty = show all, otherwise repo root_paths to filter by
@@ -147,6 +169,15 @@ type tuiModel struct {
 	// Daemon reconnection state
 	consecutiveErrors int  // Count of consecutive connection failures
 	reconnecting      bool // True if currently attempting reconnection
+
+	// Commit message view state
+	commitMsgContent  string  // Formatted commit message(s) content
+	commitMsgScroll   int     // Scroll position in commit message view
+	commitMsgJobID    int64   // Job ID for the commit message being viewed
+	commitMsgFromView tuiView // View to return to after closing commit message view
+
+	// Help view state
+	helpFromView tuiView // View to return to after closing help
 }
 
 // pendingState tracks a pending addressed toggle with sequence number
@@ -204,13 +235,18 @@ type tuiReposMsg struct {
 	repos      []repoFilterItem
 	totalCount int
 }
-type tuiRespondResultMsg struct {
+type tuiCommentResultMsg struct {
 	jobID int64
 	err   error
 }
 type tuiClipboardResultMsg struct {
 	err  error
 	view tuiView // The view where copy was triggered (for flash attribution)
+}
+type tuiCommitMsgMsg struct {
+	jobID   int64
+	content string
+	err     error
 }
 type tuiReconnectMsg struct {
 	newAddr string // New daemon address if found, empty if not found
@@ -536,7 +572,7 @@ func (m tuiModel) fetchReview(jobID int64) tea.Cmd {
 
 		// Fetch responses for this job
 		var responses []storage.Response
-		respResp, err := m.client.Get(fmt.Sprintf("%s/api/responses?job_id=%d", m.serverAddr, jobID))
+		respResp, err := m.client.Get(fmt.Sprintf("%s/api/comments?job_id=%d", m.serverAddr, jobID))
 		if err == nil {
 			defer respResp.Body.Close()
 			if respResp.StatusCode == http.StatusOK {
@@ -551,7 +587,7 @@ func (m tuiModel) fetchReview(jobID int64) tea.Cmd {
 		// Also fetch legacy responses by SHA for single commits (not ranges or dirty reviews)
 		// and merge with job responses to preserve full history during migration
 		if review.Job != nil && !strings.Contains(review.Job.GitRef, "..") && review.Job.GitRef != "dirty" {
-			shaResp, err := m.client.Get(fmt.Sprintf("%s/api/responses?sha=%s", m.serverAddr, review.Job.GitRef))
+			shaResp, err := m.client.Get(fmt.Sprintf("%s/api/comments?sha=%s", m.serverAddr, review.Job.GitRef))
 			if err == nil {
 				defer shaResp.Body.Close()
 				if shaResp.StatusCode == http.StatusOK {
@@ -692,6 +728,96 @@ func (m tuiModel) fetchReviewAndCopy(jobID int64, job *storage.ReviewJob) tea.Cm
 		content := formatClipboardContent(&review)
 		err = clipboardWriter.WriteText(content)
 		return tuiClipboardResultMsg{err: err, view: view}
+	}
+}
+
+// fetchCommitMsg fetches commit message(s) for a job.
+// For single commits, returns the commit message.
+// For ranges, returns all commit messages in the range.
+// For dirty reviews or prompt jobs, returns an error.
+func (m tuiModel) fetchCommitMsg(job *storage.ReviewJob) tea.Cmd {
+	jobID := job.ID
+	return func() tea.Msg {
+		// Handle prompt/run jobs first (GitRef == "prompt" indicates a run task, not a commit review)
+		// Check this before dirty to handle backward compatibility with older run jobs
+		if job.GitRef == "prompt" {
+			return tuiCommitMsgMsg{
+				jobID: jobID,
+				err:   fmt.Errorf("no commit message for run tasks"),
+			}
+		}
+
+		// Handle dirty reviews (uncommitted changes)
+		if job.DiffContent != nil || job.GitRef == "dirty" {
+			return tuiCommitMsgMsg{
+				jobID: jobID,
+				err:   fmt.Errorf("no commit message for uncommitted changes"),
+			}
+		}
+
+		// Handle missing GitRef (could be from incomplete job data or older versions)
+		if job.GitRef == "" {
+			return tuiCommitMsgMsg{
+				jobID: jobID,
+				err:   fmt.Errorf("no git reference available for this job"),
+			}
+		}
+
+		// Check if this is a range (contains "..")
+		if strings.Contains(job.GitRef, "..") {
+			// Fetch all commits in range
+			commits, err := git.GetRangeCommits(job.RepoPath, job.GitRef)
+			if err != nil {
+				return tuiCommitMsgMsg{jobID: jobID, err: err}
+			}
+			if len(commits) == 0 {
+				return tuiCommitMsgMsg{
+					jobID: jobID,
+					err:   fmt.Errorf("no commits in range %s", job.GitRef),
+				}
+			}
+
+			// Fetch info for each commit
+			var content strings.Builder
+			content.WriteString(fmt.Sprintf("Commits in %s (%d commits):\n\n", job.GitRef, len(commits)))
+
+			for i, sha := range commits {
+				info, err := git.GetCommitInfo(job.RepoPath, sha)
+				if err != nil {
+					content.WriteString(fmt.Sprintf("%d. %s: (error: %v)\n\n", i+1, sha[:7], err))
+					continue
+				}
+				content.WriteString(fmt.Sprintf("%d. %s %s\n", i+1, info.SHA[:7], info.Subject))
+				content.WriteString(fmt.Sprintf("   Author: %s | %s\n", info.Author, info.Timestamp.Format("2006-01-02 15:04")))
+				if info.Body != "" {
+					// Indent body
+					bodyLines := strings.Split(info.Body, "\n")
+					for _, line := range bodyLines {
+						content.WriteString("   " + line + "\n")
+					}
+				}
+				content.WriteString("\n")
+			}
+
+			return tuiCommitMsgMsg{jobID: jobID, content: sanitizeForDisplay(content.String())}
+		}
+
+		// Single commit
+		info, err := git.GetCommitInfo(job.RepoPath, job.GitRef)
+		if err != nil {
+			return tuiCommitMsgMsg{jobID: jobID, err: err}
+		}
+
+		var content strings.Builder
+		content.WriteString(fmt.Sprintf("Commit: %s\n", info.SHA))
+		content.WriteString(fmt.Sprintf("Author: %s\n", info.Author))
+		content.WriteString(fmt.Sprintf("Date:   %s\n\n", info.Timestamp.Format("2006-01-02 15:04:05 -0700")))
+		content.WriteString(info.Subject + "\n")
+		if info.Body != "" {
+			content.WriteString("\n" + info.Body + "\n")
+		}
+
+		return tuiCommitMsgMsg{jobID: jobID, content: sanitizeForDisplay(content.String())}
 	}
 }
 
@@ -1138,39 +1264,39 @@ func (m tuiModel) findLastVisibleJob() int {
 func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		// Handle respond view first (it captures most keys for typing)
-		if m.currentView == tuiViewRespond {
+		// Handle comment view first (it captures most keys for typing)
+		if m.currentView == tuiViewComment {
 			switch msg.String() {
 			case "ctrl+c":
 				return m, tea.Quit
 			case "esc":
-				m.currentView = m.respondFromView
-				m.respondText = ""
-				m.respondJobID = 0
+				m.currentView = m.commentFromView
+				m.commentText = ""
+				m.commentJobID = 0
 				return m, nil
 			case "enter":
-				if strings.TrimSpace(m.respondText) != "" {
-					text := m.respondText
-					jobID := m.respondJobID
+				if strings.TrimSpace(m.commentText) != "" {
+					text := m.commentText
+					jobID := m.commentJobID
 					// Return to previous view but keep text until submit succeeds
-					m.currentView = m.respondFromView
-					return m, m.submitResponse(jobID, text)
+					m.currentView = m.commentFromView
+					return m, m.submitComment(jobID, text)
 				}
 				return m, nil
 			case "backspace":
-				if len(m.respondText) > 0 {
-					runes := []rune(m.respondText)
-					m.respondText = string(runes[:len(runes)-1])
+				if len(m.commentText) > 0 {
+					runes := []rune(m.commentText)
+					m.commentText = string(runes[:len(runes)-1])
 				}
 				return m, nil
 			default:
 				// Handle typing (supports non-ASCII runes and newlines)
 				if msg.String() == "shift+enter" || msg.String() == "ctrl+j" {
-					m.respondText += "\n"
+					m.commentText += "\n"
 				} else if len(msg.Runes) > 0 {
 					for _, r := range msg.Runes {
 						if unicode.IsPrint(r) || r == '\n' || r == '\t' {
-							m.respondText += string(r)
+							m.commentText += string(r)
 						}
 					}
 				}
@@ -1250,6 +1376,16 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+			if m.currentView == tuiViewCommitMsg {
+				m.currentView = m.commitMsgFromView
+				m.commitMsgContent = ""
+				m.commitMsgScroll = 0
+				return m, nil
+			}
+			if m.currentView == tuiViewHelp {
+				m.currentView = m.helpFromView
+				return m, nil
+			}
 			return m, tea.Quit
 
 		case "up":
@@ -1259,6 +1395,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if prevIdx >= 0 {
 					m.selectedIdx = prevIdx
 					m.updateSelectedJobID()
+				} else {
+					m.flashMessage = "No newer review"
+					m.flashExpiresAt = time.Now().Add(2 * time.Second)
+					m.flashView = tuiViewQueue
 				}
 			} else if m.currentView == tuiViewReview {
 				if m.reviewScroll > 0 {
@@ -1267,6 +1407,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if m.currentView == tuiViewPrompt {
 				if m.promptScroll > 0 {
 					m.promptScroll--
+				}
+			} else if m.currentView == tuiViewCommitMsg {
+				if m.commitMsgScroll > 0 {
+					m.commitMsgScroll--
 				}
 			}
 
@@ -1296,6 +1440,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							Job:    &job,
 						}
 					}
+				} else {
+					m.flashMessage = "No newer review"
+					m.flashExpiresAt = time.Now().Add(2 * time.Second)
+					m.flashView = tuiViewReview
 				}
 			} else if m.currentView == tuiViewPrompt {
 				if m.promptScroll > 0 {
@@ -1314,11 +1462,18 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// At bottom with more jobs available - load them
 					m.loadingMore = true
 					return m, m.fetchMoreJobs()
+				} else if !m.hasMore || len(m.activeRepoFilter) > 0 {
+					// Truly at the bottom - no more to load or filter prevents auto-load
+					m.flashMessage = "No older review"
+					m.flashExpiresAt = time.Now().Add(2 * time.Second)
+					m.flashView = tuiViewQueue
 				}
 			} else if m.currentView == tuiViewReview {
 				m.reviewScroll++
 			} else if m.currentView == tuiViewPrompt {
 				m.promptScroll++
+			} else if m.currentView == tuiViewCommitMsg {
+				m.commitMsgScroll++
 			}
 
 		case "j", "left":
@@ -1351,6 +1506,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							Job:    &job,
 						}
 					}
+				} else {
+					m.flashMessage = "No older review"
+					m.flashExpiresAt = time.Now().Add(2 * time.Second)
+					m.flashView = tuiViewReview
 				}
 			} else if m.currentView == tuiViewPrompt {
 				m.promptScroll++
@@ -1492,6 +1651,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// No job associated - track by review ID instead
 					m.pendingReviewAddressed[m.currentReview.ID] = pendingState{newState: newState, seq: seq}
 				}
+				// Don't update selectedIdx here - keep it pointing at the current (now hidden) job.
+				// The findNextViewableJob/findPrevViewableJob functions start searching from
+				// selectedIdx +/- 1, so left/right navigation will naturally find the correct
+				// adjacent visible jobs. Moving selectedIdx would cause navigation to skip a job.
 				return m, m.addressReview(m.currentReview.ID, jobID, newState, oldState, seq)
 			} else if m.currentView == tuiViewQueue && len(m.jobs) > 0 && m.selectedIdx >= 0 && m.selectedIdx < len(m.jobs) {
 				job := &m.jobs[m.selectedIdx]
@@ -1585,39 +1748,39 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "c":
-			// Open respond modal (from queue or review view)
+			// Open comment modal (from queue or review view)
 			if m.currentView == tuiViewQueue && len(m.jobs) > 0 && m.selectedIdx >= 0 && m.selectedIdx < len(m.jobs) {
 				job := m.jobs[m.selectedIdx]
 				// Only allow responding to completed or failed reviews
 				if job.Status == storage.JobStatusDone || job.Status == storage.JobStatusFailed {
 					// Only clear text if opening for a different job (preserve for retry)
-					if m.respondJobID != job.ID {
-						m.respondText = ""
+					if m.commentJobID != job.ID {
+						m.commentText = ""
 					}
-					m.respondJobID = job.ID
-					m.respondCommit = job.GitRef
-					if len(m.respondCommit) > 7 {
-						m.respondCommit = m.respondCommit[:7]
+					m.commentJobID = job.ID
+					m.commentCommit = job.GitRef
+					if len(m.commentCommit) > 7 {
+						m.commentCommit = m.commentCommit[:7]
 					}
-					m.respondFromView = tuiViewQueue
-					m.currentView = tuiViewRespond
+					m.commentFromView = tuiViewQueue
+					m.currentView = tuiViewComment
 				}
 				return m, nil
 			} else if m.currentView == tuiViewReview && m.currentReview != nil {
 				// Only clear text if opening for a different job (preserve for retry)
-				if m.respondJobID != m.currentReview.JobID {
-					m.respondText = ""
+				if m.commentJobID != m.currentReview.JobID {
+					m.commentText = ""
 				}
-				m.respondJobID = m.currentReview.JobID
-				m.respondCommit = ""
+				m.commentJobID = m.currentReview.JobID
+				m.commentCommit = ""
 				if m.currentReview.Job != nil {
-					m.respondCommit = m.currentReview.Job.GitRef
-					if len(m.respondCommit) > 7 {
-						m.respondCommit = m.respondCommit[:7]
+					m.commentCommit = m.currentReview.Job.GitRef
+					if len(m.commentCommit) > 7 {
+						m.commentCommit = m.commentCommit[:7]
 					}
 				}
-				m.respondFromView = tuiViewReview
-				m.currentView = tuiViewRespond
+				m.commentFromView = tuiViewReview
+				m.currentView = tuiViewComment
 				return m, nil
 			}
 
@@ -1650,6 +1813,36 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.flashView = tuiViewQueue
 					return m, nil
 				}
+			}
+
+		case "m":
+			// Show commit message(s) for the selected job
+			if m.currentView == tuiViewQueue && len(m.jobs) > 0 && m.selectedIdx >= 0 && m.selectedIdx < len(m.jobs) {
+				job := m.jobs[m.selectedIdx]
+				m.commitMsgFromView = m.currentView
+				m.commitMsgJobID = job.ID
+				m.commitMsgContent = ""
+				m.commitMsgScroll = 0
+				return m, m.fetchCommitMsg(&job)
+			} else if m.currentView == tuiViewReview && m.currentReview != nil && m.currentReview.Job != nil {
+				job := m.currentReview.Job
+				m.commitMsgFromView = m.currentView
+				m.commitMsgJobID = job.ID
+				m.commitMsgContent = ""
+				m.commitMsgScroll = 0
+				return m, m.fetchCommitMsg(job)
+			}
+
+		case "?":
+			// Toggle help modal
+			if m.currentView == tuiViewHelp {
+				m.currentView = m.helpFromView
+				return m, nil
+			}
+			if m.currentView == tuiViewQueue || m.currentView == tuiViewReview {
+				m.helpFromView = m.currentView
+				m.currentView = tuiViewHelp
+				return m, nil
 			}
 
 		case "esc":
@@ -1704,6 +1897,14 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.currentView = tuiViewReview
 					m.promptScroll = 0
 				}
+			} else if m.currentView == tuiViewCommitMsg {
+				// Go back to originating view
+				m.currentView = m.commitMsgFromView
+				m.commitMsgContent = ""
+				m.commitMsgScroll = 0
+			} else if m.currentView == tuiViewHelp {
+				// Go back to previous view
+				m.currentView = m.helpFromView
 			}
 		}
 
@@ -2001,16 +2202,16 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-	case tuiRespondResultMsg:
+	case tuiCommentResultMsg:
 		if msg.err != nil {
 			m.err = msg.err
-			// Keep respondText and respondJobID so user can retry
+			// Keep commentText and commentJobID so user can retry
 		} else {
 			// Success - clear the response state only if still for the same job
 			// (user may have started a new draft for a different job while this was in flight)
-			if m.respondJobID == msg.jobID {
-				m.respondText = ""
-				m.respondJobID = 0
+			if m.commentJobID == msg.jobID {
+				m.commentText = ""
+				m.commentJobID = 0
 			}
 			// Refresh the review to show the new response (if viewing a review)
 			if m.currentView == tuiViewReview && m.currentReview != nil && m.currentReview.JobID == msg.jobID {
@@ -2026,6 +2227,21 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.flashExpiresAt = time.Now().Add(2 * time.Second)
 			m.flashView = msg.view // Use view from trigger time, not current view
 		}
+
+	case tuiCommitMsgMsg:
+		// Ignore stale messages (job changed while fetching)
+		if msg.jobID != m.commitMsgJobID {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.flashMessage = msg.err.Error()
+			m.flashExpiresAt = time.Now().Add(2 * time.Second)
+			m.flashView = m.currentView
+			return m, nil
+		}
+		m.commitMsgContent = msg.content
+		m.commitMsgScroll = 0
+		m.currentView = tuiViewCommitMsg
 
 	case tuiJobsErrMsg:
 		m.err = msg.err
@@ -2105,11 +2321,17 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m tuiModel) View() string {
-	if m.currentView == tuiViewRespond {
+	if m.currentView == tuiViewComment {
 		return m.renderRespondView()
 	}
 	if m.currentView == tuiViewFilter {
 		return m.renderFilterView()
+	}
+	if m.currentView == tuiViewCommitMsg {
+		return m.renderCommitMsgView()
+	}
+	if m.currentView == tuiViewHelp {
+		return m.renderHelpView()
 	}
 	if m.currentView == tuiViewPrompt && m.currentReview != nil {
 		return m.renderPromptView()
@@ -2164,7 +2386,20 @@ func (m tuiModel) renderQueueView() string {
 			m.status.CanceledJobs)
 	}
 	b.WriteString(tuiStatusStyle.Render(statusLine))
-	b.WriteString("\x1b[K\n\x1b[K\n") // Clear status line and blank line
+	b.WriteString("\x1b[K\n") // Clear status line
+
+	// Update notification on line 3 (above the table)
+	if m.updateAvailable != "" {
+		updateStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Bold(true)
+		var updateMsg string
+		if m.updateIsDevBuild {
+			updateMsg = fmt.Sprintf("Dev build - latest release: %s - run 'roborev update --force'", m.updateAvailable)
+		} else {
+			updateMsg = fmt.Sprintf("Update available: %s - run 'roborev update'", m.updateAvailable)
+		}
+		b.WriteString(updateStyle.Render(updateMsg))
+	}
+	b.WriteString("\x1b[K\n") // Clear line 3
 
 	visibleJobList := m.getVisibleJobs()
 	visibleSelectedIdx := m.getVisibleSelectedIdx()
@@ -2282,25 +2517,16 @@ func (m tuiModel) renderQueueView() string {
 	}
 	b.WriteString("\x1b[K\n") // Clear scroll indicator line
 
-	// Status line: flash message (temporary) takes priority, then update notification, then blank
+	// Status line: flash message (temporary)
 	if m.flashMessage != "" && time.Now().Before(m.flashExpiresAt) && m.flashView == tuiViewQueue {
 		flashStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("46")) // Green
 		b.WriteString(flashStyle.Render(m.flashMessage))
-	} else if m.updateAvailable != "" {
-		updateStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Bold(true)
-		var updateMsg string
-		if m.updateIsDevBuild {
-			updateMsg = fmt.Sprintf("Dev build - latest release: %s - run 'roborev update --force'", m.updateAvailable)
-		} else {
-			updateMsg = fmt.Sprintf("Update available: %s - run 'roborev update'", m.updateAvailable)
-		}
-		b.WriteString(updateStyle.Render(updateMsg))
 	}
 	b.WriteString("\x1b[K\n") // Clear to end of line
 
 	// Help (two lines)
-	helpLine1 := "up/down/pgup/pgdn: navigate | enter: review | p: prompt | c: respond | y: copy | q: quit"
-	helpLine2 := "f: filter | h: hide | a: toggle addressed | x: cancel | r: rerun"
+	helpLine1 := "↑/↓: navigate | enter: review | y: copy | m: commit msg | q: quit | ?: help"
+	helpLine2 := "f: filter | h: hide addressed | a: toggle addressed | x: cancel"
 	if len(m.activeRepoFilter) > 0 || m.hideAddressed {
 		helpLine2 += " | esc: clear filters"
 	}
@@ -2571,7 +2797,7 @@ func (m tuiModel) renderReviewView() string {
 
 	// Append responses if any
 	if len(m.currentResponses) > 0 {
-		content.WriteString("\n\n--- Responses ---\n")
+		content.WriteString("\n\n--- Comments ---\n")
 		for _, r := range m.currentResponses {
 			timestamp := r.CreatedAt.Format("Jan 02 15:04")
 			content.WriteString(fmt.Sprintf("\n[%s] %s:\n", timestamp, r.Responder))
@@ -2591,7 +2817,7 @@ func (m tuiModel) renderReviewView() string {
 	}
 
 	// Help text wraps at narrow terminals
-	const helpText = "up/down: scroll | j/k: prev/next | a: addressed | c: respond | y: copy | p: prompt | esc/q: back"
+	const helpText = "↑/↓: scroll | j/k: prev/next | a: addressed | y: copy | m: commit msg | ?: help | esc/q: back"
 	helpLines := 1
 	if m.width > 0 && m.width < len(helpText) {
 		helpLines = (len(helpText) + m.width - 1) / m.width
@@ -2838,14 +3064,14 @@ func (m tuiModel) renderFilterView() string {
 func (m tuiModel) renderRespondView() string {
 	var b strings.Builder
 
-	title := "Respond to Review"
-	if m.respondCommit != "" {
-		title = fmt.Sprintf("Respond to Review (%s)", m.respondCommit)
+	title := "Add Comment"
+	if m.commentCommit != "" {
+		title = fmt.Sprintf("Add Comment (%s)", m.commentCommit)
 	}
 	b.WriteString(tuiTitleStyle.Render(title))
 	b.WriteString("\x1b[K\n\x1b[K\n") // Clear title and blank line
 
-	b.WriteString(tuiStatusStyle.Render("Enter your response (e.g., \"This is a known issue, can be ignored\")"))
+	b.WriteString(tuiStatusStyle.Render("Enter your comment (e.g., \"This is a known issue, can be ignored\")"))
 	b.WriteString("\x1b[K\n\x1b[K\n")
 
 	// Simple text box with border
@@ -2863,14 +3089,14 @@ func (m tuiModel) renderRespondView() string {
 		maxTextLines = 3
 	}
 
-	if m.respondText == "" {
+	if m.commentText == "" {
 		// Show placeholder (styled, but we pad manually to avoid ANSI issues)
-		placeholder := "Type your response..."
+		placeholder := "Type your comment..."
 		padded := placeholder + strings.Repeat(" ", boxWidth-2-len(placeholder))
 		b.WriteString("| " + tuiStatusStyle.Render(padded) + " |\x1b[K\n")
 		textLinesWritten++
 	} else {
-		lines := strings.Split(m.respondText, "\n")
+		lines := strings.Split(m.commentText, "\n")
 		for _, line := range lines {
 			if textLinesWritten >= maxTextLines {
 				break
@@ -2911,40 +3137,209 @@ func (m tuiModel) renderRespondView() string {
 	return b.String()
 }
 
-func (m tuiModel) submitResponse(jobID int64, text string) tea.Cmd {
+func (m tuiModel) submitComment(jobID int64, text string) tea.Cmd {
 	return func() tea.Msg {
-		responder := os.Getenv("USER")
-		if responder == "" {
-			responder = "anonymous"
+		commenter := os.Getenv("USER")
+		if commenter == "" {
+			commenter = "anonymous"
 		}
 
 		payload := map[string]interface{}{
 			"job_id":    jobID,
-			"responder": responder,
-			"response":  strings.TrimSpace(text),
+			"commenter": commenter,
+			"comment":   strings.TrimSpace(text),
 		}
 
 		body, err := json.Marshal(payload)
 		if err != nil {
-			return tuiRespondResultMsg{jobID: jobID, err: fmt.Errorf("marshal request: %w", err)}
+			return tuiCommentResultMsg{jobID: jobID, err: fmt.Errorf("marshal request: %w", err)}
 		}
 
 		resp, err := m.client.Post(
-			fmt.Sprintf("%s/api/respond", m.serverAddr),
+			fmt.Sprintf("%s/api/comment", m.serverAddr),
 			"application/json",
 			bytes.NewReader(body),
 		)
 		if err != nil {
-			return tuiRespondResultMsg{jobID: jobID, err: fmt.Errorf("submit response: %w", err)}
+			return tuiCommentResultMsg{jobID: jobID, err: fmt.Errorf("submit comment: %w", err)}
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusCreated {
-			return tuiRespondResultMsg{jobID: jobID, err: fmt.Errorf("submit response: HTTP %d", resp.StatusCode)}
+			return tuiCommentResultMsg{jobID: jobID, err: fmt.Errorf("submit comment: HTTP %d", resp.StatusCode)}
 		}
 
-		return tuiRespondResultMsg{jobID: jobID, err: nil}
+		return tuiCommentResultMsg{jobID: jobID, err: nil}
 	}
+}
+
+func (m tuiModel) renderCommitMsgView() string {
+	var b strings.Builder
+
+	b.WriteString(tuiTitleStyle.Render("Commit Message"))
+	b.WriteString("\x1b[K\n") // Clear to end of line
+
+	if m.commitMsgContent == "" {
+		b.WriteString(tuiStatusStyle.Render("Loading commit message..."))
+		b.WriteString("\x1b[K\n")
+		// Pad to fill terminal
+		linesWritten := 2
+		for linesWritten < m.height-1 {
+			b.WriteString("\x1b[K\n")
+			linesWritten++
+		}
+		b.WriteString(tuiHelpStyle.Render("esc/q: back"))
+		b.WriteString("\x1b[K")
+		b.WriteString("\x1b[J")
+		return b.String()
+	}
+
+	// Wrap text to terminal width minus padding
+	wrapWidth := max(20, min(m.width-4, 200))
+	lines := wrapText(m.commitMsgContent, wrapWidth)
+
+	// Reserve: title(1) + scroll indicator(1) + help(1) + margin(1)
+	visibleLines := m.height - 4
+	if visibleLines < 1 {
+		visibleLines = 1
+	}
+
+	// Clamp scroll position to valid range
+	maxScroll := len(lines) - visibleLines
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	start := m.commitMsgScroll
+	if start > maxScroll {
+		start = maxScroll
+	}
+	if start < 0 {
+		start = 0
+	}
+	end := min(start+visibleLines, len(lines))
+
+	linesWritten := 0
+	for i := start; i < end; i++ {
+		b.WriteString(lines[i])
+		b.WriteString("\x1b[K\n") // Clear to end of line before newline
+		linesWritten++
+	}
+
+	// Pad with clear-to-end-of-line sequences to prevent ghost text
+	for linesWritten < visibleLines {
+		b.WriteString("\x1b[K\n")
+		linesWritten++
+	}
+
+	// Scroll indicator
+	if len(lines) > visibleLines {
+		scrollInfo := fmt.Sprintf("[%d-%d of %d lines]", start+1, end, len(lines))
+		b.WriteString(tuiStatusStyle.Render(scrollInfo))
+	}
+	b.WriteString("\x1b[K\n") // Clear scroll indicator line
+
+	b.WriteString(tuiHelpStyle.Render("up/down: scroll | esc/q: back"))
+	b.WriteString("\x1b[K") // Clear help line
+	b.WriteString("\x1b[J") // Clear to end of screen to prevent artifacts
+
+	return b.String()
+}
+
+func (m tuiModel) renderHelpView() string {
+	var b strings.Builder
+
+	b.WriteString(tuiTitleStyle.Render("Keyboard Shortcuts"))
+	b.WriteString("\x1b[K\n\x1b[K\n")
+
+	// Define shortcuts in groups
+	shortcuts := []struct {
+		group string
+		keys  []struct{ key, desc string }
+	}{
+		{
+			group: "Navigation",
+			keys: []struct{ key, desc string }{
+				{"↑/k", "Move up / previous review"},
+				{"↓/j", "Move down / next review"},
+				{"PgUp/PgDn", "Scroll by page"},
+				{"enter", "View review details"},
+				{"esc", "Go back / clear filter"},
+				{"q", "Quit"},
+			},
+		},
+		{
+			group: "Actions",
+			keys: []struct{ key, desc string }{
+				{"a", "Mark as addressed"},
+				{"c", "Add comment"},
+				{"x", "Cancel job"},
+				{"r", "Re-run job"},
+				{"y", "Copy review to clipboard"},
+				{"m", "Show commit message(s)"},
+			},
+		},
+		{
+			group: "Filtering",
+			keys: []struct{ key, desc string }{
+				{"f", "Filter by repository"},
+				{"h", "Toggle hide addressed"},
+			},
+		},
+		{
+			group: "Review View",
+			keys: []struct{ key, desc string }{
+				{"p", "View prompt"},
+				{"↑/↓", "Scroll content"},
+				{"←/→", "Previous / next review"},
+			},
+		},
+	}
+
+	// Calculate visible area
+	// Reserve: title(1) + blank(1) + padding + help(1)
+	reservedLines := 3
+	visibleLines := m.height - reservedLines
+	if visibleLines < 5 {
+		visibleLines = 5
+	}
+
+	linesWritten := 0
+	for _, g := range shortcuts {
+		if linesWritten >= visibleLines-2 {
+			break
+		}
+		// Group header
+		b.WriteString(tuiSelectedStyle.Render(g.group))
+		b.WriteString("\x1b[K\n")
+		linesWritten++
+
+		for _, k := range g.keys {
+			if linesWritten >= visibleLines {
+				break
+			}
+			line := fmt.Sprintf("  %-12s %s", k.key, k.desc)
+			b.WriteString(line)
+			b.WriteString("\x1b[K\n")
+			linesWritten++
+		}
+		// Blank line between groups
+		if linesWritten < visibleLines {
+			b.WriteString("\x1b[K\n")
+			linesWritten++
+		}
+	}
+
+	// Pad remaining space
+	for linesWritten < visibleLines {
+		b.WriteString("\x1b[K\n")
+		linesWritten++
+	}
+
+	b.WriteString(tuiHelpStyle.Render("esc/q/?: close"))
+	b.WriteString("\x1b[K")
+	b.WriteString("\x1b[J") // Clear to end of screen
+
+	return b.String()
 }
 
 func tuiCmd() *cobra.Command {

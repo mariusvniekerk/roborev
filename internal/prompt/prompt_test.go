@@ -212,14 +212,14 @@ func TestBuildPromptWithPreviousReviewsAndResponses(t *testing.T) {
 	db.ClaimJob("test-worker")
 	db.CompleteJob(job.ID, "test", "prompt", "Found potential memory leak in connection pool")
 
-	// Add responses to the previous review
-	_, err = db.AddResponseToJob(job.ID, "alice", "Known issue, will fix in next sprint")
+	// Add comments to the previous review
+	_, err = db.AddCommentToJob(job.ID, "alice", "Known issue, will fix in next sprint")
 	if err != nil {
-		t.Fatalf("AddResponseToJob failed: %v", err)
+		t.Fatalf("AddCommentToJob failed: %v", err)
 	}
-	_, err = db.AddResponseToJob(job.ID, "bob", "Added to tech debt backlog")
+	_, err = db.AddCommentToJob(job.ID, "bob", "Added to tech debt backlog")
 	if err != nil {
-		t.Fatalf("AddResponseToJob failed: %v", err)
+		t.Fatalf("AddCommentToJob failed: %v", err)
 	}
 
 	// Also add commits 4 and 5 to DB
@@ -244,25 +244,25 @@ func TestBuildPromptWithPreviousReviewsAndResponses(t *testing.T) {
 		t.Error("Prompt should contain the previous review text")
 	}
 
-	// Should contain responses to the previous review
-	if !strings.Contains(prompt, "Responses to this review:") {
-		t.Error("Prompt should contain responses section for previous review")
+	// Should contain comments on the previous review
+	if !strings.Contains(prompt, "Comments on this review:") {
+		t.Error("Prompt should contain comments section for previous review")
 	}
 
 	if !strings.Contains(prompt, "alice") {
-		t.Error("Prompt should contain responder 'alice'")
+		t.Error("Prompt should contain commenter 'alice'")
 	}
 
 	if !strings.Contains(prompt, "Known issue, will fix in next sprint") {
-		t.Error("Prompt should contain alice's response text")
+		t.Error("Prompt should contain alice's comment text")
 	}
 
 	if !strings.Contains(prompt, "bob") {
-		t.Error("Prompt should contain responder 'bob'")
+		t.Error("Prompt should contain commenter 'bob'")
 	}
 
 	if !strings.Contains(prompt, "Added to tech debt backlog") {
-		t.Error("Prompt should contain bob's response text")
+		t.Error("Prompt should contain bob's comment text")
 	}
 }
 
@@ -586,9 +586,9 @@ func TestBuildPromptWithPreviousAttemptsAndResponses(t *testing.T) {
 	db.CompleteJob(job.ID, "test", "prompt", "Found issue: missing null check")
 
 	// Add a response to the previous review
-	_, err = db.AddResponseToJob(job.ID, "developer", "This is intentional, the value is never null here")
+	_, err = db.AddCommentToJob(job.ID, "developer", "This is intentional, the value is never null here")
 	if err != nil {
-		t.Fatalf("AddResponseToJob failed: %v", err)
+		t.Fatalf("AddCommentToJob failed: %v", err)
 	}
 
 	// Build prompt for a new review of the same commit
@@ -607,17 +607,17 @@ func TestBuildPromptWithPreviousAttemptsAndResponses(t *testing.T) {
 		t.Error("Prompt should contain the previous review text")
 	}
 
-	// Should contain the response
-	if !strings.Contains(prompt, "Responses to this review:") {
-		t.Error("Prompt should contain responses section")
+	// Should contain the comment
+	if !strings.Contains(prompt, "Comments on this review:") {
+		t.Error("Prompt should contain comments section")
 	}
 
 	if !strings.Contains(prompt, "This is intentional") {
-		t.Error("Prompt should contain the response text")
+		t.Error("Prompt should contain the comment text")
 	}
 
 	if !strings.Contains(prompt, "developer") {
-		t.Error("Prompt should contain the responder name")
+		t.Error("Prompt should contain the commenter name")
 	}
 }
 

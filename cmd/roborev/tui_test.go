@@ -208,8 +208,9 @@ func TestTUIToggleAddressedNoReview(t *testing.T) {
 
 func TestTUIAddressFromReviewViewWithHideAddressed(t *testing.T) {
 	// When hideAddressed is on and user marks a review as addressed from review view,
-	// selection should move to next visible job when returning to queue (on escape),
-	// not immediately on 'a' press (so j/k navigation still works in review view)
+	// selectedIdx should NOT change immediately. The findNextViewableJob/findPrevViewableJob
+	// functions start from selectedIdx +/- 1, so left/right navigation will naturally
+	// find the correct adjacent visible jobs. Selection only moves on escape.
 	m := newTuiModel("http://localhost")
 	m.currentView = tuiViewReview
 	m.hideAddressed = true
@@ -228,26 +229,29 @@ func TestTUIAddressFromReviewViewWithHideAddressed(t *testing.T) {
 		Job:      &m.jobs[1],
 	}
 
-	// Press 'a' to mark as addressed - selection should NOT move yet
+	// Press 'a' to mark as addressed - selection stays at current position
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	m2 := updated.(tuiModel)
 
-	// Selection stays at index 1 so j/k navigation still works relative to current review
+	// Selection stays at index 1 so left/right navigation works correctly from current position
 	if m2.selectedIdx != 1 {
 		t.Errorf("After 'a': expected selectedIdx=1 (unchanged), got %d", m2.selectedIdx)
 	}
 	if m2.selectedJobID != 2 {
 		t.Errorf("After 'a': expected selectedJobID=2 (unchanged), got %d", m2.selectedJobID)
 	}
+	// Still viewing the current review
+	if m2.currentView != tuiViewReview {
+		t.Errorf("After 'a': expected view=review (unchanged), got %d", m2.currentView)
+	}
 
-	// Press escape to return to queue - NOW selection should move
+	// Press escape to return to queue - NOW selection moves via normalizeSelectionIfHidden
 	updated2, _ := m2.Update(tea.KeyMsg{Type: tea.KeyEscape})
 	m3 := updated2.(tuiModel)
 
-	// Selection should have moved to next visible job (job 3, index 2)
-	// since job 2 is now addressed and hidden
+	// Selection moved to next visible job (job 3, index 2)
 	if m3.selectedIdx != 2 {
-		t.Errorf("After escape: expected selectedIdx=2 (next visible job), got %d", m3.selectedIdx)
+		t.Errorf("After escape: expected selectedIdx=2, got %d", m3.selectedIdx)
 	}
 	if m3.selectedJobID != 3 {
 		t.Errorf("After escape: expected selectedJobID=3, got %d", m3.selectedJobID)
@@ -2379,7 +2383,7 @@ func TestTUIReviewNavigationBoundaries(t *testing.T) {
 	m.currentView = tuiViewReview
 	m.currentReview = &storage.Review{ID: 10, Job: &storage.ReviewJob{ID: 1}}
 
-	// Press 'k' at first viewable job - should be no-op
+	// Press 'k' (right) at first viewable job - should show flash message
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
 	m2 := updated.(tuiModel)
 
@@ -2392,13 +2396,22 @@ func TestTUIReviewNavigationBoundaries(t *testing.T) {
 	if cmd != nil {
 		t.Error("Expected no command at boundary")
 	}
+	if m2.flashMessage != "No newer review" {
+		t.Errorf("Expected flash message 'No newer review', got %q", m2.flashMessage)
+	}
+	if m2.flashView != tuiViewReview {
+		t.Errorf("Expected flashView to be tuiViewReview, got %d", m2.flashView)
+	}
+	if m2.flashExpiresAt.IsZero() || m2.flashExpiresAt.Before(time.Now()) {
+		t.Errorf("Expected flashExpiresAt to be set in the future, got %v", m2.flashExpiresAt)
+	}
 
 	// Now at last viewable job
 	m.selectedIdx = 2
 	m.selectedJobID = 3
 	m.currentReview = &storage.Review{ID: 30, Job: &storage.ReviewJob{ID: 3}}
 
-	// Press 'j' at last viewable job - should be no-op
+	// Press 'j' (left) at last viewable job - should show flash message
 	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	m3 := updated.(tuiModel)
 
@@ -2410,6 +2423,15 @@ func TestTUIReviewNavigationBoundaries(t *testing.T) {
 	}
 	if cmd != nil {
 		t.Error("Expected no command at boundary")
+	}
+	if m3.flashMessage != "No older review" {
+		t.Errorf("Expected flash message 'No older review', got %q", m3.flashMessage)
+	}
+	if m3.flashView != tuiViewReview {
+		t.Errorf("Expected flashView to be tuiViewReview, got %d", m3.flashView)
+	}
+	if m3.flashExpiresAt.IsZero() || m3.flashExpiresAt.Before(time.Now()) {
+		t.Errorf("Expected flashExpiresAt to be set in the future, got %v", m3.flashExpiresAt)
 	}
 }
 
@@ -2609,6 +2631,90 @@ func TestTUIQueueViewArrowsMatchUpDown(t *testing.T) {
 
 	if m3.selectedIdx != 0 {
 		t.Errorf("Right arrow: expected selectedIdx=0, got %d", m3.selectedIdx)
+	}
+}
+
+func TestTUIQueueNavigationBoundaries(t *testing.T) {
+	// Test flash messages when navigating at queue boundaries
+	m := newTuiModel("http://localhost")
+
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, Status: storage.JobStatusDone},
+		{ID: 2, Status: storage.JobStatusDone},
+		{ID: 3, Status: storage.JobStatusDone},
+	}
+	m.selectedIdx = 0
+	m.selectedJobID = 1
+	m.currentView = tuiViewQueue
+	m.hasMore = false // No more jobs to load
+
+	// Press 'up' at top of queue - should show flash message
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m2 := updated.(tuiModel)
+
+	if m2.selectedIdx != 0 {
+		t.Errorf("Expected selectedIdx to remain 0 at top, got %d", m2.selectedIdx)
+	}
+	if m2.flashMessage != "No newer review" {
+		t.Errorf("Expected flash message 'No newer review', got %q", m2.flashMessage)
+	}
+	if m2.flashView != tuiViewQueue {
+		t.Errorf("Expected flashView to be tuiViewQueue, got %d", m2.flashView)
+	}
+	if m2.flashExpiresAt.IsZero() || m2.flashExpiresAt.Before(time.Now()) {
+		t.Errorf("Expected flashExpiresAt to be set in the future, got %v", m2.flashExpiresAt)
+	}
+
+	// Now at bottom of queue
+	m.selectedIdx = 2
+	m.selectedJobID = 3
+	m.flashMessage = "" // Clear
+
+	// Press 'down' at bottom of queue - should show flash message
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m3 := updated.(tuiModel)
+
+	if m3.selectedIdx != 2 {
+		t.Errorf("Expected selectedIdx to remain 2 at bottom, got %d", m3.selectedIdx)
+	}
+	if m3.flashMessage != "No older review" {
+		t.Errorf("Expected flash message 'No older review', got %q", m3.flashMessage)
+	}
+	if m3.flashView != tuiViewQueue {
+		t.Errorf("Expected flashView to be tuiViewQueue, got %d", m3.flashView)
+	}
+	if m3.flashExpiresAt.IsZero() || m3.flashExpiresAt.Before(time.Now()) {
+		t.Errorf("Expected flashExpiresAt to be set in the future, got %v", m3.flashExpiresAt)
+	}
+}
+
+func TestTUIQueueNavigationBoundariesWithFilter(t *testing.T) {
+	// Test flash messages at bottom when filter is active (prevents auto-load)
+	m := newTuiModel("http://localhost")
+
+	m.jobs = []storage.ReviewJob{
+		{ID: 1, Status: storage.JobStatusDone, RepoPath: "/repo1"},
+		{ID: 2, Status: storage.JobStatusDone, RepoPath: "/repo2"},
+	}
+	m.selectedIdx = 0
+	m.selectedJobID = 1
+	m.currentView = tuiViewQueue
+	m.hasMore = true // More jobs available but...
+	m.activeRepoFilter = []string{"/repo1"} // Filter is active, prevents auto-load
+
+	// Press 'down' - only job 1 matches filter, so we're at bottom
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m2 := updated.(tuiModel)
+
+	// Should show flash since filter prevents loading more
+	if m2.flashMessage != "No older review" {
+		t.Errorf("Expected flash message 'No older review' with filter active, got %q", m2.flashMessage)
+	}
+	if m2.flashView != tuiViewQueue {
+		t.Errorf("Expected flashView to be tuiViewQueue, got %d", m2.flashView)
+	}
+	if m2.flashExpiresAt.IsZero() || m2.flashExpiresAt.Before(time.Now()) {
+		t.Errorf("Expected flashExpiresAt to be set in the future, got %v", m2.flashExpiresAt)
 	}
 }
 
@@ -4035,9 +4141,9 @@ func TestTUIRenderFailedJobNoBranchShown(t *testing.T) {
 
 func TestTUIVisibleLinesCalculationNoVerdict(t *testing.T) {
 	// Test that visibleLines = height - 3 when no verdict (title + status + help)
-	// Help text is 87 chars, so use width >= 87 to avoid wrapping
+	// Help text is ~106 chars, so use width >= 110 to avoid wrapping
 	m := newTuiModel("http://localhost")
-	m.width = 100
+	m.width = 120
 	m.height = 10 // Small height to test calculation
 	m.currentView = tuiViewReview
 	// Create 20 lines of content to ensure scrolling
@@ -4077,10 +4183,10 @@ func TestTUIVisibleLinesCalculationNoVerdict(t *testing.T) {
 
 func TestTUIVisibleLinesCalculationWithVerdict(t *testing.T) {
 	// Test that visibleLines = height - 4 when verdict present (title + verdict + status + help)
-	// Help text is 87 chars, so use width >= 87 to avoid wrapping
+	// Help text is ~106 chars, so use width >= 110 to avoid wrapping
 	verdictPass := "P"
 	m := newTuiModel("http://localhost")
-	m.width = 100
+	m.width = 120
 	m.height = 10 // Small height to test calculation
 	m.currentView = tuiViewReview
 	// Create 20 lines of content to ensure scrolling
@@ -4119,7 +4225,7 @@ func TestTUIVisibleLinesCalculationWithVerdict(t *testing.T) {
 
 func TestTUIVisibleLinesCalculationNarrowTerminal(t *testing.T) {
 	// Test that visibleLines accounts for help text wrapping at narrow terminals
-	// Help text is 87 chars, at width=50 it wraps to 2 lines: ceil(87/50) = 2
+	// Help text is ~91 chars, at width=50 it wraps to 2 lines: ceil(91/50) = 2
 	m := newTuiModel("http://localhost")
 	m.width = 50
 	m.height = 10
@@ -4160,7 +4266,7 @@ func TestTUIVisibleLinesCalculationNarrowTerminal(t *testing.T) {
 
 func TestTUIVisibleLinesCalculationNarrowTerminalWithVerdict(t *testing.T) {
 	// Test narrow terminal with verdict - validates extra header line branch
-	// Help text is 87 chars, at width=50 it wraps to 2 lines: ceil(87/50) = 2
+	// Help text is ~91 chars, at width=50 it wraps to 2 lines: ceil(91/50) = 2
 	verdictFail := "F"
 	m := newTuiModel("http://localhost")
 	m.width = 50
@@ -4234,7 +4340,7 @@ func TestTUIVisibleLinesCalculationLongTitleWraps(t *testing.T) {
 	// "Review #1 very-long-repository-name-here abc1234..def5678 (claude-code) on feature/very-long-branch-name [ADDRESSED]"
 	// = 7 + 3 + 31 + 17 + 14 + 34 + 12 = ~118 chars
 	// At width=50: ceil(118/50) = 3 title lines
-	// Help at width=50: ceil(87/50) = 2 help lines
+	// Help at width=50: ceil(91/50) = 2 help lines
 	// Non-content: title (3) + status line (1) + help (2) = 6
 	// visibleLines = 12 - 6 = 6
 	contentCount := 0
@@ -4289,7 +4395,7 @@ func TestTUIFetchReviewFallbackSHAResponses(t *testing.T) {
 			return
 		}
 
-		if r.URL.Path == "/api/responses" {
+		if r.URL.Path == "/api/comments" {
 			jobID := r.URL.Query().Get("job_id")
 			sha := r.URL.Query().Get("sha")
 
@@ -4375,7 +4481,7 @@ func TestTUIFetchReviewNoFallbackForRangeReview(t *testing.T) {
 			return
 		}
 
-		if r.URL.Path == "/api/responses" {
+		if r.URL.Path == "/api/comments" {
 			// Return empty responses for job_id
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"responses": []storage.Response{},
@@ -5148,28 +5254,28 @@ func TestTUIRespondTextPreservation(t *testing.T) {
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
 	m = updated.(tuiModel)
 
-	if m.currentView != tuiViewRespond {
-		t.Fatalf("Expected tuiViewRespond, got %v", m.currentView)
+	if m.currentView != tuiViewComment {
+		t.Fatalf("Expected tuiViewComment, got %v", m.currentView)
 	}
-	if m.respondJobID != 1 {
-		t.Fatalf("Expected respondJobID=1, got %d", m.respondJobID)
+	if m.commentJobID != 1 {
+		t.Fatalf("Expected commentJobID=1, got %d", m.commentJobID)
 	}
 
 	// 2. Type some text
-	m.respondText = "My draft response"
+	m.commentText = "My draft response"
 
 	// 3. Simulate failed submission - press enter then receive error
-	m.currentView = m.respondFromView // Simulate what happens on enter
-	errMsg := tuiRespondResultMsg{jobID: 1, err: fmt.Errorf("network error")}
+	m.currentView = m.commentFromView // Simulate what happens on enter
+	errMsg := tuiCommentResultMsg{jobID: 1, err: fmt.Errorf("network error")}
 	updated, _ = m.Update(errMsg)
 	m = updated.(tuiModel)
 
 	// Text should be preserved after error
-	if m.respondText != "My draft response" {
-		t.Errorf("Expected text preserved after error, got %q", m.respondText)
+	if m.commentText != "My draft response" {
+		t.Errorf("Expected text preserved after error, got %q", m.commentText)
 	}
-	if m.respondJobID != 1 {
-		t.Errorf("Expected respondJobID preserved after error, got %d", m.respondJobID)
+	if m.commentJobID != 1 {
+		t.Errorf("Expected commentJobID preserved after error, got %d", m.commentJobID)
 	}
 
 	// 4. Re-open respond for Job 1 (Retry) - text should still be there
@@ -5178,8 +5284,8 @@ func TestTUIRespondTextPreservation(t *testing.T) {
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
 	m = updated.(tuiModel)
 
-	if m.respondText != "My draft response" {
-		t.Errorf("Expected text preserved on retry for same job, got %q", m.respondText)
+	if m.commentText != "My draft response" {
+		t.Errorf("Expected text preserved on retry for same job, got %q", m.commentText)
 	}
 
 	// 5. Go back to queue and switch to Job 2 - text should be cleared
@@ -5189,11 +5295,11 @@ func TestTUIRespondTextPreservation(t *testing.T) {
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
 	m = updated.(tuiModel)
 
-	if m.respondText != "" {
-		t.Errorf("Expected text cleared for different job, got %q", m.respondText)
+	if m.commentText != "" {
+		t.Errorf("Expected text cleared for different job, got %q", m.commentText)
 	}
-	if m.respondJobID != 2 {
-		t.Errorf("Expected respondJobID=2, got %d", m.respondJobID)
+	if m.commentJobID != 2 {
+		t.Errorf("Expected commentJobID=2, got %d", m.commentJobID)
 	}
 }
 
@@ -5205,32 +5311,32 @@ func TestTUIRespondSuccessClearsOnlyMatchingJob(t *testing.T) {
 	}
 
 	// User submitted response for job 1, then started drafting for job 2
-	m.respondJobID = 2
-	m.respondText = "New draft for job 2"
+	m.commentJobID = 2
+	m.commentText = "New draft for job 2"
 
 	// Success message arrives for job 1 (the old submission)
-	successMsg := tuiRespondResultMsg{jobID: 1, err: nil}
+	successMsg := tuiCommentResultMsg{jobID: 1, err: nil}
 	updated, _ := m.Update(successMsg)
 	m = updated.(tuiModel)
 
 	// Draft for job 2 should NOT be cleared
-	if m.respondText != "New draft for job 2" {
-		t.Errorf("Expected draft preserved for different job, got %q", m.respondText)
+	if m.commentText != "New draft for job 2" {
+		t.Errorf("Expected draft preserved for different job, got %q", m.commentText)
 	}
-	if m.respondJobID != 2 {
-		t.Errorf("Expected respondJobID=2 preserved, got %d", m.respondJobID)
+	if m.commentJobID != 2 {
+		t.Errorf("Expected commentJobID=2 preserved, got %d", m.commentJobID)
 	}
 
 	// Now success for job 2 should clear
-	successMsg = tuiRespondResultMsg{jobID: 2, err: nil}
+	successMsg = tuiCommentResultMsg{jobID: 2, err: nil}
 	updated, _ = m.Update(successMsg)
 	m = updated.(tuiModel)
 
-	if m.respondText != "" {
-		t.Errorf("Expected text cleared for matching job, got %q", m.respondText)
+	if m.commentText != "" {
+		t.Errorf("Expected text cleared for matching job, got %q", m.commentText)
 	}
-	if m.respondJobID != 0 {
-		t.Errorf("Expected respondJobID=0 after success, got %d", m.respondJobID)
+	if m.commentJobID != 0 {
+		t.Errorf("Expected commentJobID=0 after success, got %d", m.commentJobID)
 	}
 }
 
@@ -5268,42 +5374,42 @@ func TestTUIFilterBackspaceMultiByte(t *testing.T) {
 
 func TestTUIRespondBackspaceMultiByte(t *testing.T) {
 	m := newTuiModel("http://localhost")
-	m.currentView = tuiViewRespond
-	m.respondJobID = 1
+	m.currentView = tuiViewComment
+	m.commentJobID = 1
 
 	// Type text with multi-byte characters
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Hello 世界")})
 	m = updated.(tuiModel)
 
-	if m.respondText != "Hello 世界" {
-		t.Errorf("Expected respondText='Hello 世界', got %q", m.respondText)
+	if m.commentText != "Hello 世界" {
+		t.Errorf("Expected commentText='Hello 世界', got %q", m.commentText)
 	}
 
 	// Backspace should remove '界' (one character), not corrupt it
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
 	m = updated.(tuiModel)
-	if m.respondText != "Hello 世" {
-		t.Errorf("Expected respondText='Hello 世' after backspace, got %q", m.respondText)
+	if m.commentText != "Hello 世" {
+		t.Errorf("Expected commentText='Hello 世' after backspace, got %q", m.commentText)
 	}
 
 	// Backspace should remove '世'
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
 	m = updated.(tuiModel)
-	if m.respondText != "Hello " {
-		t.Errorf("Expected respondText='Hello ' after second backspace, got %q", m.respondText)
+	if m.commentText != "Hello " {
+		t.Errorf("Expected commentText='Hello ' after second backspace, got %q", m.commentText)
 	}
 }
 
 func TestTUIRespondViewTruncationMultiByte(t *testing.T) {
 	m := newTuiModel("http://localhost")
-	m.currentView = tuiViewRespond
-	m.respondJobID = 1
+	m.currentView = tuiViewComment
+	m.commentJobID = 1
 	m.width = 30
 	m.height = 20
 
 	// Set text with multi-byte characters that would be truncated
 	// The box has boxWidth-2 available space for text
-	m.respondText = "あいうえおかきくけこさしすせそ" // 15 Japanese characters (30 cells wide)
+	m.commentText = "あいうえおかきくけこさしすせそ" // 15 Japanese characters (30 cells wide)
 
 	// Render should not panic or corrupt characters
 	output := m.renderRespondView()
@@ -5342,13 +5448,13 @@ func TestTUIRespondViewTruncationMultiByte(t *testing.T) {
 
 func TestTUIRespondViewTabExpansion(t *testing.T) {
 	m := newTuiModel("http://localhost")
-	m.currentView = tuiViewRespond
-	m.respondJobID = 1
+	m.currentView = tuiViewComment
+	m.commentJobID = 1
 	m.width = 40
 	m.height = 20
 
 	// Set text with tabs
-	m.respondText = "a\tb\tc"
+	m.commentText = "a\tb\tc"
 
 	output := m.renderRespondView()
 	plainOutput := stripANSI(output)
@@ -5580,6 +5686,67 @@ func TestTUIFlashMessageNotShownInDifferentView(t *testing.T) {
 	output := m.renderReviewView()
 	if strings.Contains(output, "Copied to clipboard") {
 		t.Error("Flash message should not appear when viewing different view than where it was triggered")
+	}
+}
+
+func TestTUIUpdateNotificationInQueueView(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewQueue
+	m.width = 80
+	m.height = 24
+	m.updateAvailable = "1.2.3"
+
+	output := m.renderQueueView()
+	if !strings.Contains(output, "Update available: 1.2.3") {
+		t.Error("Expected update notification in queue view")
+	}
+	if !strings.Contains(output, "run 'roborev update'") {
+		t.Error("Expected update instructions in queue view")
+	}
+
+	// Verify update notification appears on line 3 (index 2) - above the table
+	// Layout: line 0 = title, line 1 = status, line 2 = update notification
+	lines := strings.Split(output, "\n")
+	if len(lines) < 3 {
+		t.Fatalf("Expected at least 3 lines, got %d", len(lines))
+	}
+	// Line 2 (third line) should contain the update notification
+	if !strings.Contains(lines[2], "Update available") {
+		t.Errorf("Expected update notification on line 3 (index 2), got: %q", lines[2])
+	}
+}
+
+func TestTUIUpdateNotificationDevBuild(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewQueue
+	m.width = 80
+	m.height = 24
+	m.updateAvailable = "1.2.3"
+	m.updateIsDevBuild = true
+
+	output := m.renderQueueView()
+	if !strings.Contains(output, "Dev build") {
+		t.Error("Expected 'Dev build' in notification for dev builds")
+	}
+	if !strings.Contains(output, "roborev update --force") {
+		t.Error("Expected --force flag in update instructions for dev builds")
+	}
+}
+
+func TestTUIUpdateNotificationNotInReviewView(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewReview
+	m.width = 80
+	m.height = 24
+	m.updateAvailable = "1.2.3"
+	m.currentReview = &storage.Review{
+		ID:     1,
+		Output: "Test review content",
+	}
+
+	output := m.renderReviewView()
+	if strings.Contains(output, "Update available") {
+		t.Error("Update notification should not appear in review view")
 	}
 }
 
@@ -6284,4 +6451,294 @@ func TestTUIReconnectOnConsecutiveErrors(t *testing.T) {
 			t.Error("Expected no commands on failed reconnection")
 		}
 	})
+}
+
+func TestTUICommitMsgViewNavigationFromQueue(t *testing.T) {
+	// Test that pressing escape in commit message view returns to the originating view (queue)
+	m := newTuiModel("http://localhost")
+	m.jobs = []storage.ReviewJob{{ID: 1, GitRef: "abc123", Status: storage.JobStatusDone}}
+	m.selectedIdx = 0
+	m.selectedJobID = 1
+	m.currentView = tuiViewQueue
+	m.commitMsgJobID = 1              // Set to match incoming message (normally set by 'm' key handler)
+	m.commitMsgFromView = tuiViewQueue // Track where we came from
+
+	// Simulate receiving commit message content (sets view to CommitMsg)
+	updated, _ := m.Update(tuiCommitMsgMsg{jobID: 1, content: "test message"})
+	m2 := updated.(tuiModel)
+
+	if m2.currentView != tuiViewCommitMsg {
+		t.Errorf("Expected tuiViewCommitMsg, got %d", m2.currentView)
+	}
+
+	// Press escape to go back
+	updated, _ = m2.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	m3 := updated.(tuiModel)
+
+	if m3.currentView != tuiViewQueue {
+		t.Errorf("Expected to return to tuiViewQueue, got %d", m3.currentView)
+	}
+	if m3.commitMsgContent != "" {
+		t.Error("Expected commitMsgContent to be cleared")
+	}
+}
+
+func TestTUICommitMsgViewNavigationFromReview(t *testing.T) {
+	// Test that pressing escape in commit message view returns to the originating view (review)
+	m := newTuiModel("http://localhost")
+	job := &storage.ReviewJob{ID: 1, GitRef: "abc123", Status: storage.JobStatusDone}
+	m.jobs = []storage.ReviewJob{*job}
+	m.currentReview = &storage.Review{ID: 1, JobID: 1, Job: job}
+	m.currentView = tuiViewReview
+	m.commitMsgFromView = tuiViewReview
+	m.commitMsgContent = "test message"
+	m.currentView = tuiViewCommitMsg
+
+	// Press escape to go back
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	m2 := updated.(tuiModel)
+
+	if m2.currentView != tuiViewReview {
+		t.Errorf("Expected to return to tuiViewReview, got %d", m2.currentView)
+	}
+}
+
+func TestTUICommitMsgViewNavigationWithQ(t *testing.T) {
+	// Test that pressing 'q' in commit message view also returns to originating view
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewCommitMsg
+	m.commitMsgFromView = tuiViewReview
+	m.commitMsgContent = "test message"
+
+	// Press 'q' to go back
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	m2 := updated.(tuiModel)
+
+	if m2.currentView != tuiViewReview {
+		t.Errorf("Expected to return to tuiViewReview after 'q', got %d", m2.currentView)
+	}
+}
+
+func TestFetchCommitMsgJobTypeDetection(t *testing.T) {
+	// Test that fetchCommitMsg correctly identifies job types and returns appropriate errors
+	// This is critical: Prompt field is populated for ALL jobs (stores review prompt),
+	// so we must check GitRef == "prompt" to identify run tasks, not Prompt != ""
+
+	m := newTuiModel("http://localhost")
+
+	tests := []struct {
+		name        string
+		job         storage.ReviewJob
+		expectError string // empty means no early error (will try git lookup)
+	}{
+		{
+			name: "regular commit with Prompt populated should not error early",
+			job: storage.ReviewJob{
+				ID:     1,
+				GitRef: "abc123def456",                      // valid commit SHA
+				Prompt: "You are a code reviewer...",        // review prompt is stored for all jobs
+			},
+			expectError: "", // should attempt git lookup, not return "run tasks" error
+		},
+		{
+			name: "run task (GitRef=prompt) should error",
+			job: storage.ReviewJob{
+				ID:     2,
+				GitRef: "prompt",
+				Prompt: "Explain this codebase",
+			},
+			expectError: "no commit message for run tasks",
+		},
+		{
+			name: "dirty job (GitRef=dirty) should error",
+			job: storage.ReviewJob{
+				ID:     3,
+				GitRef: "dirty",
+			},
+			expectError: "no commit message for uncommitted changes",
+		},
+		{
+			name: "dirty job with DiffContent should error",
+			job: storage.ReviewJob{
+				ID:         4,
+				GitRef:     "some-ref",
+				DiffContent: func() *string { s := "diff content"; return &s }(),
+			},
+			expectError: "no commit message for uncommitted changes",
+		},
+		{
+			name: "empty GitRef should error with missing ref message",
+			job: storage.ReviewJob{
+				ID:     5,
+				GitRef: "",
+			},
+			expectError: "no git reference available for this job",
+		},
+		{
+			name: "empty GitRef with Prompt (backward compat run job) should error with missing ref",
+			job: storage.ReviewJob{
+				ID:     6,
+				GitRef: "",
+				Prompt: "Explain this codebase", // older run job without GitRef=prompt
+			},
+			expectError: "no git reference available for this job",
+		},
+		{
+			name: "dirty job with nil DiffContent but GitRef=dirty should error",
+			job: storage.ReviewJob{
+				ID:         7,
+				GitRef:     "dirty",
+				DiffContent: nil,
+			},
+			expectError: "no commit message for uncommitted changes",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := m.fetchCommitMsg(&tt.job)
+			msg := cmd()
+
+			result, ok := msg.(tuiCommitMsgMsg)
+			if !ok {
+				t.Fatalf("Expected tuiCommitMsgMsg, got %T", msg)
+			}
+
+			if tt.expectError != "" {
+				if result.err == nil {
+					t.Errorf("Expected error %q, got nil", tt.expectError)
+				} else if result.err.Error() != tt.expectError {
+					t.Errorf("Expected error %q, got %q", tt.expectError, result.err.Error())
+				}
+			} else {
+				// For valid commits, we expect a git error (repo doesn't exist in test)
+				// but NOT the "run tasks" or "uncommitted changes" error
+				if result.err != nil {
+					errMsg := result.err.Error()
+					if errMsg == "no commit message for run tasks" {
+						t.Errorf("Regular commit with Prompt should not be detected as run task")
+					}
+					if errMsg == "no commit message for uncommitted changes" {
+						t.Errorf("Regular commit should not be detected as uncommitted changes")
+					}
+					// Other errors (like git errors) are expected in test environment
+				}
+			}
+		})
+	}
+}
+
+func TestTUIHelpViewToggleFromQueue(t *testing.T) {
+	// Test that '?' opens help from queue and pressing '?' again returns to queue
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewQueue
+
+	// Press '?' to open help
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	m2 := updated.(tuiModel)
+
+	if m2.currentView != tuiViewHelp {
+		t.Errorf("Expected tuiViewHelp, got %d", m2.currentView)
+	}
+	if m2.helpFromView != tuiViewQueue {
+		t.Errorf("Expected helpFromView to be tuiViewQueue, got %d", m2.helpFromView)
+	}
+
+	// Press '?' again to close help
+	updated, _ = m2.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	m3 := updated.(tuiModel)
+
+	if m3.currentView != tuiViewQueue {
+		t.Errorf("Expected to return to tuiViewQueue, got %d", m3.currentView)
+	}
+}
+
+func TestTUIHelpViewToggleFromReview(t *testing.T) {
+	// Test that '?' opens help from review and escape returns to review
+	m := newTuiModel("http://localhost")
+	job := &storage.ReviewJob{ID: 1, GitRef: "abc123", Status: storage.JobStatusDone}
+	m.currentReview = &storage.Review{ID: 1, JobID: 1, Job: job}
+	m.currentView = tuiViewReview
+
+	// Press '?' to open help
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	m2 := updated.(tuiModel)
+
+	if m2.currentView != tuiViewHelp {
+		t.Errorf("Expected tuiViewHelp, got %d", m2.currentView)
+	}
+	if m2.helpFromView != tuiViewReview {
+		t.Errorf("Expected helpFromView to be tuiViewReview, got %d", m2.helpFromView)
+	}
+
+	// Press escape to close help
+	updated, _ = m2.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	m3 := updated.(tuiModel)
+
+	if m3.currentView != tuiViewReview {
+		t.Errorf("Expected to return to tuiViewReview, got %d", m3.currentView)
+	}
+}
+
+func TestSanitizeForDisplay(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "plain text unchanged",
+			input:    "Hello, world!",
+			expected: "Hello, world!",
+		},
+		{
+			name:     "preserves newlines and tabs",
+			input:    "Line1\n\tIndented",
+			expected: "Line1\n\tIndented",
+		},
+		{
+			name:     "strips ANSI color codes",
+			input:    "\x1b[31mred text\x1b[0m",
+			expected: "red text",
+		},
+		{
+			name:     "strips cursor movement",
+			input:    "\x1b[2Jhello\x1b[H",
+			expected: "hello",
+		},
+		{
+			name:     "strips OSC sequences (title set with BEL)",
+			input:    "\x1b]0;Evil Title\x07normal text",
+			expected: "normal text",
+		},
+		{
+			name:     "strips OSC sequences (title set with ST)",
+			input:    "\x1b]0;Evil Title\x1b\\normal text",
+			expected: "normal text",
+		},
+		{
+			name:     "strips control characters",
+			input:    "hello\x00world\x07\x08test",
+			expected: "helloworldtest",
+		},
+		{
+			name:     "handles complex escape sequence",
+			input:    "\x1b[1;32mBold Green\x1b[0m and \x1b[4munderline\x1b[24m",
+			expected: "Bold Green and underline",
+		},
+		{
+			name:     "empty string unchanged",
+			input:    "",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeForDisplay(tt.input)
+			if got != tt.expected {
+				t.Errorf("sanitizeForDisplay(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
 }

@@ -15,11 +15,11 @@ import (
 	"github.com/roborev-dev/roborev/internal/storage"
 )
 
-func TestHTTPClientAddResponse(t *testing.T) {
+func TestHTTPClientAddComment(t *testing.T) {
 	var received map[string]interface{}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/respond" || r.Method != http.MethodPost {
+		if r.URL.Path != "/api/comment" || r.Method != http.MethodPost {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -32,18 +32,18 @@ func TestHTTPClientAddResponse(t *testing.T) {
 	defer server.Close()
 
 	client := NewHTTPClient(server.URL)
-	if err := client.AddResponse(42, "test-agent", "Fixed the issue"); err != nil {
-		t.Fatalf("AddResponse failed: %v", err)
+	if err := client.AddComment(42, "test-agent", "Fixed the issue"); err != nil {
+		t.Fatalf("AddComment failed: %v", err)
 	}
 
 	if received["job_id"].(float64) != 42 {
 		t.Errorf("expected job_id 42, got %v", received["job_id"])
 	}
-	if received["responder"] != "test-agent" {
-		t.Errorf("expected responder test-agent, got %v", received["responder"])
+	if received["commenter"] != "test-agent" {
+		t.Errorf("expected commenter test-agent, got %v", received["commenter"])
 	}
-	if received["response"] != "Fixed the issue" {
-		t.Errorf("expected response to match, got %v", received["response"])
+	if received["comment"] != "Fixed the issue" {
+		t.Errorf("expected comment to match, got %v", received["comment"])
 	}
 }
 

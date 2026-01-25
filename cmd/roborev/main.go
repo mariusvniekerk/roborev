@@ -54,7 +54,8 @@ func main() {
 	rootCmd.AddCommand(reviewCmd())
 	rootCmd.AddCommand(statusCmd())
 	rootCmd.AddCommand(showCmd())
-	rootCmd.AddCommand(respondCmd())
+	rootCmd.AddCommand(commentCmd())
+	rootCmd.AddCommand(respondCmd()) // hidden alias for backward compatibility
 	rootCmd.AddCommand(addressCmd())
 	rootCmd.AddCommand(installHookCmd())
 	rootCmd.AddCommand(uninstallHookCmd())
@@ -1199,27 +1200,27 @@ Examples:
 	return cmd
 }
 
-func respondCmd() *cobra.Command {
+func commentCmd() *cobra.Command {
 	var (
-		responder  string
+		commenter  string
 		message    string
 		forceJobID bool
 	)
 
 	cmd := &cobra.Command{
-		Use:   "respond <job_id|sha> [message]",
-		Short: "Add a response to a review",
-		Long: `Add a response or note to a review.
+		Use:   "comment <job_id|sha> [message]",
+		Short: "Add a comment to a review",
+		Long: `Add a comment or note to a review.
 
 The first argument can be either a job ID (numeric) or a commit SHA.
 Using job IDs is recommended since they are displayed in the TUI.
 
 Examples:
-  roborev respond 42 "Fixed the null pointer issue"
-  roborev respond 42 -m "Added missing error handling"
-  roborev respond abc123 "Addressed by refactoring"
-  roborev respond 42     # Opens editor for message
-  roborev respond --job 1234567 "msg"  # Force numeric arg as job ID`,
+  roborev comment 42 "Fixed the null pointer issue"
+  roborev comment 42 -m "Added missing error handling"
+  roborev comment abc123 "Addressed by refactoring"
+  roborev comment 42     # Opens editor for message
+  roborev comment --job 1234567 "msg"  # Force numeric arg as job ID`,
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Ensure daemon is running
@@ -1272,7 +1273,7 @@ Examples:
 					editor = "vim"
 				}
 
-				tmpfile, err := os.CreateTemp("", "roborev-response-*.md")
+				tmpfile, err := os.CreateTemp("", "roborev-comment-*.md")
 				if err != nil {
 					return fmt.Errorf("create temp file: %w", err)
 				}
@@ -1289,26 +1290,26 @@ Examples:
 
 				content, err := os.ReadFile(tmpfile.Name())
 				if err != nil {
-					return fmt.Errorf("read response: %w", err)
+					return fmt.Errorf("read comment: %w", err)
 				}
 				message = strings.TrimSpace(string(content))
 			}
 
 			if message == "" {
-				return fmt.Errorf("empty response, aborting")
+				return fmt.Errorf("empty comment, aborting")
 			}
 
-			if responder == "" {
-				responder = os.Getenv("USER")
-				if responder == "" {
-					responder = "anonymous"
+			if commenter == "" {
+				commenter = os.Getenv("USER")
+				if commenter == "" {
+					commenter = "anonymous"
 				}
 			}
 
 			// Build request with either job_id or sha
 			reqData := map[string]interface{}{
-				"responder": responder,
-				"response":  message,
+				"commenter": commenter,
+				"comment":   message,
 			}
 			if jobID != 0 {
 				reqData["job_id"] = jobID
@@ -1319,7 +1320,7 @@ Examples:
 			reqBody, _ := json.Marshal(reqData)
 
 			addr := getDaemonAddr()
-			resp, err := http.Post(addr+"/api/respond", "application/json", bytes.NewReader(reqBody))
+			resp, err := http.Post(addr+"/api/comment", "application/json", bytes.NewReader(reqBody))
 			if err != nil {
 				return fmt.Errorf("failed to connect to daemon: %w", err)
 			}
@@ -1327,18 +1328,26 @@ Examples:
 
 			if resp.StatusCode != http.StatusCreated {
 				body, _ := io.ReadAll(resp.Body)
-				return fmt.Errorf("failed to add response: %s", body)
+				return fmt.Errorf("failed to add comment: %s", body)
 			}
 
-			fmt.Println("Response added successfully")
+			fmt.Println("Comment added successfully")
 			return nil
 		},
 	}
 
-	cmd.Flags().StringVar(&responder, "responder", "", "responder name (default: $USER)")
-	cmd.Flags().StringVarP(&message, "message", "m", "", "response message (opens editor if not provided)")
+	cmd.Flags().StringVar(&commenter, "commenter", "", "commenter name (default: $USER)")
+	cmd.Flags().StringVarP(&message, "message", "m", "", "comment message (opens editor if not provided)")
 	cmd.Flags().BoolVar(&forceJobID, "job", false, "force argument to be treated as job ID (not SHA)")
 
+	return cmd
+}
+
+// respondCmd returns an alias for commentCmd
+func respondCmd() *cobra.Command {
+	cmd := commentCmd()
+	cmd.Use = "respond <job_id|sha> [message]"
+	cmd.Short = "Alias for 'comment' - add a comment to a review"
 	return cmd
 }
 
@@ -1561,19 +1570,19 @@ func enqueueReview(repoPath, gitRef, agentName string) (int64, error) {
 	return job.ID, nil
 }
 
-// getResponsesForJob fetches responses for a job
-func getResponsesForJob(jobID int64) ([]storage.Response, error) {
+// getCommentsForJob fetches comments for a job
+func getCommentsForJob(jobID int64) ([]storage.Response, error) {
 	addr := getDaemonAddr()
 	client := &http.Client{Timeout: 5 * time.Second}
 
-	resp, err := client.Get(fmt.Sprintf("%s/api/responses?job_id=%d", addr, jobID))
+	resp, err := client.Get(fmt.Sprintf("%s/api/comments?job_id=%d", addr, jobID))
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetch responses: %s", resp.Status)
+		return nil, fmt.Errorf("fetch comments: %s", resp.Status)
 	}
 
 	var result struct {
@@ -2139,7 +2148,7 @@ func syncStatusCmd() *cobra.Command {
 			const maxPending = 1000
 			jobs, jobsErr := db.GetJobsToSync(machineID, maxPending)
 			reviews, reviewsErr := db.GetReviewsToSync(machineID, maxPending)
-			responses, responsesErr := db.GetResponsesToSync(machineID, maxPending)
+			responses, responsesErr := db.GetCommentsToSync(machineID, maxPending)
 
 			fmt.Println()
 			if jobsErr != nil || reviewsErr != nil || responsesErr != nil {
@@ -2153,7 +2162,7 @@ func syncStatusCmd() *cobra.Command {
 				}
 				return fmt.Sprintf("%d", count)
 			}
-			fmt.Printf("Pending push: %s jobs, %s reviews, %s responses\n",
+			fmt.Printf("Pending push: %s jobs, %s reviews, %s comments\n",
 				formatCount(len(jobs)), formatCount(len(reviews)), formatCount(len(responses)))
 
 			// Try to connect to PostgreSQL
@@ -2257,13 +2266,13 @@ func syncNowCmd() *cobra.Command {
 						totalJobs := getInt(msg, "total_jobs")
 						totalRevs := getInt(msg, "total_revs")
 						totalResps := getInt(msg, "total_resps")
-						fmt.Printf("\rPushing: batch %d (total: %d jobs, %d reviews, %d responses)     ",
+						fmt.Printf("\rPushing: batch %d (total: %d jobs, %d reviews, %d comments)     ",
 							batch, totalJobs, totalRevs, totalResps)
 					} else if phase == "pull" {
 						totalJobs := getInt(msg, "total_jobs")
 						totalRevs := getInt(msg, "total_revs")
 						totalResps := getInt(msg, "total_resps")
-						fmt.Printf("\rPulled: %d jobs, %d reviews, %d responses     \n",
+						fmt.Printf("\rPulled: %d jobs, %d reviews, %d comments     \n",
 							totalJobs, totalRevs, totalResps)
 					}
 				case "error":
@@ -2289,9 +2298,9 @@ func syncNowCmd() *cobra.Command {
 			}
 
 			fmt.Println("Sync completed")
-			fmt.Printf("Pushed: %d jobs, %d reviews, %d responses\n",
+			fmt.Printf("Pushed: %d jobs, %d reviews, %d comments\n",
 				finalPushed.Jobs, finalPushed.Reviews, finalPushed.Responses)
-			fmt.Printf("Pulled: %d jobs, %d reviews, %d responses\n",
+			fmt.Printf("Pulled: %d jobs, %d reviews, %d comments\n",
 				finalPulled.Jobs, finalPulled.Reviews, finalPulled.Responses)
 
 			return nil

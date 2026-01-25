@@ -370,7 +370,7 @@ func (b *Builder) writePreviousReviews(sb *strings.Builder, contexts []ReviewCon
 
 		// Include responses to this review
 		if len(ctx.Responses) > 0 {
-			sb.WriteString("\nResponses to this review:\n")
+			sb.WriteString("\nComments on this review:\n")
 			for _, resp := range ctx.Responses {
 				sb.WriteString(fmt.Sprintf("- %s: %q\n", resp.Responder, resp.Response))
 			}
@@ -411,11 +411,11 @@ func (b *Builder) writePreviousAttemptsForGitRef(sb *strings.Builder, gitRef str
 		sb.WriteString(review.Output)
 		sb.WriteString("\n")
 
-		// Fetch and include responses for this review
+		// Fetch and include comments for this review
 		if review.JobID > 0 {
-			responses, err := b.db.GetResponsesForJob(review.JobID)
+			responses, err := b.db.GetCommentsForJob(review.JobID)
 			if err == nil && len(responses) > 0 {
-				sb.WriteString("\nResponses to this review:\n")
+				sb.WriteString("\nComments on this review:\n")
 				for _, resp := range responses {
 					sb.WriteString(fmt.Sprintf("- %s: %q\n", resp.Responder, resp.Response))
 				}
@@ -442,9 +442,9 @@ func (b *Builder) getPreviousReviewContexts(repoPath, sha string, count int) ([]
 		if err == nil {
 			ctx.Review = review
 
-			// Also fetch responses for this review's job
+			// Also fetch comments for this review's job
 			if review.JobID > 0 {
-				responses, err := b.db.GetResponsesForJob(review.JobID)
+				responses, err := b.db.GetCommentsForJob(review.JobID)
 				if err == nil {
 					ctx.Responses = responses
 				}
