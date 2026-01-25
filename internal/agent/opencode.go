@@ -60,16 +60,22 @@ func filterOpencodeToolCallLines(s string) string {
 		}
 		out = append(out, line)
 	}
-	return strings.TrimSpace(strings.Join(out, "\n"))
+	// Only trim trailing newlines to preserve leading indentation in code blocks
+	return strings.TrimRight(strings.Join(out, "\n"), "\r\n")
 }
 
 func isOpencodeToolCallLine(line string) bool {
-	line = strings.TrimSpace(line)
-	if !strings.HasPrefix(line, "{") {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "{") {
 		return false
 	}
 	var m map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(line), &m); err != nil {
+	if err := json.Unmarshal([]byte(trimmed), &m); err != nil {
+		return false
+	}
+	// Tool calls have exactly "name" and "arguments" keys, nothing else.
+	// This avoids stripping legitimate JSON examples that happen to include these keys.
+	if len(m) != 2 {
 		return false
 	}
 	_, hasName := m["name"]

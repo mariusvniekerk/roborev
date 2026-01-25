@@ -47,6 +47,21 @@ func TestFilterOpencodeToolCallLines(t *testing.T) {
 			input:    `{"arguments":{}}`,
 			expected: `{"arguments":{}}`,
 		},
+		{
+			name:     "JSON with name and arguments plus extra keys preserved",
+			input:    `{"name":"example","arguments":{"foo":"bar"},"description":"This is a JSON example"}`,
+			expected: `{"name":"example","arguments":{"foo":"bar"},"description":"This is a JSON example"}`,
+		},
+		{
+			name:     "leading indentation preserved",
+			input:    "  indented line\n    more indented",
+			expected: "  indented line\n    more indented",
+		},
+		{
+			name:     "code block with JSON example preserved",
+			input:    "Here's an example:\n```json\n{\"name\":\"test\",\"arguments\":{},\"extra\":true}\n```",
+			expected: "Here's an example:\n```json\n{\"name\":\"test\",\"arguments\":{},\"extra\":true}\n```",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
