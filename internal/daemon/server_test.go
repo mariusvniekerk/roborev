@@ -193,7 +193,7 @@ func TestHandleListRepos(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetOrCreateCommit failed: %v", err)
 		}
-		if _, err := db.EnqueueJob(repo1.ID, commit.ID, sha, "test", "", ""); err != nil {
+		if _, err := db.EnqueueJob(repo1.ID, commit.ID, sha, "", "test", "", ""); err != nil {
 			t.Fatalf("EnqueueJob failed: %v", err)
 		}
 	}
@@ -205,7 +205,7 @@ func TestHandleListRepos(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetOrCreateCommit failed: %v", err)
 		}
-		if _, err := db.EnqueueJob(repo2.ID, commit.ID, sha, "test", "", ""); err != nil {
+		if _, err := db.EnqueueJob(repo2.ID, commit.ID, sha, "", "test", "", ""); err != nil {
 			t.Fatalf("EnqueueJob failed: %v", err)
 		}
 	}
@@ -262,6 +262,227 @@ func TestHandleListRepos(t *testing.T) {
 	})
 }
 
+func TestHandleListReposWithBranchFilter(t *testing.T) {
+	db, tmpDir := testutil.OpenTestDBWithDir(t)
+	cfg := config.DefaultConfig()
+	server := NewServer(db, cfg, "")
+
+	// Create repos
+	repo1, _ := db.GetOrCreateRepo(filepath.Join(tmpDir, "repo1"))
+	repo2, _ := db.GetOrCreateRepo(filepath.Join(tmpDir, "repo2"))
+
+	// Add jobs to repos
+	for i := 0; i < 3; i++ {
+		sha := "repo1sha" + string(rune('a'+i))
+		commit, _ := db.GetOrCreateCommit(repo1.ID, sha, "Author", "Subject", time.Now())
+		db.EnqueueJob(repo1.ID, commit.ID, sha, "", "test", "", "")
+	}
+	for i := 0; i < 2; i++ {
+		sha := "repo2sha" + string(rune('a'+i))
+		commit, _ := db.GetOrCreateCommit(repo2.ID, sha, "Author", "Subject", time.Now())
+		db.EnqueueJob(repo2.ID, commit.ID, sha, "", "test", "", "")
+	}
+
+	// Set branches: repo1 jobs 1,2 = main, job 3 = feature; repo2 jobs 4,5 = main
+	db.Exec("UPDATE review_jobs SET branch = 'main' WHERE id IN (1, 2, 4, 5)")
+	db.Exec("UPDATE review_jobs SET branch = 'feature' WHERE id = 3")
+
+	t.Run("filter by main branch", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/repos?branch=main", nil)
+		w := httptest.NewRecorder()
+
+		server.handleListRepos(w, req)
+
+		testutil.AssertStatusCode(t, w, http.StatusOK)
+
+		var response map[string]interface{}
+		json.Unmarshal(w.Body.Bytes(), &response)
+
+		repos := response["repos"].([]interface{})
+		totalCount := int(response["total_count"].(float64))
+
+		if len(repos) != 2 {
+			t.Errorf("Expected 2 repos with main branch, got %d", len(repos))
+		}
+		if totalCount != 4 {
+			t.Errorf("Expected total_count 4, got %d", totalCount)
+		}
+	})
+
+	t.Run("filter by feature branch", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/repos?branch=feature", nil)
+		w := httptest.NewRecorder()
+
+		server.handleListRepos(w, req)
+
+		testutil.AssertStatusCode(t, w, http.StatusOK)
+
+		var response map[string]interface{}
+		json.Unmarshal(w.Body.Bytes(), &response)
+
+		repos := response["repos"].([]interface{})
+		totalCount := int(response["total_count"].(float64))
+
+		if len(repos) != 1 {
+			t.Errorf("Expected 1 repo with feature branch, got %d", len(repos))
+		}
+		if totalCount != 1 {
+			t.Errorf("Expected total_count 1, got %d", totalCount)
+		}
+	})
+
+	t.Run("nonexistent branch returns empty", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/repos?branch=nonexistent", nil)
+		w := httptest.NewRecorder()
+
+		server.handleListRepos(w, req)
+
+		testutil.AssertStatusCode(t, w, http.StatusOK)
+
+		var response map[string]interface{}
+		json.Unmarshal(w.Body.Bytes(), &response)
+
+		totalCount := int(response["total_count"].(float64))
+		if totalCount != 0 {
+			t.Errorf("Expected total_count 0 for nonexistent branch, got %d", totalCount)
+		}
+	})
+}
+
+func TestHandleListBranches(t *testing.T) {
+	db, tmpDir := testutil.OpenTestDBWithDir(t)
+	cfg := config.DefaultConfig()
+	server := NewServer(db, cfg, "")
+
+	// Create repos
+	repo1, _ := db.GetOrCreateRepo(filepath.Join(tmpDir, "repo1"))
+	repo2, _ := db.GetOrCreateRepo(filepath.Join(tmpDir, "repo2"))
+
+	// Add jobs to repos
+	for i := 0; i < 3; i++ {
+		sha := "repo1sha" + string(rune('a'+i))
+		commit, _ := db.GetOrCreateCommit(repo1.ID, sha, "Author", "Subject", time.Now())
+		db.EnqueueJob(repo1.ID, commit.ID, sha, "", "test", "", "")
+	}
+	for i := 0; i < 2; i++ {
+		sha := "repo2sha" + string(rune('a'+i))
+		commit, _ := db.GetOrCreateCommit(repo2.ID, sha, "Author", "Subject", time.Now())
+		db.EnqueueJob(repo2.ID, commit.ID, sha, "", "test", "", "")
+	}
+
+	// Set branches: jobs 1,2,4 = main, job 3 = feature, job 5 = no branch
+	db.Exec("UPDATE review_jobs SET branch = 'main' WHERE id IN (1, 2, 4)")
+	db.Exec("UPDATE review_jobs SET branch = 'feature' WHERE id = 3")
+
+	t.Run("list all branches", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/branches", nil)
+		w := httptest.NewRecorder()
+
+		server.handleListBranches(w, req)
+
+		testutil.AssertStatusCode(t, w, http.StatusOK)
+
+		var response map[string]interface{}
+		json.Unmarshal(w.Body.Bytes(), &response)
+
+		branches := response["branches"].([]interface{})
+		totalCount := int(response["total_count"].(float64))
+		nullsRemaining := int(response["nulls_remaining"].(float64))
+
+		if len(branches) != 3 {
+			t.Errorf("Expected 3 branches, got %d", len(branches))
+		}
+		if totalCount != 5 {
+			t.Errorf("Expected total_count 5, got %d", totalCount)
+		}
+		if nullsRemaining != 1 {
+			t.Errorf("Expected nulls_remaining 1, got %d", nullsRemaining)
+		}
+	})
+
+	t.Run("filter by repo", func(t *testing.T) {
+		repoPath := filepath.Join(tmpDir, "repo1")
+		req := httptest.NewRequest(http.MethodGet, "/api/branches?repo="+repoPath, nil)
+		w := httptest.NewRecorder()
+
+		server.handleListBranches(w, req)
+
+		testutil.AssertStatusCode(t, w, http.StatusOK)
+
+		var response map[string]interface{}
+		json.Unmarshal(w.Body.Bytes(), &response)
+
+		branches := response["branches"].([]interface{})
+		totalCount := int(response["total_count"].(float64))
+
+		if len(branches) != 2 {
+			t.Errorf("Expected 2 branches for repo1, got %d", len(branches))
+		}
+		if totalCount != 3 {
+			t.Errorf("Expected total_count 3 for repo1, got %d", totalCount)
+		}
+	})
+
+	t.Run("filter by multiple repos", func(t *testing.T) {
+		repo1Path := filepath.Join(tmpDir, "repo1")
+		repo2Path := filepath.Join(tmpDir, "repo2")
+		req := httptest.NewRequest(http.MethodGet, "/api/branches?repo="+repo1Path+"&repo="+repo2Path, nil)
+		w := httptest.NewRecorder()
+
+		server.handleListBranches(w, req)
+
+		testutil.AssertStatusCode(t, w, http.StatusOK)
+
+		var response map[string]interface{}
+		json.Unmarshal(w.Body.Bytes(), &response)
+
+		branches := response["branches"].([]interface{})
+		totalCount := int(response["total_count"].(float64))
+
+		if len(branches) != 3 {
+			t.Errorf("Expected 3 branches for both repos, got %d", len(branches))
+		}
+		if totalCount != 5 {
+			t.Errorf("Expected total_count 5 for both repos, got %d", totalCount)
+		}
+	})
+
+	t.Run("empty repo param treated as no filter", func(t *testing.T) {
+		// Empty repo param should be ignored, returning all branches
+		req := httptest.NewRequest(http.MethodGet, "/api/branches?repo=", nil)
+		w := httptest.NewRecorder()
+
+		server.handleListBranches(w, req)
+
+		testutil.AssertStatusCode(t, w, http.StatusOK)
+
+		var response map[string]interface{}
+		json.Unmarshal(w.Body.Bytes(), &response)
+
+		branches := response["branches"].([]interface{})
+		totalCount := int(response["total_count"].(float64))
+
+		// Should return all 3 branches and 5 jobs, not zero
+		if len(branches) != 3 {
+			t.Errorf("Expected 3 branches (empty repo = no filter), got %d", len(branches))
+		}
+		if totalCount != 5 {
+			t.Errorf("Expected total_count 5 (empty repo = no filter), got %d", totalCount)
+		}
+	})
+
+	t.Run("wrong method fails", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/branches", nil)
+		w := httptest.NewRecorder()
+
+		server.handleListBranches(w, req)
+
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Errorf("Expected status 405 for POST, got %d", w.Code)
+		}
+	})
+}
+
 func TestHandleListJobsWithFilter(t *testing.T) {
 	db, tmpDir := testutil.OpenTestDBWithDir(t)
 	cfg := config.DefaultConfig()
@@ -284,7 +505,7 @@ func TestHandleListJobsWithFilter(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetOrCreateCommit failed: %v", err)
 		}
-		if _, err := db.EnqueueJob(repo1.ID, commit.ID, sha, "test", "", ""); err != nil {
+		if _, err := db.EnqueueJob(repo1.ID, commit.ID, sha, "", "test", "", ""); err != nil {
 			t.Fatalf("EnqueueJob failed: %v", err)
 		}
 	}
@@ -296,7 +517,7 @@ func TestHandleListJobsWithFilter(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetOrCreateCommit failed: %v", err)
 		}
-		if _, err := db.EnqueueJob(repo2.ID, commit.ID, sha, "test", "", ""); err != nil {
+		if _, err := db.EnqueueJob(repo2.ID, commit.ID, sha, "", "test", "", ""); err != nil {
 			t.Fatalf("EnqueueJob failed: %v", err)
 		}
 	}
@@ -582,7 +803,7 @@ func TestHandleCancelJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetOrCreateCommit failed: %v", err)
 	}
-	job, err := db.EnqueueJob(repo.ID, commit.ID, "canceltest", "test", "", "")
+	job, err := db.EnqueueJob(repo.ID, commit.ID, "canceltest", "", "test", "", "")
 	if err != nil {
 		t.Fatalf("EnqueueJob failed: %v", err)
 	}
@@ -661,7 +882,7 @@ func TestHandleCancelJob(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetOrCreateCommit failed: %v", err)
 		}
-		job2, err := db.EnqueueJob(repo.ID, commit2.ID, "cancelrunning", "test", "", "")
+		job2, err := db.EnqueueJob(repo.ID, commit2.ID, "cancelrunning", "", "test", "", "")
 		if err != nil {
 			t.Fatalf("EnqueueJob failed: %v", err)
 		}
@@ -706,7 +927,7 @@ func TestListJobsPagination(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetOrCreateCommit failed: %v", err)
 		}
-		_, err = db.EnqueueJob(repo.ID, commit.ID, fmt.Sprintf("sha%d", i), "test", "", "")
+		_, err = db.EnqueueJob(repo.ID, commit.ID, fmt.Sprintf("sha%d", i), "", "test", "", "")
 		if err != nil {
 			t.Fatalf("EnqueueJob failed: %v", err)
 		}
@@ -830,7 +1051,7 @@ func TestListJobsWithGitRefFilter(t *testing.T) {
 	refs := []string{"abc123", "def456", "abc123..def456"}
 	for _, ref := range refs {
 		commit, _ := db.GetOrCreateCommit(repo.ID, ref, "A", "S", time.Now())
-		db.EnqueueJob(repo.ID, commit.ID, ref, "codex", "", "")
+		db.EnqueueJob(repo.ID, commit.ID, ref, "", "codex", "", "")
 	}
 
 	t.Run("git_ref filter returns matching job", func(t *testing.T) {
@@ -1360,7 +1581,7 @@ func TestHandleRerunJob(t *testing.T) {
 
 	t.Run("rerun failed job", func(t *testing.T) {
 		commit, _ := db.GetOrCreateCommit(repo.ID, "rerun-failed", "Author", "Subject", time.Now())
-		job, _ := db.EnqueueJob(repo.ID, commit.ID, "rerun-failed", "test", "", "")
+		job, _ := db.EnqueueJob(repo.ID, commit.ID, "rerun-failed", "", "test", "", "")
 		db.ClaimJob("worker-1")
 		db.FailJob(job.ID, "some error")
 
@@ -1385,7 +1606,7 @@ func TestHandleRerunJob(t *testing.T) {
 
 	t.Run("rerun canceled job", func(t *testing.T) {
 		commit, _ := db.GetOrCreateCommit(repo.ID, "rerun-canceled", "Author", "Subject", time.Now())
-		job, _ := db.EnqueueJob(repo.ID, commit.ID, "rerun-canceled", "test", "", "")
+		job, _ := db.EnqueueJob(repo.ID, commit.ID, "rerun-canceled", "", "test", "", "")
 		db.CancelJob(job.ID)
 
 		reqBody, _ := json.Marshal(RerunJobRequest{JobID: job.ID})
@@ -1409,7 +1630,7 @@ func TestHandleRerunJob(t *testing.T) {
 
 	t.Run("rerun done job", func(t *testing.T) {
 		commit, _ := db.GetOrCreateCommit(repo.ID, "rerun-done", "Author", "Subject", time.Now())
-		job, _ := db.EnqueueJob(repo.ID, commit.ID, "rerun-done", "test", "", "")
+		job, _ := db.EnqueueJob(repo.ID, commit.ID, "rerun-done", "", "test", "", "")
 		// Claim and complete job
 		var claimed *storage.ReviewJob
 		for {
@@ -1445,7 +1666,7 @@ func TestHandleRerunJob(t *testing.T) {
 
 	t.Run("rerun queued job fails", func(t *testing.T) {
 		commit, _ := db.GetOrCreateCommit(repo.ID, "rerun-queued", "Author", "Subject", time.Now())
-		job, _ := db.EnqueueJob(repo.ID, commit.ID, "rerun-queued", "test", "", "")
+		job, _ := db.EnqueueJob(repo.ID, commit.ID, "rerun-queued", "", "test", "", "")
 
 		reqBody, _ := json.Marshal(RerunJobRequest{JobID: job.ID})
 		req := httptest.NewRequest(http.MethodPost, "/api/job/rerun", bytes.NewReader(reqBody))
@@ -2203,7 +2424,7 @@ func TestHandleAddCommentToJobStates(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Create a job
-			job, err := db.EnqueueJob(repo.ID, commit.ID, "abc123", "test-agent", "", "")
+			job, err := db.EnqueueJob(repo.ID, commit.ID, "abc123", "", "test-agent", "", "")
 			if err != nil {
 				t.Fatalf("EnqueueJob failed: %v", err)
 			}
@@ -2287,7 +2508,7 @@ func TestHandleAddCommentWithoutReview(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetOrCreateCommit failed: %v", err)
 	}
-	job, err := db.EnqueueJob(repo.ID, commit.ID, "abc123", "test-agent", "", "")
+	job, err := db.EnqueueJob(repo.ID, commit.ID, "abc123", "", "test-agent", "", "")
 	if err != nil {
 		t.Fatalf("EnqueueJob failed: %v", err)
 	}
@@ -2379,7 +2600,7 @@ func TestHandleJobOutput_PollingRunningJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetOrCreateCommit failed: %v", err)
 	}
-	job, err := db.EnqueueJob(repo.ID, commit.ID, "abc123", "test-agent", "", "")
+	job, err := db.EnqueueJob(repo.ID, commit.ID, "abc123", "", "test-agent", "", "")
 	if err != nil {
 		t.Fatalf("EnqueueJob failed: %v", err)
 	}
@@ -2440,7 +2661,7 @@ func TestHandleJobOutput_PollingCompletedJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetOrCreateCommit failed: %v", err)
 	}
-	job, err := db.EnqueueJob(repo.ID, commit.ID, "abc123", "test-agent", "", "")
+	job, err := db.EnqueueJob(repo.ID, commit.ID, "abc123", "", "test-agent", "", "")
 	if err != nil {
 		t.Fatalf("EnqueueJob failed: %v", err)
 	}
@@ -2494,7 +2715,7 @@ func TestHandleJobOutput_StreamingCompletedJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetOrCreateCommit failed: %v", err)
 	}
-	job, err := db.EnqueueJob(repo.ID, commit.ID, "abc123", "test-agent", "", "")
+	job, err := db.EnqueueJob(repo.ID, commit.ID, "abc123", "", "test-agent", "", "")
 	if err != nil {
 		t.Fatalf("EnqueueJob failed: %v", err)
 	}

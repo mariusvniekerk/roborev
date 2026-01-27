@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -121,6 +122,131 @@ func (db *DB) ListReposWithReviewCounts() ([]RepoWithCount, int, error) {
 		totalCount += rc.Count
 	}
 	return repos, totalCount, rows.Err()
+}
+
+// ListReposWithReviewCountsByBranch returns repos filtered by branch with their job counts
+// If branch is empty, returns all repos. Use "(none)" to filter for jobs without a branch.
+func (db *DB) ListReposWithReviewCountsByBranch(branch string) ([]RepoWithCount, int, error) {
+	var rows *sql.Rows
+	var err error
+
+	if branch == "" {
+		// No filter - return all repos
+		return db.ListReposWithReviewCounts()
+	}
+
+	// Filter by branch (handle "(none)" as NULL/empty branch)
+	branchFilter := branch
+	if branch == "(none)" {
+		branchFilter = ""
+	}
+
+	rows, err = db.Query(`
+		SELECT r.name, r.root_path, COUNT(rj.id) as job_count
+		FROM repos r
+		INNER JOIN review_jobs rj ON rj.repo_id = r.id
+		WHERE COALESCE(rj.branch, '') = ?
+		GROUP BY r.id, r.name, r.root_path
+		HAVING job_count > 0
+		ORDER BY r.name
+	`, branchFilter)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var repos []RepoWithCount
+	totalCount := 0
+	for rows.Next() {
+		var rc RepoWithCount
+		if err := rows.Scan(&rc.Name, &rc.RootPath, &rc.Count); err != nil {
+			return nil, 0, err
+		}
+		repos = append(repos, rc)
+		totalCount += rc.Count
+	}
+	return repos, totalCount, rows.Err()
+}
+
+// BranchWithCount represents a branch with its total job count
+type BranchWithCount struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
+}
+
+// BranchListResult contains branches with counts and metadata
+type BranchListResult struct {
+	Branches       []BranchWithCount
+	TotalCount     int
+	NullsRemaining int // Number of jobs with NULL/empty branch (for backfill tracking)
+}
+
+// ListBranchesWithCounts returns all branches with their job counts
+// If repoPaths is non-empty, filters to jobs in those repos only
+func (db *DB) ListBranchesWithCounts(repoPaths []string) (*BranchListResult, error) {
+	var rows *sql.Rows
+	var err error
+
+	if len(repoPaths) == 0 {
+		// No repo filter - count branches across all repos
+		rows, err = db.Query(`
+			SELECT COALESCE(NULLIF(branch, ''), '(none)') as branch_name, COUNT(*) as job_count
+			FROM review_jobs
+			GROUP BY branch_name
+			ORDER BY job_count DESC, branch_name
+		`)
+	} else if len(repoPaths) == 1 {
+		// Single repo filter
+		rows, err = db.Query(`
+			SELECT COALESCE(NULLIF(rj.branch, ''), '(none)') as branch_name, COUNT(*) as job_count
+			FROM review_jobs rj
+			INNER JOIN repos r ON rj.repo_id = r.id
+			WHERE r.root_path = ?
+			GROUP BY branch_name
+			ORDER BY job_count DESC, branch_name
+		`, repoPaths[0])
+	} else {
+		// Multiple repo paths - build IN clause with placeholders
+		placeholders := make([]string, len(repoPaths))
+		args := make([]interface{}, len(repoPaths))
+		for i, p := range repoPaths {
+			placeholders[i] = "?"
+			args[i] = p
+		}
+		query := fmt.Sprintf(`
+			SELECT COALESCE(NULLIF(rj.branch, ''), '(none)') as branch_name, COUNT(*) as job_count
+			FROM review_jobs rj
+			INNER JOIN repos r ON rj.repo_id = r.id
+			WHERE r.root_path IN (%s)
+			GROUP BY branch_name
+			ORDER BY job_count DESC, branch_name
+		`, strings.Join(placeholders, ","))
+		rows, err = db.Query(query, args...)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := &BranchListResult{}
+	for rows.Next() {
+		var bc BranchWithCount
+		if err := rows.Scan(&bc.Name, &bc.Count); err != nil {
+			return nil, err
+		}
+		result.Branches = append(result.Branches, bc)
+		result.TotalCount += bc.Count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Count actual NULL branches (not empty string or "(none)" sentinel)
+	if err := db.QueryRow("SELECT COUNT(*) FROM review_jobs WHERE branch IS NULL").Scan(&result.NullsRemaining); err != nil {
+		return nil, err
+	}
+
+	return result, nil
 }
 
 // RenameRepo updates the display name of a repo identified by its path or current name

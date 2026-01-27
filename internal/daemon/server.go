@@ -67,7 +67,9 @@ func NewServer(db *storage.DB, cfg *config.Config, configPath string) *Server {
 	mux.HandleFunc("/api/job/cancel", s.handleCancelJob)
 	mux.HandleFunc("/api/job/output", s.handleJobOutput)
 	mux.HandleFunc("/api/job/rerun", s.handleRerunJob)
+	mux.HandleFunc("/api/job/update-branch", s.handleUpdateJobBranch)
 	mux.HandleFunc("/api/repos", s.handleListRepos)
+	mux.HandleFunc("/api/branches", s.handleListBranches)
 	mux.HandleFunc("/api/review", s.handleGetReview)
 	mux.HandleFunc("/api/review/address", s.handleAddressReview)
 	mux.HandleFunc("/api/comment", s.handleAddComment)
@@ -294,6 +296,7 @@ type EnqueueRequest struct {
 	RepoPath     string `json:"repo_path"`
 	CommitSHA    string `json:"commit_sha,omitempty"`    // Single commit (for backwards compat)
 	GitRef       string `json:"git_ref,omitempty"`       // Single commit, range like "abc..def", or "dirty"
+	Branch       string `json:"branch,omitempty"`        // Branch name at time of job creation
 	Agent        string `json:"agent,omitempty"`
 	Model        string `json:"model,omitempty"`         // Model to use (for opencode: provider/model format)
 	DiffContent  string `json:"diff_content,omitempty"`  // Pre-captured diff for dirty reviews
@@ -431,14 +434,14 @@ func (s *Server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 	var job *storage.ReviewJob
 	if isPrompt {
 		// Custom prompt job - use provided prompt directly
-		job, err = s.db.EnqueuePromptJob(repo.ID, agentName, model, reasoning, req.CustomPrompt, req.Agentic)
+		job, err = s.db.EnqueuePromptJob(repo.ID, req.Branch, agentName, model, reasoning, req.CustomPrompt, req.Agentic)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("enqueue prompt job: %v", err))
 			return
 		}
 	} else if isDirty {
 		// Dirty review - use pre-captured diff
-		job, err = s.db.EnqueueDirtyJob(repo.ID, gitRef, agentName, model, reasoning, req.DiffContent)
+		job, err = s.db.EnqueueDirtyJob(repo.ID, gitRef, req.Branch, agentName, model, reasoning, req.DiffContent)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("enqueue dirty job: %v", err))
 			return
@@ -460,7 +463,7 @@ func (s *Server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 
 		// Store as full SHA range
 		fullRef := startSHA + ".." + endSHA
-		job, err = s.db.EnqueueRangeJob(repo.ID, fullRef, agentName, model, reasoning)
+		job, err = s.db.EnqueueRangeJob(repo.ID, fullRef, req.Branch, agentName, model, reasoning)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("enqueue job: %v", err))
 			return
@@ -487,7 +490,7 @@ func (s *Server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		job, err = s.db.EnqueueJob(repo.ID, commit.ID, sha, agentName, model, reasoning)
+		job, err = s.db.EnqueueJob(repo.ID, commit.ID, sha, req.Branch, agentName, model, reasoning)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("enqueue job: %v", err))
 			return
@@ -598,7 +601,18 @@ func (s *Server) handleListRepos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	repos, totalCount, err := s.db.ListReposWithReviewCounts()
+	// Optional branch filter
+	branch := r.URL.Query().Get("branch")
+
+	var repos []storage.RepoWithCount
+	var totalCount int
+	var err error
+
+	if branch != "" {
+		repos, totalCount, err = s.db.ListReposWithReviewCountsByBranch(branch)
+	} else {
+		repos, totalCount, err = s.db.ListReposWithReviewCounts()
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("list repos: %v", err))
 		return
@@ -607,6 +621,34 @@ func (s *Server) handleListRepos(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"repos":       repos,
 		"total_count": totalCount,
+	})
+}
+
+func (s *Server) handleListBranches(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	// Optional repo filter (by path) - supports multiple values
+	// Filter out empty strings to treat ?repo= as no filter
+	var repoPaths []string
+	for _, p := range r.URL.Query()["repo"] {
+		if p != "" {
+			repoPaths = append(repoPaths, p)
+		}
+	}
+
+	result, err := s.db.ListBranchesWithCounts(repoPaths)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("list branches: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"branches":        result.Branches,
+		"total_count":     result.TotalCount,
+		"nulls_remaining": result.NullsRemaining,
 	})
 }
 
@@ -801,6 +843,42 @@ func (s *Server) handleRerunJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true})
+}
+
+func (s *Server) handleUpdateJobBranch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req struct {
+		JobID  int64  `json:"job_id"`
+		Branch string `json:"branch"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.JobID == 0 {
+		writeError(w, http.StatusBadRequest, "job_id is required")
+		return
+	}
+	if req.Branch == "" {
+		writeError(w, http.StatusBadRequest, "branch is required")
+		return
+	}
+
+	rowsAffected, err := s.db.UpdateJobBranch(req.JobID, req.Branch)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("update branch: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"updated": rowsAffected > 0,
+	})
 }
 
 func (s *Server) handleGetReview(w http.ResponseWriter, r *http.Request) {
