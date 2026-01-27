@@ -66,6 +66,14 @@ type CommandAgent interface {
 	CommandName() string
 }
 
+// AvailabilityChecker is optionally implemented by agents to determine
+// availability using HTTP health checks (e.g. GET /api/tags for Ollama),
+// rather than CLI presence.
+type AvailabilityChecker interface {
+	Agent
+	IsAvailable() bool
+}
+
 // Registry holds available agents
 var registry = make(map[string]Agent)
 var allowUnsafeAgents atomic.Bool
@@ -129,13 +137,19 @@ func Available() []string {
 	return names
 }
 
-// IsAvailable checks if an agent's command is installed on the system
-// Supports aliases like "claude" for "claude-code"
+// IsAvailable checks if an agent's command is installed on the system.
+// Supports aliases like "claude" for "claude-code".
+// Agents implementing AvailabilityChecker use their IsAvailable() (e.g. HTTP health check).
 func IsAvailable(name string) bool {
 	name = resolveAlias(name)
 	a, ok := registry[name]
 	if !ok {
 		return false
+	}
+
+	// Check if agent implements AvailabilityChecker (HTTP-based like Ollama)
+	if ac, ok := a.(AvailabilityChecker); ok {
+		return ac.IsAvailable()
 	}
 
 	// Check if agent implements CommandAgent interface
@@ -160,8 +174,8 @@ func GetAvailable(preferred string) (Agent, error) {
 		return Get(preferred)
 	}
 
-	// Fallback order: codex, claude-code, gemini, copilot, opencode, droid
-	fallbacks := []string{"codex", "claude-code", "gemini", "copilot", "opencode", "droid"}
+	// Fallback order: codex, claude-code, gemini, copilot, opencode, droid, ollama
+	fallbacks := []string{"codex", "claude-code", "gemini", "copilot", "opencode", "droid", "ollama"}
 	for _, name := range fallbacks {
 		if name != preferred && IsAvailable(name) {
 			return Get(name)
@@ -177,10 +191,25 @@ func GetAvailable(preferred string) (Agent, error) {
 	}
 
 	if len(available) == 0 {
-		return nil, fmt.Errorf("no agents available (install one of: codex, claude-code, gemini, copilot, opencode, droid)")
+		return nil, fmt.Errorf("no agents available (install one of: codex, claude-code, gemini, copilot, opencode, droid, ollama)")
 	}
 
 	return Get(available[0])
+}
+
+// WithOllamaBaseURL configures the BaseURL for an Ollama agent if it is one.
+// Returns the agent unchanged if it's not an Ollama agent.
+func WithOllamaBaseURL(a Agent, baseURL string) Agent {
+	if a.Name() != "ollama" {
+		return a
+	}
+	// Type assertion to check for WithBaseURL method
+	if ollamaAgent, ok := a.(interface {
+		WithBaseURL(baseURL string) Agent
+	}); ok {
+		return ollamaAgent.WithBaseURL(baseURL)
+	}
+	return a
 }
 
 // syncWriter wraps an io.Writer with mutex protection for concurrent writes.

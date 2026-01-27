@@ -47,6 +47,10 @@ type Config struct {
 	// API keys (optional - agents use subscription auth by default)
 	AnthropicAPIKey string `toml:"anthropic_api_key"`
 
+	// Ollama configuration
+	OllamaBaseURL string `toml:"ollama_base_url"` // Default: "http://localhost:11434"
+	OllamaModel   string `toml:"ollama_model"`    // Default: "" (requires explicit configuration)
+
 	// Sync configuration for PostgreSQL
 	Sync SyncConfig `toml:"sync"`
 }
@@ -166,6 +170,8 @@ func DefaultConfig() *Config {
 		JobTimeoutMinutes:  30,
 		CodexCmd:           "codex",
 		ClaudeCodeCmd:      "claude",
+		OllamaBaseURL:      "http://localhost:11434",
+		OllamaModel:        "",
 	}
 }
 
@@ -627,4 +633,14 @@ func stripURLCredentials(rawURL string) string {
 	// Clear the userinfo
 	parsed.User = nil
 	return parsed.String()
+}
+
+// ResolveOllamaBaseURL determines which Ollama base URL to use based on config priority:
+// 1. Global config (ollama_base_url in config.toml)
+// 2. Default ("http://localhost:11434")
+func ResolveOllamaBaseURL(globalCfg *Config) string {
+	if globalCfg != nil && strings.TrimSpace(globalCfg.OllamaBaseURL) != "" {
+		return strings.TrimSpace(globalCfg.OllamaBaseURL)
+	}
+	return "http://localhost:11434"
 }
