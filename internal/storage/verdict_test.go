@@ -720,8 +720,18 @@ func TestParseVerdict(t *testing.T) {
 			want:   "F",
 		},
 		{
-			name:   "severity label critical",
+			name:   "severity label critical with bullet",
 			output: "- Critical — Data loss possible.\nNo issues otherwise.",
+			want:   "F",
+		},
+		{
+			name:   "severity label critical without bullet",
+			output: "Critical — Data loss possible.\nNo issues otherwise.",
+			want:   "F",
+		},
+		{
+			name:   "severity label high without bullet",
+			output: "High: Security vulnerability in auth module.\nNo issues found.",
 			want:   "F",
 		},
 		{
@@ -742,6 +752,21 @@ func TestParseVerdict(t *testing.T) {
 		{
 			name:   "medium without separator not a finding",
 			output: "No issues found. The medium was oil on canvas.",
+			want:   "P",
+		},
+		{
+			name:   "severity legend not a finding",
+			output: "No issues found.\n\nSeverity levels:\nHigh - immediate action required.\nMedium - should be addressed.\nLow - minor concern.",
+			want:   "P",
+		},
+		{
+			name:   "priority scale not a finding",
+			output: "No issues found.\n\nPriority scale:\nCritical: system down\nHigh: major feature broken",
+			want:   "P",
+		},
+		{
+			name:   "severity legend with descriptions not a finding",
+			output: "No issues found.\n\nSeverity levels:\nHigh - immediate action required.\n  These issues block release.\nMedium - should be addressed.",
 			want:   "P",
 		},
 		{
