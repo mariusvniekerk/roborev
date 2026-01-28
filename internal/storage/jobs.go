@@ -9,7 +9,14 @@ import (
 // ParseVerdict extracts P (pass) or F (fail) from review output.
 // Returns "P" only if a clear pass indicator appears at the start of a line.
 // Rejects lines containing caveats like "but", "however", "except".
+// Also fails if severity labels (Critical/High/Medium/Low) indicate findings.
 func ParseVerdict(output string) string {
+	// First check for severity labels which indicate actual findings
+	// These appear as "- Medium —", "* Low:", "Critical -", etc.
+	if hasSeverityLabel(output) {
+		return "F"
+	}
+
 	for _, line := range strings.Split(output, "\n") {
 		trimmed := strings.TrimSpace(strings.ToLower(line))
 		// Normalize curly apostrophes to straight apostrophes (LLMs sometimes use these)
@@ -77,6 +84,63 @@ func stripListMarker(s string) string {
 		break
 	}
 	return s
+}
+
+// hasSeverityLabel checks if the output contains severity labels indicating findings.
+// Matches patterns like "- Medium —", "* Low:", "Critical - issue", etc.
+// Only checks lines that look like findings (start with bullets or numbers).
+// Requires separators to be followed by space to avoid "High-level overview".
+func hasSeverityLabel(output string) bool {
+	lc := strings.ToLower(output)
+	severities := []string{"critical", "high", "medium", "low"}
+
+	for _, line := range strings.Split(lc, "\n") {
+		trimmed := strings.TrimSpace(line)
+
+		// Only check lines that look like findings (start with bullet or number)
+		// This avoids matching rubric text like "Severity levels: High - ..."
+		isFindingLine := false
+		if len(trimmed) > 0 {
+			first := trimmed[0]
+			if first == '-' || first == '*' || (first >= '0' && first <= '9') {
+				isFindingLine = true
+			}
+			// Check for bullet point (multi-byte character)
+			if strings.HasPrefix(trimmed, "•") {
+				isFindingLine = true
+			}
+		}
+		if !isFindingLine {
+			continue
+		}
+
+		// Strip leading bullets/asterisks/numbers
+		trimmed = strings.TrimLeft(trimmed, "-*•0123456789.) ")
+		trimmed = strings.TrimSpace(trimmed)
+
+		for _, sev := range severities {
+			if strings.HasPrefix(trimmed, sev) {
+				// Check if followed by separator (dash, em-dash, colon, pipe)
+				rest := trimmed[len(sev):]
+				rest = strings.TrimSpace(rest)
+				if len(rest) > 0 {
+					// Check for em-dash or en-dash (these are unambiguous)
+					if strings.HasPrefix(rest, "—") || strings.HasPrefix(rest, "–") {
+						return true
+					}
+					// Check for colon or pipe (unambiguous separators)
+					if rest[0] == ':' || rest[0] == '|' {
+						return true
+					}
+					// For hyphen, require space after to avoid "High-level"
+					if rest[0] == '-' && len(rest) > 1 && rest[1] == ' ' {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 // hasCaveat checks if the line contains contrastive words or additional sentences with issues
@@ -333,7 +397,7 @@ func checkClauseForCaveat(clause string) bool {
 		// Strip punctuation from both sides for word matching
 		w = strings.Trim(w, ".,;:!?()[]\"'")
 		// Contrastive words
-		if w == "but" || w == "however" || w == "except" {
+		if w == "but" || w == "however" || w == "except" || w == "beyond" {
 			return true
 		}
 		// Negative indicators that suggest problems (unless negated)
