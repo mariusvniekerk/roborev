@@ -312,6 +312,18 @@ func TestFixNoArgsDefaultsToUnaddressed(t *testing.T) {
 	// Running fix with no args should not produce a validation error —
 	// it should enter the unaddressed path (which will fail at daemon
 	// connection, not at argument validation).
+	//
+	// Use a mock daemon so ensureDaemon doesn't try to spawn a real
+	// daemon subprocess (which hangs on CI).
+	_, cleanup := setupMockDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Return empty for all queries — we only care about argument routing
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"jobs":     []interface{}{},
+			"has_more": false,
+		})
+	}))
+	defer cleanup()
+
 	cmd := fixCmd()
 	cmd.SilenceUsage = true
 	cmd.SilenceErrors = true
