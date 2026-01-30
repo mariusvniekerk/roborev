@@ -172,7 +172,7 @@ func TestAddJobResponse(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	err := addJobResponse(ts.URL, 123, "Fix applied")
+	err := addJobResponse(ts.URL, 123, "roborev-fix", "Fix applied")
 	if err != nil {
 		t.Fatalf("addJobResponse: %v", err)
 	}

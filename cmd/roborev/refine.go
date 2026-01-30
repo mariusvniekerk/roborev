@@ -372,36 +372,40 @@ func runRefine(agentName, modelStr, reasoningStr string, maxIterations int, quie
 			return fmt.Errorf("build address prompt: %w", err)
 		}
 
-		// Record clean state before agent runs to detect user edits during run
-		wasCleanBeforeAgent := git.IsWorkingTreeClean(repoPath)
-
-		// Capture HEAD SHA and branch to detect concurrent changes (branch switch, pull, etc.)
-		headBeforeAgent, err := git.ResolveSHA(repoPath, "HEAD")
+		// Record pre-agent state for safety checks
+		wasCleanBefore := git.IsWorkingTreeClean(repoPath)
+		headBefore, err := git.ResolveSHA(repoPath, "HEAD")
 		if err != nil {
 			return fmt.Errorf("cannot determine HEAD: %w", err)
 		}
-		branchBeforeAgent := git.GetCurrentBranch(repoPath)
+		branchBefore := git.GetCurrentBranch(repoPath)
 
-		// Create temp worktree to isolate agent work from user's working tree
-		worktreePath, cleanupWorktree, err := createTempWorktree(repoPath)
-		if err != nil {
-			return fmt.Errorf("create worktree: %w", err)
-		}
-
-		// Determine output writer for agent streaming
+		// Determine output writer
 		var agentOutput io.Writer = os.Stdout
 		if quiet {
 			agentOutput = io.Discard
 		}
 
-		// Run agent to make changes in the isolated worktree (1 hour timeout)
+		// Run fix in isolated worktree
 		timer := newStepTimer()
 		if liveTimer {
 			timer.startLive(fmt.Sprintf("Addressing review (job %d)...", currentFailedReview.JobID))
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Hour)
-		output, agentErr := addressAgent.Review(ctx, worktreePath, "HEAD", addressPrompt, agentOutput)
-		cancel()
+		fixCtx, fixCancel := context.WithTimeout(context.Background(), 1*time.Hour)
+		result, fixErr := fixJobCore(fixCtx, fixJobParams{
+			RepoRoot:       repoPath,
+			JobID:          currentFailedReview.JobID,
+			Review:         currentFailedReview,
+			Prompt:         addressPrompt,
+			Commenter:      "roborev-refine",
+			UseWorktree:    true,
+			Agent:          addressAgent,
+			Output:         agentOutput,
+			HeadBefore:     headBefore,
+			BranchBefore:   branchBefore,
+			WasCleanBefore: wasCleanBefore,
+		})
+		fixCancel()
 
 		// Show elapsed time
 		if liveTimer {
@@ -412,35 +416,19 @@ func runRefine(agentName, modelStr, reasoningStr string, maxIterations int, quie
 			fmt.Printf("Agent completed %s\n", timer.elapsed())
 		}
 
-		// Check if user made changes to main repo during agent run
-		if wasCleanBeforeAgent && !git.IsWorkingTreeClean(repoPath) {
-			cleanupWorktree()
-			return fmt.Errorf("working tree changed during refine - aborting to prevent data loss")
+		if fixErr != nil {
+			return fixErr
 		}
 
-		// Check if HEAD or branch changed during agent run (branch switch, pull, etc.)
-		headAfterAgent, resolveErr := git.ResolveSHA(repoPath, "HEAD")
-		if resolveErr != nil {
-			cleanupWorktree()
-			return fmt.Errorf("cannot determine HEAD after agent run: %w", resolveErr)
-		}
-		branchAfterAgent := git.GetCurrentBranch(repoPath)
-		if headAfterAgent != headBeforeAgent || branchAfterAgent != branchBeforeAgent {
-			cleanupWorktree()
-			return fmt.Errorf("HEAD changed during refine (was %s on %s, now %s on %s) - aborting to prevent applying patch to wrong commit",
-				headBeforeAgent[:7], branchBeforeAgent, headAfterAgent[:7], branchAfterAgent)
-		}
-
-		if agentErr != nil {
-			cleanupWorktree()
-			fmt.Printf("Agent error: %v\n", agentErr)
+		// Handle agent error (retryable)
+		if result.AgentErr != nil {
+			fmt.Printf("Agent error: %v\n", result.AgentErr)
 			fmt.Println("Will retry in next iteration")
 			continue
 		}
 
-		// Check if changes were made in worktree
-		if git.IsWorkingTreeClean(worktreePath) {
-			cleanupWorktree()
+		// Handle no changes
+		if result.NoChanges {
 			fmt.Println("Agent made no changes")
 			// Check how many times we've tried this review (only count our own attempts)
 			attempts, err := client.GetCommentsForJob(currentFailedReview.JobID)
@@ -454,37 +442,22 @@ func runRefine(agentName, modelStr, reasoningStr string, maxIterations int, quie
 				}
 			}
 			if noChangeAttempts >= 2 {
-				// Tried 3 times (including this one), give up on this review
-				// Do NOT mark as addressed - the review still needs attention
 				fmt.Println("Giving up after multiple failed attempts (review remains unaddressed)")
 				client.AddComment(currentFailedReview.JobID, "roborev-refine", "Agent could not determine how to address findings (attempt 3, giving up)")
-				skippedReviews[currentFailedReview.ID] = true // Don't re-select this run
-				currentFailedReview = nil                     // Move on to next oldest failed commit
+				skippedReviews[currentFailedReview.ID] = true
+				currentFailedReview = nil
 			} else {
-				// Record attempt but don't mark addressed - might work on retry with different context
 				client.AddComment(currentFailedReview.JobID, "roborev-refine", fmt.Sprintf("Agent could not determine how to address findings (attempt %d)", noChangeAttempts+1))
 				fmt.Printf("Attempt %d failed, will retry\n", noChangeAttempts+1)
 			}
 			continue
 		}
 
-		// Apply worktree changes to main repo
-		if err := applyWorktreeChanges(repoPath, worktreePath); err != nil {
-			cleanupWorktree()
-			return fmt.Errorf("apply worktree changes: %w", err)
-		}
-		cleanupWorktree()
+		// Commit was created
+		fmt.Printf("Created commit %s\n", result.NewCommitSHA[:7])
 
-		// Commit the changes
-		commitMsg := fmt.Sprintf("Address review findings (job %d)\n\n%s", currentFailedReview.JobID, summarizeAgentOutput(output))
-		newCommit, err := git.CreateCommit(repoPath, commitMsg)
-		if err != nil {
-			return fmt.Errorf("failed to commit changes: %w", err)
-		}
-		fmt.Printf("Created commit %s\n", newCommit[:7])
-
-		// Add response recording what was done (include full agent output for database)
-		responseText := fmt.Sprintf("Created commit %s to address findings\n\n%s", newCommit[:7], output)
+		// Add response recording what was done
+		responseText := fmt.Sprintf("Created commit %s to address findings\n\n%s", result.NewCommitSHA[:7], result.AgentOutput)
 		client.AddComment(currentFailedReview.JobID, "roborev-refine", responseText)
 
 		// Mark old review as addressed
@@ -492,14 +465,11 @@ func runRefine(agentName, modelStr, reasoningStr string, maxIterations int, quie
 			fmt.Printf("Warning: failed to mark review (job %d) as addressed: %v\n", currentFailedReview.JobID, err)
 		}
 
-		// Wait for new commit to be reviewed (if post-commit hook triggers it)
-		// Give a short delay for the hook to fire
+		// Wait for new commit to be reviewed
 		time.Sleep(postCommitWaitDelay)
 
-		// Check if a review was queued for the new commit
-		newJob, err := client.FindJobForCommit(repoPath, newCommit)
+		newJob, err := client.FindJobForCommit(repoPath, result.NewCommitSHA)
 		if err != nil || newJob == nil {
-			// No review queued - move on to next oldest failed commit
 			currentFailedReview = nil
 			continue
 		}
@@ -508,7 +478,7 @@ func runRefine(agentName, modelStr, reasoningStr string, maxIterations int, quie
 		review, err := client.WaitForReview(newJob.ID)
 		if err != nil {
 			fmt.Printf("Warning: review failed: %v\n", err)
-			currentFailedReview = nil // Move on, can't determine status
+			currentFailedReview = nil
 			continue
 		}
 
@@ -518,10 +488,10 @@ func runRefine(agentName, modelStr, reasoningStr string, maxIterations int, quie
 			if err := client.MarkReviewAddressed(review.JobID); err != nil {
 				fmt.Printf("Warning: failed to mark review (job %d) as addressed: %v\n", review.JobID, err)
 			}
-			currentFailedReview = nil // Move on to next oldest failed commit
+			currentFailedReview = nil
 		} else {
 			fmt.Println("New commit failed review - continuing to address")
-			currentFailedReview = review // Stay on this fix chain
+			currentFailedReview = review
 		}
 	}
 

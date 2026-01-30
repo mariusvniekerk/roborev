@@ -133,6 +133,195 @@ type fixOptions struct {
 	quiet     bool
 }
 
+// fixJobParams configures a fix operation for fixJobCore.
+type fixJobParams struct {
+	RepoRoot    string
+	JobID       int64
+	Review      *storage.Review // nil = fetch from daemon
+	Prompt      string          // empty = build generic prompt from review
+	Commenter   string          // e.g. "roborev-fix" or "roborev-refine"
+	UseWorktree bool            // isolate agent in temp worktree
+	Agent       agent.Agent
+	Output      io.Writer // agent streaming output (nil = discard)
+
+	// Worktree safety: caller records these before fixJobCore (UseWorktree only)
+	HeadBefore     string
+	BranchBefore   string
+	WasCleanBefore bool
+}
+
+// fixJobResult contains the outcome of a fix operation.
+type fixJobResult struct {
+	CommitCreated bool
+	NewCommitSHA  string
+	NoChanges     bool
+	AgentOutput   string
+	AgentErr      error // non-nil if agent failed (retryable, worktree mode only)
+}
+
+// fixJobCore runs an agent to fix review findings and returns the result.
+// It does not add comments or mark jobs as addressed; callers handle that.
+func fixJobCore(ctx context.Context, params fixJobParams) (*fixJobResult, error) {
+	review := params.Review
+	if review == nil {
+		var err error
+		review, err = fetchReview(ctx, serverAddr, params.JobID)
+		if err != nil {
+			return nil, fmt.Errorf("fetch review: %w", err)
+		}
+	}
+
+	fixPrompt := params.Prompt
+	if fixPrompt == "" {
+		fixPrompt = buildGenericFixPrompt(review.Output)
+	}
+
+	if params.UseWorktree {
+		return fixJobWorktree(ctx, params, fixPrompt)
+	}
+	return fixJobDirect(ctx, params, fixPrompt)
+}
+
+// fixJobDirect runs the agent directly on the repo and detects commits.
+func fixJobDirect(ctx context.Context, params fixJobParams, prompt string) (*fixJobResult, error) {
+	out := params.Output
+	if out == nil {
+		out = io.Discard
+	}
+
+	headBefore, err := git.ResolveSHA(params.RepoRoot, "HEAD")
+	if err != nil {
+		// Can't verify commits - just run agent and return
+		agentOutput, agentErr := params.Agent.Review(ctx, params.RepoRoot, "HEAD", prompt, out)
+		if agentErr != nil {
+			return nil, fmt.Errorf("fix agent failed: %w", agentErr)
+		}
+		return &fixJobResult{AgentOutput: agentOutput}, nil
+	}
+
+	agentOutput, agentErr := params.Agent.Review(ctx, params.RepoRoot, "HEAD", prompt, out)
+	if agentErr != nil {
+		return nil, fmt.Errorf("fix agent failed: %w", agentErr)
+	}
+
+	result := &fixJobResult{AgentOutput: agentOutput}
+
+	// Check if agent created a commit
+	headAfter, err := git.ResolveSHA(params.RepoRoot, "HEAD")
+	if err == nil && headBefore != headAfter {
+		result.CommitCreated = true
+		result.NewCommitSHA = headAfter
+		return result, nil
+	}
+
+	// No commit - check for uncommitted changes
+	hasChanges, err := git.HasUncommittedChanges(params.RepoRoot)
+	if err != nil || !hasChanges {
+		result.NoChanges = (err == nil && !hasChanges)
+		return result, nil
+	}
+
+	// Uncommitted changes - retry with commit instructions
+	commitPrompt := buildGenericCommitPrompt()
+	params.Agent.Review(ctx, params.RepoRoot, "HEAD", commitPrompt, out)
+
+	// Check if retry created a commit
+	headFinal, err := git.ResolveSHA(params.RepoRoot, "HEAD")
+	if err == nil && headFinal != headBefore {
+		result.CommitCreated = true
+		result.NewCommitSHA = headFinal
+		return result, nil
+	}
+
+	// Still no commit
+	hasChanges, _ = git.HasUncommittedChanges(params.RepoRoot)
+	result.NoChanges = !hasChanges
+	return result, nil
+}
+
+// fixJobWorktree runs the agent in an isolated worktree and applies changes back.
+func fixJobWorktree(ctx context.Context, params fixJobParams, prompt string) (*fixJobResult, error) {
+	out := params.Output
+	if out == nil {
+		out = io.Discard
+	}
+
+	worktreePath, cleanup, err := createTempWorktree(params.RepoRoot)
+	if err != nil {
+		return nil, fmt.Errorf("create worktree: %w", err)
+	}
+	defer cleanup()
+
+	agentOutput, agentErr := params.Agent.Review(ctx, worktreePath, "HEAD", prompt, out)
+
+	// Safety checks on main repo (must happen before applying changes)
+	if params.WasCleanBefore && !git.IsWorkingTreeClean(params.RepoRoot) {
+		return nil, fmt.Errorf("working tree changed during fix - aborting to prevent data loss")
+	}
+	if params.HeadBefore != "" {
+		headAfter, err := git.ResolveSHA(params.RepoRoot, "HEAD")
+		if err != nil {
+			return nil, fmt.Errorf("cannot determine HEAD after agent run: %w", err)
+		}
+		branchAfter := git.GetCurrentBranch(params.RepoRoot)
+		if headAfter != params.HeadBefore || branchAfter != params.BranchBefore {
+			return nil, fmt.Errorf("HEAD changed during fix (was %s on %s, now %s on %s) - aborting",
+				params.HeadBefore[:7], params.BranchBefore, headAfter[:7], branchAfter)
+		}
+	}
+
+	if agentErr != nil {
+		return &fixJobResult{AgentOutput: agentOutput, AgentErr: agentErr}, nil
+	}
+
+	// Check if worktree has changes
+	if git.IsWorkingTreeClean(worktreePath) {
+		return &fixJobResult{AgentOutput: agentOutput, NoChanges: true}, nil
+	}
+
+	// Apply changes and commit
+	if err := applyWorktreeChanges(params.RepoRoot, worktreePath); err != nil {
+		return nil, fmt.Errorf("apply worktree changes: %w", err)
+	}
+
+	commitMsg := fmt.Sprintf("Address review findings (job %d)\n\n%s", params.JobID, summarizeAgentOutput(agentOutput))
+	newCommit, err := git.CreateCommit(params.RepoRoot, commitMsg)
+	if err != nil {
+		return nil, fmt.Errorf("commit changes: %w", err)
+	}
+
+	return &fixJobResult{
+		CommitCreated: true,
+		NewCommitSHA:  newCommit,
+		AgentOutput:   agentOutput,
+	}, nil
+}
+
+// resolveFixAgent resolves and configures the agent for fix operations.
+func resolveFixAgent(opts fixOptions) (agent.Agent, error) {
+	cfg, err := config.LoadGlobal()
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+
+	agentName := opts.agentName
+	if agentName == "" {
+		agentName = cfg.DefaultAgent
+	}
+
+	a, err := agent.GetAvailable(agentName)
+	if err != nil {
+		return nil, fmt.Errorf("get agent: %w", err)
+	}
+
+	reasoningLevel := agent.ParseReasoningLevel(opts.reasoning)
+	a = a.WithAgentic(true).WithReasoning(reasoningLevel)
+	if opts.model != "" {
+		a = a.WithModel(opts.model)
+	}
+	return a, nil
+}
+
 func runFix(cmd *cobra.Command, jobIDs []int64, opts fixOptions) error {
 	// Ensure daemon is running
 	if err := ensureDaemon(); err != nil {
@@ -249,7 +438,6 @@ func fixSingleJob(cmd *cobra.Command, repoRoot string, jobID int64, opts fixOpti
 		return fmt.Errorf("fetch job: %w", err)
 	}
 
-	// Check if job is complete
 	if job.Status != storage.JobStatusDone {
 		return fmt.Errorf("job %d is not complete (status: %s)", jobID, job.Status)
 	}
@@ -266,92 +454,71 @@ func fixSingleJob(cmd *cobra.Command, repoRoot string, jobID int64, opts fixOpti
 		cmd.Println(review.Output)
 		cmd.Println(strings.Repeat("-", 60))
 		cmd.Println()
-	}
-
-	// Build fix prompt
-	fixPrompt := buildGenericFixPrompt(review.Output)
-
-	if !opts.quiet {
 		cmd.Printf("Running fix agent to apply changes...\n\n")
 	}
 
-	// Get HEAD before running fix agent
-	headBefore, headErr := git.ResolveSHA(repoRoot, "HEAD")
-	canVerifyCommits := headErr == nil
-
-	// Run fix agent
-	if err := runFixAgentWithOpts(cmd, repoRoot, opts, fixPrompt); err != nil {
-		return fmt.Errorf("fix agent failed: %w", err)
+	// Resolve agent
+	fixAgent, err := resolveFixAgent(opts)
+	if err != nil {
+		return err
 	}
 
-	// Check if commit was created
-	var commitCreated bool
-	if canVerifyCommits {
-		headAfter, err := git.ResolveSHA(repoRoot, "HEAD")
-		if err == nil && headBefore != headAfter {
-			commitCreated = true
-		}
+	// Set up output
+	var out io.Writer
+	var fmtr *streamFormatter
+	if opts.quiet {
+		out = io.Discard
+	} else {
+		fmtr = newStreamFormatter(cmd.OutOrStdout(), writerIsTerminal(cmd.OutOrStdout()))
+		out = fmtr
+	}
 
-		// If no commit, check for uncommitted changes and retry
-		if !commitCreated {
-			hasChanges, err := git.HasUncommittedChanges(repoRoot)
-			if err == nil && hasChanges {
-				if !opts.quiet {
-					cmd.Println("\nNo commit was created. Re-running agent with commit instructions...")
-					cmd.Println()
-				}
+	result, err := fixJobCore(ctx, fixJobParams{
+		RepoRoot: repoRoot,
+		JobID:    jobID,
+		Review:   review,
+		Agent:    fixAgent,
+		Output:   out,
+	})
+	if fmtr != nil {
+		fmtr.Flush()
+	}
+	if err != nil {
+		return err
+	}
 
-				commitPrompt := buildGenericCommitPrompt()
-				if err := runFixAgentWithOpts(cmd, repoRoot, opts, commitPrompt); err != nil {
-					if !opts.quiet {
-						cmd.Printf("Warning: commit agent failed: %v\n", err)
-					}
-				}
-
-				// Check again
-				headFinal, err := git.ResolveSHA(repoRoot, "HEAD")
-				if err == nil && headFinal != headAfter {
-					commitCreated = true
-				}
-			}
-		}
+	if !opts.quiet {
+		fmt.Fprintln(cmd.OutOrStdout())
 	}
 
 	// Report commit status
 	if !opts.quiet {
-		if !canVerifyCommits {
-			// Couldn't verify commits
-		} else if commitCreated {
+		if result.CommitCreated {
 			cmd.Println("\nChanges committed successfully.")
+		} else if result.NoChanges {
+			cmd.Println("\nNo changes were made by the fix agent.")
 		} else {
 			hasChanges, err := git.HasUncommittedChanges(repoRoot)
 			if err == nil && hasChanges {
 				cmd.Println("\nWarning: Changes were made but not committed. Please review and commit manually.")
-			} else if err == nil {
-				cmd.Println("\nNo changes were made by the fix agent.")
 			}
 		}
 	}
 
-	// Ensure the fix commit gets a review enqueued
-	// (post-commit hooks may not fire reliably from agent subprocesses)
-	if commitCreated {
-		if head, err := git.ResolveSHA(repoRoot, "HEAD"); err == nil {
-			if err := enqueueIfNeeded(serverAddr, repoRoot, head); err != nil && !opts.quiet {
-				cmd.Printf("Warning: could not enqueue review for fix commit: %v\n", err)
-			}
+	// Enqueue review for fix commit
+	if result.CommitCreated {
+		if err := enqueueIfNeeded(serverAddr, repoRoot, result.NewCommitSHA); err != nil && !opts.quiet {
+			cmd.Printf("Warning: could not enqueue review for fix commit: %v\n", err)
 		}
 	}
 
-	// Add response to job and mark as addressed
+	// Add response and mark as addressed
 	responseText := "Fix applied via `roborev fix` command"
-	if commitCreated {
-		if head, err := git.ResolveSHA(repoRoot, "HEAD"); err == nil {
-			responseText = fmt.Sprintf("Fix applied via `roborev fix` command (commit: %s)", head[:7])
-		}
+	if result.CommitCreated {
+		responseText = fmt.Sprintf("Fix applied via `roborev fix` command (commit: %s)", result.NewCommitSHA[:7])
 	}
 
-	if err := addJobResponse(serverAddr, jobID, responseText); err != nil {
+	if err := addJobResponse(serverAddr, jobID, "roborev-fix", responseText); err != nil {
 		if !opts.quiet {
 			cmd.Printf("Warning: could not add response to job: %v\n", err)
 		}
@@ -463,67 +630,11 @@ func buildGenericCommitPrompt() string {
 	return sb.String()
 }
 
-// runFixAgentWithOpts runs the fix agent with the given options
-func runFixAgentWithOpts(cmd *cobra.Command, repoPath string, opts fixOptions, prompt string) error {
-	// Load config
-	cfg, err := config.LoadGlobal()
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
-	}
-
-	// Resolve agent
-	agentName := opts.agentName
-	if agentName == "" {
-		agentName = cfg.DefaultAgent
-	}
-
-	a, err := agent.GetAvailable(agentName)
-	if err != nil {
-		return fmt.Errorf("get agent: %w", err)
-	}
-
-	// Configure agent
-	reasoningLevel := agent.ParseReasoningLevel(opts.reasoning)
-	a = a.WithAgentic(true).WithReasoning(reasoningLevel)
-	if opts.model != "" {
-		a = a.WithModel(opts.model)
-	}
-
-	// Use stdout for streaming output, with stream formatting for TTY
-	var out io.Writer
-	var fmtr *streamFormatter
-	if opts.quiet {
-		out = io.Discard
-	} else {
-		fmtr = newStreamFormatter(cmd.OutOrStdout(), writerIsTerminal(cmd.OutOrStdout()))
-		out = fmtr
-	}
-
-	// Use command context
-	ctx := cmd.Context()
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	_, err = a.Review(ctx, repoPath, "fix", prompt, out)
-	if fmtr != nil {
-		fmtr.Flush()
-	}
-	if err != nil {
-		return err
-	}
-
-	if !opts.quiet {
-		fmt.Fprintln(cmd.OutOrStdout())
-	}
-	return nil
-}
-
 // addJobResponse adds a response/comment to a job
-func addJobResponse(serverAddr string, jobID int64, response string) error {
+func addJobResponse(serverAddr string, jobID int64, commenter, response string) error {
 	reqBody, _ := json.Marshal(map[string]interface{}{
 		"job_id":    jobID,
-		"commenter": "roborev-fix",
+		"commenter": commenter,
 		"comment":   response,
 	})
 
