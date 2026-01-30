@@ -385,7 +385,9 @@ func runRefine(agentName, modelStr, reasoningStr string, maxIterations int, quie
 		if err != nil {
 			return fmt.Errorf("create worktree: %w", err)
 		}
-		defer cleanupWorktree()
+		// NOTE: not using defer here because we're inside a loop;
+		// defer wouldn't run until runRefine returns, leaking worktrees.
+		// Instead, cleanupWorktree() is called explicitly before every exit point.
 
 		// Determine output writer
 		var agentOutput io.Writer
@@ -420,19 +422,23 @@ func runRefine(agentName, modelStr, reasoningStr string, maxIterations int, quie
 
 		// Safety checks on main repo (before applying any changes)
 		if wasCleanBefore && !git.IsWorkingTreeClean(repoPath) {
+			cleanupWorktree()
 			return fmt.Errorf("working tree changed during refine - aborting to prevent data loss")
 		}
 		headAfterAgent, resolveErr := git.ResolveSHA(repoPath, "HEAD")
 		if resolveErr != nil {
+			cleanupWorktree()
 			return fmt.Errorf("cannot determine HEAD after agent run: %w", resolveErr)
 		}
 		branchAfterAgent := git.GetCurrentBranch(repoPath)
 		if headAfterAgent != headBefore || branchAfterAgent != branchBefore {
+			cleanupWorktree()
 			return fmt.Errorf("HEAD changed during refine (was %s on %s, now %s on %s) - aborting to prevent applying patch to wrong commit",
 				shortSHA(headBefore), branchBefore, shortSHA(headAfterAgent), branchAfterAgent)
 		}
 
 		if agentErr != nil {
+			cleanupWorktree()
 			fmt.Printf("Agent error: %v\n", agentErr)
 			fmt.Println("Will retry in next iteration")
 			continue
@@ -461,11 +467,13 @@ func runRefine(agentName, modelStr, reasoningStr string, maxIterations int, quie
 				client.AddComment(currentFailedReview.JobID, "roborev-refine", fmt.Sprintf("Agent could not determine how to address findings (attempt %d)", noChangeAttempts+1))
 				fmt.Printf("Attempt %d failed, will retry\n", noChangeAttempts+1)
 			}
+			cleanupWorktree()
 			continue
 		}
 
 		// Apply worktree changes to main repo and commit
 		if err := applyWorktreeChanges(repoPath, worktreePath); err != nil {
+			cleanupWorktree()
 			return fmt.Errorf("apply worktree changes: %w", err)
 		}
 		cleanupWorktree()
