@@ -554,6 +554,87 @@ func TestRunFixUnaddressedOrdering(t *testing.T) {
 	})
 }
 
+func TestRunFixUnaddressedRequery(t *testing.T) {
+	tmpDir := initTestGitRepo(t)
+
+	var queryCount atomic.Int32
+	_, cleanup := setupMockDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/jobs":
+			q := r.URL.Query()
+			if q.Get("addressed") == "false" && q.Get("limit") == "0" {
+				n := queryCount.Add(1)
+				switch n {
+				case 1:
+					// First query: return batch 1
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"jobs": []storage.ReviewJob{
+							{ID: 10, Status: storage.JobStatusDone, Agent: "test"},
+						},
+						"has_more": false,
+					})
+				case 2:
+					// Second query: new job appeared
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"jobs": []storage.ReviewJob{
+							{ID: 20, Status: storage.JobStatusDone, Agent: "test"},
+							{ID: 10, Status: storage.JobStatusDone, Agent: "test"},
+						},
+						"has_more": false,
+					})
+				default:
+					// Third query: no new jobs
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"jobs":     []storage.ReviewJob{},
+						"has_more": false,
+					})
+				}
+			} else {
+				// Individual job fetch
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"jobs": []storage.ReviewJob{
+						{ID: 10, Status: storage.JobStatusDone, Agent: "test"},
+					},
+					"has_more": false,
+				})
+			}
+		case "/api/review":
+			json.NewEncoder(w).Encode(storage.Review{Output: "findings"})
+		case "/api/comment":
+			w.WriteHeader(http.StatusCreated)
+		case "/api/review/address":
+			w.WriteHeader(http.StatusOK)
+		case "/api/enqueue":
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer cleanup()
+
+	var output bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&output)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldWd)
+
+	err := runFixUnaddressed(cmd, "", false, fixOptions{agentName: "test", reasoning: "fast"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	out := output.String()
+	if !strings.Contains(out, "Found 1 unaddressed job(s)") {
+		t.Errorf("expected first batch message, got %q", out)
+	}
+	if !strings.Contains(out, "Found 1 new unaddressed job(s)") {
+		t.Errorf("expected second batch message, got %q", out)
+	}
+	if int(queryCount.Load()) != 3 {
+		t.Errorf("expected 3 queries, got %d", queryCount.Load())
+	}
+}
+
 func initTestGitRepo(t *testing.T) string {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {

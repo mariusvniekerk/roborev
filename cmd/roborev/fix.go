@@ -245,6 +245,10 @@ func resolveFixAgent(repoPath string, opts fixOptions) (agent.Agent, error) {
 }
 
 func runFix(cmd *cobra.Command, jobIDs []int64, opts fixOptions) error {
+	return runFixWithSeen(cmd, jobIDs, opts, nil)
+}
+
+func runFixWithSeen(cmd *cobra.Command, jobIDs []int64, opts fixOptions, seen map[int64]bool) error {
 	// Ensure daemon is running
 	if err := ensureDaemon(); err != nil {
 		return err
@@ -292,7 +296,11 @@ func runFix(cmd *cobra.Command, jobIDs []int64, opts fixOptions) error {
 				if !opts.quiet {
 					cmd.Printf("Error fixing job %d: %v\n", jobID, err)
 				}
+				continue
 			}
+		}
+		if seen != nil {
+			seen[jobID] = true
 		}
 	}
 
@@ -353,11 +361,7 @@ func runFixUnaddressed(cmd *cobra.Command, branch string, newestFirst bool, opts
 			}
 		}
 
-		for _, id := range newIDs {
-			seen[id] = true
-		}
-
-		if err := runFix(cmd, newIDs, opts); err != nil {
+		if err := runFixWithSeen(cmd, newIDs, opts, seen); err != nil {
 			return err
 		}
 	}
