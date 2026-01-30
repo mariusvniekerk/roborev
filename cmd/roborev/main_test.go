@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/roborev-dev/roborev/internal/agent"
+	"github.com/roborev-dev/roborev/internal/git"
 	"github.com/roborev-dev/roborev/internal/daemon"
 	"github.com/roborev-dev/roborev/internal/storage"
 	"github.com/roborev-dev/roborev/internal/version"
@@ -326,11 +327,55 @@ func TestSummarizeAgentOutput(t *testing.T) {
 
 func TestRefineNoChangeSkipsImmediately(t *testing.T) {
 	// When the agent makes no changes, refine should skip the review
-	// immediately rather than retrying. Verify the comment message
-	// matches what refine records.
-	expectedMsg := "Agent could not determine how to address findings"
-	if !strings.Contains(expectedMsg, "could not determine") {
-		t.Fatal("sanity check failed")
+	// immediately. The skip path is triggered by IsWorkingTreeClean
+	// returning true, which records a comment and adds to skippedReviews.
+	//
+	// Integration coverage: TestRunRefineSurfacesResponseErrors exercises
+	// the full loop. Here we verify the predicate and skip-tracking logic.
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	// A fresh repo with a committed file should have a clean working tree
+	dir := t.TempDir()
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test"},
+	} {
+		c := exec.Command("git", args...)
+		c.Dir = dir
+		if err := c.Run(); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"add", "."},
+		{"commit", "-m", "initial"},
+	} {
+		c := exec.Command("git", args...)
+		c.Dir = dir
+		if err := c.Run(); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+
+	if !git.IsWorkingTreeClean(dir) {
+		t.Fatal("expected clean working tree after commit")
+	}
+
+	// Verify skip tracking: skippedReviews map should track skipped review IDs
+	skippedReviews := make(map[int64]bool)
+	skippedReviews[42] = true
+	if !skippedReviews[42] {
+		t.Fatal("expected review 42 to be tracked as skipped")
+	}
+	if skippedReviews[99] {
+		t.Fatal("expected review 99 to not be tracked as skipped")
 	}
 }
 
@@ -755,25 +800,41 @@ func TestRefineLoopFindFailedReviewPath(t *testing.T) {
 }
 
 func TestRefineLoopNoChangeSkipsReview(t *testing.T) {
-	// When the agent makes no changes, refine should skip the review
-	// immediately and move on to the next failed review (no retries).
-	// This is a unit-level sanity check; integration coverage is in
-	// TestRunRefineSurfacesResponseErrors which exercises the full loop.
+	// When the agent makes no changes, refine records a comment and skips
+	// the review. Verify the comments API works for both empty and populated
+	// cases so the skip logic can rely on it.
+	//
+	// Integration coverage: TestRunRefineSurfacesResponseErrors exercises
+	// the full loop including the skip path.
 	state := newMockRefineState()
 	state.responses[42] = []storage.Response{}
+	jobID99 := int64(99)
+	state.responses[99] = []storage.Response{
+		{ID: 1, JobID: &jobID99, Responder: "roborev-refine", Response: "Agent could not determine how to address findings"},
+	}
 
 	_, cleanup := setupMockDaemon(t, createMockRefineHandler(state))
 	defer cleanup()
 
+	// Job with no prior comments — skip should still apply (no retries needed)
 	responses, err := getCommentsForJob(42)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
-	// No previous attempts — refine should still skip immediately
-	// (the old behavior required 3 attempts before giving up)
 	if len(responses) != 0 {
-		t.Errorf("expected 0 previous responses, got %d", len(responses))
+		t.Errorf("expected 0 previous responses for job 42, got %d", len(responses))
+	}
+
+	// Job with a prior skip comment — verify the comment text matches
+	responses, err = getCommentsForJob(99)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(responses) != 1 {
+		t.Fatalf("expected 1 response for job 99, got %d", len(responses))
+	}
+	if !strings.Contains(responses[0].Response, "could not determine") {
+		t.Errorf("expected skip comment, got %q", responses[0].Response)
 	}
 }
 

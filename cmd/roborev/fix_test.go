@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -587,8 +588,7 @@ func TestFixJobDirectUnbornHead(t *testing.T) {
 	}
 
 	t.Run("agent creates first commit", func(t *testing.T) {
-		repo := newTestGitRepo(t)
-		// repo has no commits yet — remove the initial commit by re-initing
+		// Create a fresh git repo with no commits (unborn HEAD)
 		dir := t.TempDir()
 		cmd := exec.Command("git", "init")
 		cmd.Dir = dir
@@ -599,23 +599,30 @@ func TestFixJobDirectUnbornHead(t *testing.T) {
 			{"config", "user.email", "test@test.com"},
 			{"config", "user.name", "Test"},
 		} {
-			cmd := exec.Command("git", args...)
-			cmd.Dir = dir
-			cmd.Run()
+			c := exec.Command("git", args...)
+			c.Dir = dir
+			if err := c.Run(); err != nil {
+				t.Fatalf("git %v: %v", args, err)
+			}
 		}
-		_ = repo // unused, we use dir directly
 
 		ag := &fakeAgent{
 			name: "test",
 			reviewFn: func(ctx context.Context, repoPath, commitSHA, prompt string, output io.Writer) (string, error) {
 				// Simulate agent creating the first commit
-				os.WriteFile(filepath.Join(repoPath, "fix.txt"), []byte("fixed"), 0644)
+				if err := os.WriteFile(filepath.Join(repoPath, "fix.txt"), []byte("fixed"), 0644); err != nil {
+					return "", fmt.Errorf("write file: %w", err)
+				}
 				c := exec.Command("git", "add", ".")
 				c.Dir = repoPath
-				c.Run()
+				if err := c.Run(); err != nil {
+					return "", fmt.Errorf("git add: %w", err)
+				}
 				c = exec.Command("git", "commit", "-m", "first commit")
 				c.Dir = repoPath
-				c.Run()
+				if err := c.Run(); err != nil {
+					return "", fmt.Errorf("git commit: %w", err)
+				}
 				return "applied fix", nil
 			},
 		}
