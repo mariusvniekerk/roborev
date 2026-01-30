@@ -392,19 +392,15 @@ func runRefine(agentName, modelStr, reasoningStr string, maxIterations int, quie
 			timer.startLive(fmt.Sprintf("Addressing review (job %d)...", currentFailedReview.JobID))
 		}
 		fixCtx, fixCancel := context.WithTimeout(context.Background(), 1*time.Hour)
-		result, fixErr := fixJobCore(fixCtx, fixJobParams{
+		result, fixErr := fixJobWorktree(fixCtx, fixJobParams{
 			RepoRoot:       repoPath,
 			JobID:          currentFailedReview.JobID,
-			Review:         currentFailedReview,
-			Prompt:         addressPrompt,
-			Commenter:      "roborev-refine",
-			UseWorktree:    true,
 			Agent:          addressAgent,
 			Output:         agentOutput,
 			HeadBefore:     headBefore,
 			BranchBefore:   branchBefore,
 			WasCleanBefore: wasCleanBefore,
-		})
+		}, addressPrompt)
 		fixCancel()
 
 		// Show elapsed time

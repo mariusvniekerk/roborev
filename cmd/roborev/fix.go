@@ -133,18 +133,14 @@ type fixOptions struct {
 	quiet     bool
 }
 
-// fixJobParams configures a fix operation for fixJobCore.
+// fixJobParams configures a fix operation.
 type fixJobParams struct {
-	RepoRoot    string
-	JobID       int64
-	Review      *storage.Review // nil = fetch from daemon
-	Prompt      string          // empty = build generic prompt from review
-	Commenter   string          // e.g. "roborev-fix" or "roborev-refine"
-	UseWorktree bool            // isolate agent in temp worktree
-	Agent       agent.Agent
-	Output      io.Writer // agent streaming output (nil = discard)
+	RepoRoot string
+	JobID    int64 // used by fixJobWorktree for commit message
+	Agent    agent.Agent
+	Output   io.Writer // agent streaming output (nil = discard)
 
-	// Worktree safety: caller records these before fixJobCore (UseWorktree only)
+	// Worktree safety (fixJobWorktree only): caller records before calling.
 	HeadBefore     string
 	BranchBefore   string
 	WasCleanBefore bool
@@ -159,30 +155,20 @@ type fixJobResult struct {
 	AgentErr      error // non-nil if agent failed (retryable, worktree mode only)
 }
 
-// fixJobCore runs an agent to fix review findings and returns the result.
-// It does not add comments or mark jobs as addressed; callers handle that.
-func fixJobCore(ctx context.Context, params fixJobParams) (*fixJobResult, error) {
-	review := params.Review
-	if review == nil {
-		var err error
-		review, err = fetchReview(ctx, serverAddr, params.JobID)
-		if err != nil {
-			return nil, fmt.Errorf("fetch review: %w", err)
-		}
+// detectNewCommit checks whether HEAD has moved past headBefore.
+func detectNewCommit(repoRoot, headBefore string) (string, bool) {
+	head, err := git.ResolveSHA(repoRoot, "HEAD")
+	if err != nil {
+		return "", false
 	}
-
-	fixPrompt := params.Prompt
-	if fixPrompt == "" {
-		fixPrompt = buildGenericFixPrompt(review.Output)
+	if head != headBefore {
+		return head, true
 	}
-
-	if params.UseWorktree {
-		return fixJobWorktree(ctx, params, fixPrompt)
-	}
-	return fixJobDirect(ctx, params, fixPrompt)
+	return "", false
 }
 
 // fixJobDirect runs the agent directly on the repo and detects commits.
+// If the agent leaves uncommitted changes, it retries with a commit prompt.
 func fixJobDirect(ctx context.Context, params fixJobParams, prompt string) (*fixJobResult, error) {
 	out := params.Output
 	if out == nil {
@@ -191,7 +177,7 @@ func fixJobDirect(ctx context.Context, params fixJobParams, prompt string) (*fix
 
 	headBefore, err := git.ResolveSHA(params.RepoRoot, "HEAD")
 	if err != nil {
-		// Can't verify commits - just run agent and return
+		// Can't track commits - just run agent and return
 		agentOutput, agentErr := params.Agent.Review(ctx, params.RepoRoot, "HEAD", prompt, out)
 		if agentErr != nil {
 			return nil, fmt.Errorf("fix agent failed: %w", agentErr)
@@ -204,39 +190,24 @@ func fixJobDirect(ctx context.Context, params fixJobParams, prompt string) (*fix
 		return nil, fmt.Errorf("fix agent failed: %w", agentErr)
 	}
 
-	result := &fixJobResult{AgentOutput: agentOutput}
-
-	// Check if agent created a commit
-	headAfter, err := git.ResolveSHA(params.RepoRoot, "HEAD")
-	if err == nil && headBefore != headAfter {
-		result.CommitCreated = true
-		result.NewCommitSHA = headAfter
-		return result, nil
+	if sha, ok := detectNewCommit(params.RepoRoot, headBefore); ok {
+		return &fixJobResult{CommitCreated: true, NewCommitSHA: sha, AgentOutput: agentOutput}, nil
 	}
 
-	// No commit - check for uncommitted changes
-	hasChanges, err := git.HasUncommittedChanges(params.RepoRoot)
-	if err != nil || !hasChanges {
-		result.NoChanges = (err == nil && !hasChanges)
-		return result, nil
+	// No commit - retry if there are uncommitted changes
+	hasChanges, _ := git.HasUncommittedChanges(params.RepoRoot)
+	if !hasChanges {
+		return &fixJobResult{NoChanges: true, AgentOutput: agentOutput}, nil
 	}
 
-	// Uncommitted changes - retry with commit instructions
-	commitPrompt := buildGenericCommitPrompt()
-	params.Agent.Review(ctx, params.RepoRoot, "HEAD", commitPrompt, out)
-
-	// Check if retry created a commit
-	headFinal, err := git.ResolveSHA(params.RepoRoot, "HEAD")
-	if err == nil && headFinal != headBefore {
-		result.CommitCreated = true
-		result.NewCommitSHA = headFinal
-		return result, nil
+	params.Agent.Review(ctx, params.RepoRoot, "HEAD", buildGenericCommitPrompt(), out)
+	if sha, ok := detectNewCommit(params.RepoRoot, headBefore); ok {
+		return &fixJobResult{CommitCreated: true, NewCommitSHA: sha, AgentOutput: agentOutput}, nil
 	}
 
-	// Still no commit
+	// Still no commit - report whether changes remain
 	hasChanges, _ = git.HasUncommittedChanges(params.RepoRoot)
-	result.NoChanges = !hasChanges
-	return result, nil
+	return &fixJobResult{NoChanges: !hasChanges, AgentOutput: agentOutput}, nil
 }
 
 // fixJobWorktree runs the agent in an isolated worktree and applies changes back.
@@ -274,12 +245,10 @@ func fixJobWorktree(ctx context.Context, params fixJobParams, prompt string) (*f
 		return &fixJobResult{AgentOutput: agentOutput, AgentErr: agentErr}, nil
 	}
 
-	// Check if worktree has changes
 	if git.IsWorkingTreeClean(worktreePath) {
 		return &fixJobResult{AgentOutput: agentOutput, NoChanges: true}, nil
 	}
 
-	// Apply changes and commit
 	if err := applyWorktreeChanges(params.RepoRoot, worktreePath); err != nil {
 		return nil, fmt.Errorf("apply worktree changes: %w", err)
 	}
@@ -473,13 +442,11 @@ func fixSingleJob(cmd *cobra.Command, repoRoot string, jobID int64, opts fixOpti
 		out = fmtr
 	}
 
-	result, err := fixJobCore(ctx, fixJobParams{
+	result, err := fixJobDirect(ctx, fixJobParams{
 		RepoRoot: repoRoot,
-		JobID:    jobID,
-		Review:   review,
 		Agent:    fixAgent,
 		Output:   out,
-	})
+	}, buildGenericFixPrompt(review.Output))
 	if fmtr != nil {
 		fmtr.Flush()
 	}
