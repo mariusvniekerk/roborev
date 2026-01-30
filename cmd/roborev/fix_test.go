@@ -265,11 +265,6 @@ func TestFixCmdFlagValidation(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "no args and no --unaddressed",
-			args:    []string{},
-			wantErr: "requires at least 1 arg",
-		},
-		{
 			name:    "--branch without --unaddressed",
 			args:    []string{"--branch", "main"},
 			wantErr: "--branch requires --unaddressed",

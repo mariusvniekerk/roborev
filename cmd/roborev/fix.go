@@ -72,10 +72,6 @@ Examples:
 			if unaddressed && len(args) > 0 {
 				return fmt.Errorf("--unaddressed cannot be used with positional job IDs")
 			}
-			if !unaddressed && len(args) == 0 {
-				return fmt.Errorf("requires at least 1 arg(s), only received 0 (use --unaddressed to fix all unaddressed jobs)")
-			}
-
 			opts := fixOptions{
 				agentName: agentName,
 				model:     model,
