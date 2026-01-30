@@ -148,6 +148,7 @@ type RepoConfig struct {
 	DisplayName        string   `toml:"display_name"`
 	ReviewReasoning    string   `toml:"review_reasoning"` // Reasoning level for reviews: thorough, standard, fast
 	RefineReasoning    string   `toml:"refine_reasoning"` // Reasoning level for refine: thorough, standard, fast
+	FixReasoning       string   `toml:"fix_reasoning"`    // Reasoning level for fix: thorough, standard, fast
 
 	// Workflow-specific agent/model configuration
 	ReviewAgent         string `toml:"review_agent"`
@@ -348,6 +349,20 @@ func ResolveRefineReasoning(explicit string, repoPath string) (string, error) {
 	}
 
 	return "standard", nil // Default for refine: balanced analysis
+}
+
+// ResolveFixReasoning determines reasoning level for fix.
+// Priority: explicit > per-repo config > default (standard)
+func ResolveFixReasoning(explicit string, repoPath string) (string, error) {
+	if strings.TrimSpace(explicit) != "" {
+		return normalizeReasoning(explicit)
+	}
+
+	if repoCfg, err := LoadRepoConfig(repoPath); err == nil && repoCfg != nil && strings.TrimSpace(repoCfg.FixReasoning) != "" {
+		return normalizeReasoning(repoCfg.FixReasoning)
+	}
+
+	return "standard", nil // Default for fix: balanced analysis
 }
 
 // ResolveModel determines which model to use based on config priority:

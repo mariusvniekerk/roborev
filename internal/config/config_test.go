@@ -360,6 +360,57 @@ func TestResolveRefineReasoning(t *testing.T) {
 	})
 }
 
+func TestResolveFixReasoning(t *testing.T) {
+	t.Run("default when no config", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		reasoning, err := ResolveFixReasoning("", tmpDir)
+		if err != nil {
+			t.Fatalf("ResolveFixReasoning failed: %v", err)
+		}
+		if reasoning != "standard" {
+			t.Errorf("Expected default 'standard', got '%s'", reasoning)
+		}
+	})
+
+	t.Run("repo config when explicit empty", func(t *testing.T) {
+		tmpDir := newTempRepo(t, `fix_reasoning = "thorough"`)
+		reasoning, err := ResolveFixReasoning("", tmpDir)
+		if err != nil {
+			t.Fatalf("ResolveFixReasoning failed: %v", err)
+		}
+		if reasoning != "thorough" {
+			t.Errorf("Expected 'thorough' from repo config, got '%s'", reasoning)
+		}
+	})
+
+	t.Run("explicit overrides repo config", func(t *testing.T) {
+		tmpDir := newTempRepo(t, `fix_reasoning = "thorough"`)
+		reasoning, err := ResolveFixReasoning("fast", tmpDir)
+		if err != nil {
+			t.Fatalf("ResolveFixReasoning failed: %v", err)
+		}
+		if reasoning != "fast" {
+			t.Errorf("Expected 'fast' from explicit override, got '%s'", reasoning)
+		}
+	})
+
+	t.Run("invalid explicit", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		_, err := ResolveFixReasoning("nope", tmpDir)
+		if err == nil {
+			t.Fatal("Expected error for invalid reasoning")
+		}
+	})
+
+	t.Run("invalid repo config", func(t *testing.T) {
+		tmpDir := newTempRepo(t, `fix_reasoning = "invalid"`)
+		_, err := ResolveFixReasoning("", tmpDir)
+		if err == nil {
+			t.Fatal("Expected error for invalid repo reasoning")
+		}
+	})
+}
+
 func TestIsBranchExcluded(t *testing.T) {
 	t.Run("no config file", func(t *testing.T) {
 		tmpDir := t.TempDir()
@@ -1060,6 +1111,8 @@ func TestResolveAgentForWorkflow(t *testing.T) {
 		{"fix falls back to generic agent", "", M{"agent": "claude"}, nil, "fix", "fast", "claude"},
 		{"fix falls back to global fix_agent", "", nil, M{"fix_agent": "claude"}, "fix", "fast", "claude"},
 		{"fix global level-specific", "", nil, M{"fix_agent": "codex", "fix_agent_fast": "claude"}, "fix", "fast", "claude"},
+		{"fix standard level selects fix_agent_standard", "", M{"fix_agent_standard": "claude", "fix_agent": "codex"}, nil, "fix", "standard", "claude"},
+		{"fix default reasoning (standard) selects level-specific", "", nil, M{"fix_agent_standard": "claude", "fix_agent": "codex"}, "fix", "standard", "claude"},
 		{"fix isolated from review", "", M{"review_agent": "claude"}, M{"default_agent": "codex"}, "fix", "fast", "codex"},
 		{"fix isolated from refine", "", M{"refine_agent": "claude"}, M{"default_agent": "codex"}, "fix", "fast", "codex"},
 	}

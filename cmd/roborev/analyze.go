@@ -730,6 +730,12 @@ func runFixAgent(cmd *cobra.Command, repoPath, agentName, model, reasoning, prom
 		return fmt.Errorf("load config: %w", err)
 	}
 
+	// Resolve reasoning level (defaults to "standard" for fix)
+	reasoning, reasonErr := config.ResolveFixReasoning(reasoning, repoPath)
+	if reasonErr != nil {
+		return fmt.Errorf("resolve fix reasoning: %w", reasonErr)
+	}
+
 	// Resolve agent and model via fix workflow config
 	agentName = config.ResolveAgentForWorkflow(agentName, repoPath, cfg, "fix", reasoning)
 	model = config.ResolveModelForWorkflow(model, repoPath, cfg, "fix", reasoning)

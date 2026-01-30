@@ -227,15 +227,20 @@ func resolveFixAgent(repoPath string, opts fixOptions) (agent.Agent, error) {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 
-	agentName := config.ResolveAgentForWorkflow(opts.agentName, repoPath, cfg, "fix", opts.reasoning)
-	modelStr := config.ResolveModelForWorkflow(opts.model, repoPath, cfg, "fix", opts.reasoning)
+	reasoning, err := config.ResolveFixReasoning(opts.reasoning, repoPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve fix reasoning: %w", err)
+	}
+
+	agentName := config.ResolveAgentForWorkflow(opts.agentName, repoPath, cfg, "fix", reasoning)
+	modelStr := config.ResolveModelForWorkflow(opts.model, repoPath, cfg, "fix", reasoning)
 
 	a, err := agent.GetAvailable(agentName)
 	if err != nil {
 		return nil, fmt.Errorf("get agent: %w", err)
 	}
 
-	reasoningLevel := agent.ParseReasoningLevel(opts.reasoning)
+	reasoningLevel := agent.ParseReasoningLevel(reasoning)
 	a = a.WithAgentic(true).WithReasoning(reasoningLevel)
 	if modelStr != "" {
 		a = a.WithModel(modelStr)

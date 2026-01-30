@@ -75,10 +75,17 @@ Do NOT search for .roborev.toml or any other files. .roborev.toml is simply a fe
 Output ONLY the changelog content, no preamble.
 EOF
 
-if [ "$AGENT" = "claude" ]; then
-    claude --print < "$PROMPTFILE" > "$TMPFILE"
-else
-    codex exec --skip-git-repo-check --sandbox read-only -c reasoning_effort=high -o "$TMPFILE" - >/dev/null < "$PROMPTFILE"
-fi
+case "$AGENT" in
+    codex)
+        codex exec --skip-git-repo-check --sandbox read-only -c reasoning_effort=high -o "$TMPFILE" - >/dev/null < "$PROMPTFILE"
+        ;;
+    claude)
+        claude --print < "$PROMPTFILE" > "$TMPFILE"
+        ;;
+    *)
+        echo "Error: unknown CHANGELOG_AGENT '$AGENT' (expected 'codex' or 'claude')" >&2
+        exit 1
+        ;;
+esac
 
 cat "$TMPFILE"
