@@ -1041,6 +1041,45 @@ func TestValidateRefineContext_FeatureBranchWithoutSinceStillWorks(t *testing.T)
 	}
 }
 
+func TestWorktreeCleanupBetweenIterations(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repoDir, _, _ := setupTestGitRepo(t)
+
+	// Simulate the refine loop pattern: create a worktree, then clean it up
+	// before the next iteration. Verify the directory is removed each time.
+	var prevPath string
+	for i := 0; i < 3; i++ {
+		worktreePath, cleanup, err := createTempWorktree(repoDir)
+		if err != nil {
+			t.Fatalf("iteration %d: createTempWorktree failed: %v", i, err)
+		}
+
+		// Verify previous worktree was cleaned up
+		if prevPath != "" {
+			if _, err := os.Stat(prevPath); !os.IsNotExist(err) {
+				t.Fatalf("iteration %d: previous worktree %s still exists after cleanup", i, prevPath)
+			}
+		}
+
+		// Verify current worktree exists
+		if _, err := os.Stat(worktreePath); err != nil {
+			t.Fatalf("iteration %d: worktree %s should exist: %v", i, worktreePath, err)
+		}
+
+		// Simulate the explicit cleanup call (as done on error/no-change paths)
+		cleanup()
+		prevPath = worktreePath
+	}
+
+	// Verify the last worktree was also cleaned up
+	if _, err := os.Stat(prevPath); !os.IsNotExist(err) {
+		t.Fatalf("last worktree %s still exists after cleanup", prevPath)
+	}
+}
+
 func TestResolveReasoningWithFast(t *testing.T) {
 	tests := []struct {
 		name                  string
