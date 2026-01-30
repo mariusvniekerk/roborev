@@ -42,22 +42,26 @@ func refineCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:          "refine",
-		Short:        "Automatically address failed code reviews",
+		Short:        "Iterative review-fix loop until all reviews pass",
 		SilenceUsage: true,
-		Long: `Automatically address failed code reviews using an AI agent.
+		Long: `Automatically address failed code reviews in a loop.
 
-This command runs an agentic loop that:
-1. Finds failed reviews for commits on the current branch
-2. Uses an AI agent to make code changes addressing the findings
-3. Commits the changes and waits for re-review
-4. Repeats until all reviews pass or max iterations reached
+Refine finds failed reviews on the current branch, runs an agent to fix
+them, commits the changes, then waits for re-review. If the new commit
+also fails review, it tries again. Once all per-commit reviews pass, it
+runs a branch-level review covering the full commit range and addresses
+any findings from that too. The loop continues until everything passes
+or --max-iterations is reached.
+
+Unlike 'roborev fix' (which is a single-pass fix with no re-review),
+refine is fully automated: it reviews, fixes, re-reviews, and iterates.
+
+The agent runs in an isolated worktree so your working tree is not
+modified during the process.
 
 Prerequisites:
-- Must be in a git repository
-- Working tree must be clean (no uncommitted changes)
-- Not in the middle of a rebase
-
-The agent will run tests and verify the build before committing.
+- Must be in a git repository with a clean working tree
+- Must be on a feature branch (or use --since on the default branch)
 
 Use --since to specify a starting commit when on the main branch or to
 limit how far back to look for reviews to address.`,
@@ -446,28 +450,11 @@ func runRefine(agentName, modelStr, reasoningStr string, maxIterations int, quie
 
 		// Check if agent made changes in worktree
 		if git.IsWorkingTreeClean(worktreePath) {
-			fmt.Println("Agent made no changes")
-			// Check how many times we've tried this review (only count our own attempts)
-			attempts, err := client.GetCommentsForJob(currentFailedReview.JobID)
-			if err != nil {
-				return fmt.Errorf("fetch attempts: %w", err)
-			}
-			noChangeAttempts := 0
-			for _, a := range attempts {
-				if a.Responder == "roborev-refine" && strings.Contains(a.Response, "could not determine how to address") {
-					noChangeAttempts++
-				}
-			}
-			if noChangeAttempts >= 2 {
-				fmt.Println("Giving up after multiple failed attempts (review remains unaddressed)")
-				client.AddComment(currentFailedReview.JobID, "roborev-refine", "Agent could not determine how to address findings (attempt 3, giving up)")
-				skippedReviews[currentFailedReview.ID] = true
-				currentFailedReview = nil
-			} else {
-				client.AddComment(currentFailedReview.JobID, "roborev-refine", fmt.Sprintf("Agent could not determine how to address findings (attempt %d)", noChangeAttempts+1))
-				fmt.Printf("Attempt %d failed, will retry\n", noChangeAttempts+1)
-			}
 			cleanupWorktree()
+			fmt.Println("Agent made no changes - skipping this review")
+			client.AddComment(currentFailedReview.JobID, "roborev-refine", "Agent could not determine how to address findings")
+			skippedReviews[currentFailedReview.ID] = true
+			currentFailedReview = nil
 			continue
 		}
 

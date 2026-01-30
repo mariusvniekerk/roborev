@@ -33,27 +33,27 @@ func fixCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "fix [job_id...]",
-		Short: "Apply fixes for an analysis job",
-		Long: `Apply fixes for one or more analysis jobs.
+		Short: "One-shot fix for review findings",
+		Long: `Run an agent to address findings from one or more completed reviews.
 
-This command fetches the analysis output from a completed job and runs
-an agentic agent locally to apply the suggested fixes. When complete,
-a response is added to the job and it is marked as addressed.
+This is a single-pass fix: the agent applies changes and commits, but
+does not re-review or iterate. Use 'roborev refine' for an automated
+loop that re-reviews fixes and retries until reviews pass.
 
-The fix runs synchronously in your terminal, streaming output as the
-agent works. This allows you to review the analysis results before
-deciding which jobs to fix.
+The agent runs synchronously in your terminal, streaming output as it
+works. The review output is printed first so you can see what needs
+fixing. When complete, the job is marked as addressed.
 
 Use --unaddressed to automatically discover and fix all unaddressed
 completed jobs for the current repo.
 
 Examples:
-  roborev fix 123                    # Fix a single job
-  roborev fix 123 124 125            # Fix multiple jobs
-  roborev fix --agent claude-code 123
-  roborev fix --unaddressed              # Fix unaddressed jobs on current branch
-  roborev fix --unaddressed --branch main  # Only unaddressed jobs on main
-  roborev fix --unaddressed --all-branches # Fix unaddressed jobs across all branches
+  roborev fix 123                        # Fix a single job
+  roborev fix 123 124 125                # Fix multiple jobs sequentially
+  roborev fix --agent claude-code 123    # Use a specific agent
+  roborev fix --unaddressed              # Fix all unaddressed on current branch
+  roborev fix --unaddressed --branch main
+  roborev fix --unaddressed --all-branches
 `,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
