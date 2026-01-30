@@ -158,11 +158,10 @@ func TestIsUnbornHead(t *testing.T) {
 		runGit(t, dir, "add", ".")
 		runGit(t, dir, "commit", "-m", "init")
 
-		// Corrupt the branch ref by writing a bogus SHA
-		refPath := filepath.Join(dir, ".git", "refs", "heads", "main")
-		if _, err := os.Stat(refPath); os.IsNotExist(err) {
-			refPath = filepath.Join(dir, ".git", "refs", "heads", "master")
-		}
+		// Corrupt the branch ref by writing a bogus SHA.
+		// Read the actual HEAD target to avoid hardcoding main/master.
+		headRef := strings.TrimSpace(runGit(t, dir, "symbolic-ref", "HEAD"))
+		refPath := filepath.Join(dir, ".git", headRef)
 		if err := os.WriteFile(refPath, []byte("0000000000000000000000000000000000000000\n"), 0644); err != nil {
 			t.Fatal(err)
 		}
