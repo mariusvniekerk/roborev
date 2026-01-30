@@ -308,6 +308,24 @@ func TestFixCmdFlagValidation(t *testing.T) {
 	}
 }
 
+func TestFixNoArgsDefaultsToUnaddressed(t *testing.T) {
+	// Running fix with no args should not produce a validation error —
+	// it should enter the unaddressed path (which will fail at daemon
+	// connection, not at argument validation).
+	cmd := fixCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error (daemon not running), got nil")
+	}
+	// Should NOT be a validation/args error
+	if strings.Contains(err.Error(), "requires at least") {
+		t.Errorf("no-args should default to --unaddressed, got validation error: %v", err)
+	}
+}
+
 func TestRunFixUnaddressed(t *testing.T) {
 	tmpDir := initTestGitRepo(t)
 
