@@ -411,6 +411,35 @@ func TestResolveFixReasoning(t *testing.T) {
 	})
 }
 
+func TestFixEmptyReasoningSelectsStandardAgent(t *testing.T) {
+	// End-to-end: empty --reasoning resolves to "standard" via ResolveFixReasoning,
+	// then ResolveAgentForWorkflow selects fix_agent_standard over fix_agent.
+	tmpDir := t.TempDir()
+	writeRepoConfig(t, tmpDir, M{
+		"fix_agent":          "codex",
+		"fix_agent_standard": "claude",
+		"fix_agent_fast":     "gemini",
+	})
+
+	reasoning, err := ResolveFixReasoning("", tmpDir)
+	if err != nil {
+		t.Fatalf("ResolveFixReasoning: %v", err)
+	}
+	if reasoning != "standard" {
+		t.Fatalf("expected default reasoning 'standard', got %q", reasoning)
+	}
+
+	agent := ResolveAgentForWorkflow("", tmpDir, nil, "fix", reasoning)
+	if agent != "claude" {
+		t.Errorf("expected fix_agent_standard 'claude', got %q", agent)
+	}
+
+	model := ResolveModelForWorkflow("", tmpDir, nil, "fix", reasoning)
+	if model != "" {
+		t.Errorf("expected empty model (none configured), got %q", model)
+	}
+}
+
 func TestIsBranchExcluded(t *testing.T) {
 	t.Run("no config file", func(t *testing.T) {
 		tmpDir := t.TempDir()
