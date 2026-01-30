@@ -150,19 +150,27 @@ func GetStat(repoPath, sha string) (string, error) {
 }
 
 // IsUnbornHead returns true if the repository has an unborn HEAD (no commits yet).
-// Returns false if HEAD points to a valid commit or if the path is not a git repo.
+// Returns false if HEAD points to a valid commit, if the path is not a git repo,
+// or if HEAD is corrupt (e.g., ref pointing to a missing object).
 func IsUnbornHead(repoPath string) bool {
-	// "git rev-parse --verify HEAD" exits non-zero for unborn HEAD.
-	// "git rev-parse --git-dir" confirms it's a git repo.
-	cmd := exec.Command("git", "rev-parse", "--verify", "HEAD")
+	// Unborn HEAD = symbolic ref exists but the target branch ref doesn't.
+	// Step 1: HEAD must be a symbolic ref (e.g., refs/heads/main)
+	cmd := exec.Command("git", "symbolic-ref", "-q", "HEAD")
 	cmd.Dir = repoPath
-	if cmd.Run() == nil {
-		return false // HEAD resolves fine, not unborn
+	out, err := cmd.Output()
+	if err != nil {
+		return false // not a symbolic ref or not a git repo
 	}
-	// Confirm it's actually a git repo
-	cmd = exec.Command("git", "rev-parse", "--git-dir")
+	ref := strings.TrimSpace(string(out))
+	if ref == "" {
+		return false
+	}
+	// Step 2: "rev-parse --verify <ref>" fails only when the ref doesn't
+	// exist at all (unborn). For corrupt refs (file exists but points to a
+	// missing object), rev-parse still succeeds and returns the raw SHA.
+	cmd = exec.Command("git", "rev-parse", "--verify", ref)
 	cmd.Dir = repoPath
-	return cmd.Run() == nil
+	return cmd.Run() != nil
 }
 
 // ResolveSHA resolves a ref (like HEAD) to a full SHA

@@ -110,6 +110,69 @@ func runGit(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+func TestIsUnbornHead(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	t.Run("true for empty repo", func(t *testing.T) {
+		dir := t.TempDir()
+		runGit(t, dir, "init")
+		if !IsUnbornHead(dir) {
+			t.Error("expected IsUnbornHead=true for empty repo")
+		}
+	})
+
+	t.Run("false after first commit", func(t *testing.T) {
+		dir := t.TempDir()
+		runGit(t, dir, "init")
+		runGit(t, dir, "config", "user.email", "test@test.com")
+		runGit(t, dir, "config", "user.name", "Test")
+		if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		runGit(t, dir, "add", ".")
+		runGit(t, dir, "commit", "-m", "init")
+		if IsUnbornHead(dir) {
+			t.Error("expected IsUnbornHead=false after commit")
+		}
+	})
+
+	t.Run("false for non-git directory", func(t *testing.T) {
+		dir := t.TempDir()
+		if IsUnbornHead(dir) {
+			t.Error("expected IsUnbornHead=false for non-git dir")
+		}
+	})
+
+	t.Run("false for corrupt ref", func(t *testing.T) {
+		// Simulate a repo where HEAD's target branch exists but points to
+		// a missing object — this is NOT unborn, it's corrupt.
+		dir := t.TempDir()
+		runGit(t, dir, "init")
+		runGit(t, dir, "config", "user.email", "test@test.com")
+		runGit(t, dir, "config", "user.name", "Test")
+		if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		runGit(t, dir, "add", ".")
+		runGit(t, dir, "commit", "-m", "init")
+
+		// Corrupt the branch ref by writing a bogus SHA
+		refPath := filepath.Join(dir, ".git", "refs", "heads", "main")
+		if _, err := os.Stat(refPath); os.IsNotExist(err) {
+			refPath = filepath.Join(dir, ".git", "refs", "heads", "master")
+		}
+		if err := os.WriteFile(refPath, []byte("0000000000000000000000000000000000000000\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		if IsUnbornHead(dir) {
+			t.Error("expected IsUnbornHead=false for corrupt ref (ref exists but object is missing)")
+		}
+	})
+}
+
 func TestNormalizeMSYSPath(t *testing.T) {
 	tests := []struct {
 		name     string
