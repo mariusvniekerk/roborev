@@ -362,18 +362,26 @@ func TestRunFixUnaddressed(t *testing.T) {
 
 	t.Run("finds and processes unaddressed jobs", func(t *testing.T) {
 		var reviewCalls, addressCalls atomic.Int32
+		var unaddressedCalls atomic.Int32
 		_, cleanup := setupMockDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case "/api/jobs":
 				q := r.URL.Query()
 				if q.Get("addressed") == "false" && q.Get("limit") == "0" {
-					json.NewEncoder(w).Encode(map[string]interface{}{
-						"jobs": []storage.ReviewJob{
-							{ID: 10, Status: storage.JobStatusDone, Agent: "test"},
-							{ID: 20, Status: storage.JobStatusDone, Agent: "test"},
-						},
-						"has_more": false,
-					})
+					if unaddressedCalls.Add(1) == 1 {
+						json.NewEncoder(w).Encode(map[string]interface{}{
+							"jobs": []storage.ReviewJob{
+								{ID: 10, Status: storage.JobStatusDone, Agent: "test"},
+								{ID: 20, Status: storage.JobStatusDone, Agent: "test"},
+							},
+							"has_more": false,
+						})
+					} else {
+						json.NewEncoder(w).Encode(map[string]interface{}{
+							"jobs":     []storage.ReviewJob{},
+							"has_more": false,
+						})
+					}
 				} else {
 					json.NewEncoder(w).Encode(map[string]interface{}{
 						"jobs": []storage.ReviewJob{
@@ -476,21 +484,29 @@ func TestRunFixUnaddressed(t *testing.T) {
 func TestRunFixUnaddressedOrdering(t *testing.T) {
 	tmpDir := initTestGitRepo(t)
 
-	makeHandler := func() http.Handler {
+	makeHandler := func() (http.Handler, *atomic.Int32) {
+		var unaddressedCalls atomic.Int32
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case "/api/jobs":
 				q := r.URL.Query()
 				if q.Get("addressed") == "false" {
-					// Return newest first (as the API does)
-					json.NewEncoder(w).Encode(map[string]interface{}{
-						"jobs": []storage.ReviewJob{
-							{ID: 30, Status: storage.JobStatusDone, Agent: "test"},
-							{ID: 20, Status: storage.JobStatusDone, Agent: "test"},
-							{ID: 10, Status: storage.JobStatusDone, Agent: "test"},
-						},
-						"has_more": false,
-					})
+					if unaddressedCalls.Add(1) == 1 {
+						// Return newest first (as the API does)
+						json.NewEncoder(w).Encode(map[string]interface{}{
+							"jobs": []storage.ReviewJob{
+								{ID: 30, Status: storage.JobStatusDone, Agent: "test"},
+								{ID: 20, Status: storage.JobStatusDone, Agent: "test"},
+								{ID: 10, Status: storage.JobStatusDone, Agent: "test"},
+							},
+							"has_more": false,
+						})
+					} else {
+						json.NewEncoder(w).Encode(map[string]interface{}{
+							"jobs":     []storage.ReviewJob{},
+							"has_more": false,
+						})
+					}
 				} else {
 					json.NewEncoder(w).Encode(map[string]interface{}{
 						"jobs": []storage.ReviewJob{
@@ -508,11 +524,12 @@ func TestRunFixUnaddressedOrdering(t *testing.T) {
 			case "/api/enqueue":
 				w.WriteHeader(http.StatusOK)
 			}
-		})
+		}), &unaddressedCalls
 	}
 
 	t.Run("oldest first by default", func(t *testing.T) {
-		_, cleanup := setupMockDaemon(t, makeHandler())
+		h, _ := makeHandler()
+		_, cleanup := setupMockDaemon(t, h)
 		defer cleanup()
 
 		var output bytes.Buffer
@@ -533,7 +550,8 @@ func TestRunFixUnaddressedOrdering(t *testing.T) {
 	})
 
 	t.Run("newest first with flag", func(t *testing.T) {
-		_, cleanup := setupMockDaemon(t, makeHandler())
+		h, _ := makeHandler()
+		_, cleanup := setupMockDaemon(t, h)
 		defer cleanup()
 
 		var output bytes.Buffer

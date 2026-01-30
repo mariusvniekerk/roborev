@@ -296,9 +296,11 @@ func runFixWithSeen(cmd *cobra.Command, jobIDs []int64, opts fixOptions, seen ma
 				if !opts.quiet {
 					cmd.Printf("Error fixing job %d: %v\n", jobID, err)
 				}
-				continue
 			}
 		}
+		// Mark as seen so the re-query loop doesn't retry this job.
+		// Connection errors bail early (fatal return above), so only
+		// successfully attempted jobs reach here.
 		if seen != nil {
 			seen[jobID] = true
 		}
