@@ -83,7 +83,7 @@ Examples:
 				quiet:     quiet,
 			}
 
-			if unaddressed {
+			if unaddressed || len(args) == 0 {
 				// Default to current branch unless --branch or --all-branches is set
 				effectiveBranch := branch
 				if !allBranches && effectiveBranch == "" {
