@@ -267,13 +267,31 @@ func runFix(cmd *cobra.Command, jobIDs []int64, opts fixOptions) error {
 			cmd.Printf("\n=== Fixing job %d (%d/%d) ===\n", jobID, i+1, len(jobIDs))
 		}
 
-		if err := fixSingleJob(cmd, repoRoot, jobID, opts); err != nil {
-			if len(jobIDs) == 1 {
-				return err
+		err := fixSingleJob(cmd, repoRoot, jobID, opts)
+		if err != nil {
+			if isConnectionError(err) {
+				if !opts.quiet {
+					cmd.Printf("Daemon connection lost, attempting recovery...\n")
+				}
+				if recoverErr := ensureDaemon(); recoverErr != nil {
+					return fmt.Errorf("daemon connection lost and recovery failed: %w", recoverErr)
+				}
+				// Retry this job once after recovery
+				err = fixSingleJob(cmd, repoRoot, jobID, opts)
+				if err != nil {
+					if isConnectionError(err) {
+						return fmt.Errorf("daemon connection lost after recovery: %w", err)
+					}
+					// Non-connection error on retry: log and continue
+				}
 			}
-			// Multiple jobs: log error and continue
-			if !opts.quiet {
-				cmd.Printf("Error fixing job %d: %v\n", jobID, err)
+			if err != nil {
+				if len(jobIDs) == 1 {
+					return err
+				}
+				if !opts.quiet {
+					cmd.Printf("Error fixing job %d: %v\n", jobID, err)
+				}
 			}
 		}
 	}
