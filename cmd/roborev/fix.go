@@ -380,13 +380,16 @@ func fixSingleJob(cmd *cobra.Command, repoRoot string, jobID int64, opts fixOpti
 		cmd.Println(review.Output)
 		cmd.Println(strings.Repeat("-", 60))
 		cmd.Println()
-		cmd.Printf("Running fix agent to apply changes...\n\n")
 	}
 
 	// Resolve agent
 	fixAgent, err := resolveFixAgent(repoRoot, opts)
 	if err != nil {
 		return err
+	}
+
+	if !opts.quiet {
+		cmd.Printf("Running fix agent (%s) to apply changes...\n\n", fixAgent.Name())
 	}
 
 	// Set up output
