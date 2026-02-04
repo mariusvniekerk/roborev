@@ -115,6 +115,9 @@ func hasSeverityLabel(output string) bool {
 			checkText = strings.TrimSpace(checkText)
 		}
 
+		// Strip markdown formatting (bold, headers) before checking
+		checkText = stripMarkdown(checkText)
+
 		// Check if text starts with a severity word
 		for _, sev := range severities {
 			if !strings.HasPrefix(checkText, sev) {
@@ -155,6 +158,30 @@ func hasSeverityLabel(output string) bool {
 
 			return true
 		}
+
+		// Check for "severity: <level>" pattern (e.g., "**Severity**: High")
+		if strings.HasPrefix(checkText, "severity") {
+			rest := checkText[len("severity"):]
+			rest = strings.TrimSpace(rest)
+			hasSep := len(rest) > 0 && (rest[0] == ':' || rest[0] == '|' ||
+				strings.HasPrefix(rest, "—") || strings.HasPrefix(rest, "–"))
+			// Accept hyphen-minus when followed by space (mirrors the severity-word branch)
+			if !hasSep && len(rest) > 1 && rest[0] == '-' && rest[1] == ' ' {
+				hasSep = true
+			}
+			if hasSep {
+				// Skip separator and whitespace
+				rest = strings.TrimLeft(rest, ":-–—| ")
+				rest = strings.TrimSpace(rest)
+				for _, sev := range severities {
+					if strings.HasPrefix(rest, sev) {
+						if !isLegendEntry(lines, i) {
+							return true
+						}
+					}
+				}
+			}
+		}
 	}
 	return false
 }
@@ -169,6 +196,10 @@ func isLegendEntry(lines []string, i int) bool {
 		if len(prev) == 0 {
 			continue
 		}
+
+		// Strip markdown and list markers so bolded headers like
+		// "**Severity levels:**" are recognized the same as plain text.
+		prev = stripMarkdown(stripListMarker(prev))
 
 		// Check for legend header patterns (ends with ":" and contains indicator word)
 		if strings.HasSuffix(prev, ":") || strings.HasSuffix(prev, "：") {
