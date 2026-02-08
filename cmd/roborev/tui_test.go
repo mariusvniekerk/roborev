@@ -6569,6 +6569,7 @@ func TestFetchCommitMsgJobTypeDetection(t *testing.T) {
 			name: "regular commit with Prompt populated should not error early",
 			job: storage.ReviewJob{
 				ID:       1,
+				JobType:  storage.JobTypeReview,
 				GitRef:   "abc123def456",               // valid commit SHA
 				Prompt:   "You are a code reviewer...", // review prompt is stored for all jobs
 				CommitID: func() *int64 { id := int64(123); return &id }(),
@@ -6578,44 +6579,49 @@ func TestFetchCommitMsgJobTypeDetection(t *testing.T) {
 		{
 			name: "run task (GitRef=prompt) should error",
 			job: storage.ReviewJob{
-				ID:     2,
-				GitRef: "prompt",
-				Prompt: "Explain this codebase",
+				ID:      2,
+				JobType: storage.JobTypeTask,
+				GitRef:  "prompt",
+				Prompt:  "Explain this codebase",
 			},
 			expectError: "no commit message for task jobs",
 		},
 		{
 			name: "run task (GitRef=run) should error",
 			job: storage.ReviewJob{
-				ID:     8,
-				GitRef: "run",
-				Prompt: "Do something",
+				ID:      8,
+				JobType: storage.JobTypeTask,
+				GitRef:  "run",
+				Prompt:  "Do something",
 			},
 			expectError: "no commit message for task jobs",
 		},
 		{
 			name: "analyze task should error",
 			job: storage.ReviewJob{
-				ID:     9,
-				GitRef: "analyze",
-				Prompt: "Analyze these files",
+				ID:      9,
+				JobType: storage.JobTypeTask,
+				GitRef:  "analyze",
+				Prompt:  "Analyze these files",
 			},
 			expectError: "no commit message for task jobs",
 		},
 		{
 			name: "custom label task should error",
 			job: storage.ReviewJob{
-				ID:     10,
-				GitRef: "my-custom-task",
-				Prompt: "Do my custom task",
+				ID:      10,
+				JobType: storage.JobTypeTask,
+				GitRef:  "my-custom-task",
+				Prompt:  "Do my custom task",
 			},
 			expectError: "no commit message for task jobs",
 		},
 		{
-			name: "dirty job (GitRef=dirty) should error",
+			name: "dirty job (JobType=dirty) should error",
 			job: storage.ReviewJob{
-				ID:     3,
-				GitRef: "dirty",
+				ID:      3,
+				JobType: storage.JobTypeDirty,
+				GitRef:  "dirty",
 			},
 			expectError: "no commit message for uncommitted changes",
 		},
@@ -6623,6 +6629,7 @@ func TestFetchCommitMsgJobTypeDetection(t *testing.T) {
 			name: "dirty job with DiffContent should error",
 			job: storage.ReviewJob{
 				ID:          4,
+				JobType:     storage.JobTypeDirty,
 				GitRef:      "some-ref",
 				DiffContent: func() *string { s := "diff content"; return &s }(),
 			},
@@ -6646,9 +6653,10 @@ func TestFetchCommitMsgJobTypeDetection(t *testing.T) {
 			expectError: "no git reference available for this job",
 		},
 		{
-			name: "dirty job with nil DiffContent but GitRef=dirty should error",
+			name: "dirty job with nil DiffContent but JobType=dirty should error",
 			job: storage.ReviewJob{
 				ID:          7,
+				JobType:     storage.JobTypeDirty,
 				GitRef:      "dirty",
 				DiffContent: nil,
 			},

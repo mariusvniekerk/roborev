@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS review_jobs (
   prompt TEXT,
   retry_count INTEGER NOT NULL DEFAULT 0,
   diff_content TEXT,
-  output_prefix TEXT
+  output_prefix TEXT,
+  job_type TEXT NOT NULL DEFAULT 'review'
 );
 
 CREATE TABLE IF NOT EXISTS reviews (
@@ -496,6 +497,31 @@ func (db *DB) migrate() error {
 			if err != nil {
 				return fmt.Errorf("create idx_responses_job_id: %w", err)
 			}
+		}
+	}
+
+	// Migration: add job_type column to review_jobs if missing
+	err = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('review_jobs') WHERE name = 'job_type'`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("check job_type column: %w", err)
+	}
+	if count == 0 {
+		_, err = db.Exec(`ALTER TABLE review_jobs ADD COLUMN job_type TEXT NOT NULL DEFAULT 'review'`)
+		if err != nil {
+			return fmt.Errorf("add job_type column: %w", err)
+		}
+		// Backfill job_type for existing rows
+		_, err = db.Exec(`UPDATE review_jobs SET job_type = 'dirty' WHERE (git_ref = 'dirty' OR diff_content IS NOT NULL) AND job_type = 'review'`)
+		if err != nil {
+			return fmt.Errorf("backfill job_type dirty: %w", err)
+		}
+		_, err = db.Exec(`UPDATE review_jobs SET job_type = 'range' WHERE git_ref LIKE '%..%' AND commit_id IS NULL AND job_type = 'review'`)
+		if err != nil {
+			return fmt.Errorf("backfill job_type range: %w", err)
+		}
+		_, err = db.Exec(`UPDATE review_jobs SET job_type = 'task' WHERE commit_id IS NULL AND diff_content IS NULL AND git_ref != 'dirty' AND git_ref NOT LIKE '%..%' AND git_ref != '' AND job_type = 'review'`)
+		if err != nil {
+			return fmt.Errorf("backfill job_type task: %w", err)
 		}
 	}
 

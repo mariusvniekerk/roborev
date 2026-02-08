@@ -700,7 +700,7 @@ func (db *DB) EnqueueJob(repoID, commitID int64, gitRef, branch, agent, model, r
 	now := time.Now()
 	nowStr := now.Format(time.RFC3339)
 
-	result, err := db.Exec(`INSERT INTO review_jobs (repo_id, commit_id, git_ref, branch, agent, model, reasoning, status, uuid, source_machine_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
+	result, err := db.Exec(`INSERT INTO review_jobs (repo_id, commit_id, git_ref, branch, agent, model, reasoning, status, job_type, uuid, source_machine_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 'review', ?, ?, ?)`,
 		repoID, commitID, gitRef, nullString(branch), agent, nullString(model), reasoning, uuid, machineID, nowStr)
 	if err != nil {
 		return nil, err
@@ -716,6 +716,7 @@ func (db *DB) EnqueueJob(repoID, commitID int64, gitRef, branch, agent, model, r
 		Agent:           agent,
 		Model:           model,
 		Reasoning:       reasoning,
+		JobType:         JobTypeReview,
 		Status:          JobStatusQueued,
 		EnqueuedAt:      now,
 		UUID:            uuid,
@@ -734,7 +735,7 @@ func (db *DB) EnqueueRangeJob(repoID int64, gitRef, branch, agent, model, reason
 	now := time.Now()
 	nowStr := now.Format(time.RFC3339)
 
-	result, err := db.Exec(`INSERT INTO review_jobs (repo_id, commit_id, git_ref, branch, agent, model, reasoning, status, uuid, source_machine_id, updated_at) VALUES (?, NULL, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
+	result, err := db.Exec(`INSERT INTO review_jobs (repo_id, commit_id, git_ref, branch, agent, model, reasoning, status, job_type, uuid, source_machine_id, updated_at) VALUES (?, NULL, ?, ?, ?, ?, ?, 'queued', 'range', ?, ?, ?)`,
 		repoID, gitRef, nullString(branch), agent, nullString(model), reasoning, uuid, machineID, nowStr)
 	if err != nil {
 		return nil, err
@@ -750,6 +751,7 @@ func (db *DB) EnqueueRangeJob(repoID int64, gitRef, branch, agent, model, reason
 		Agent:           agent,
 		Model:           model,
 		Reasoning:       reasoning,
+		JobType:         JobTypeRange,
 		Status:          JobStatusQueued,
 		EnqueuedAt:      now,
 		UUID:            uuid,
@@ -769,7 +771,7 @@ func (db *DB) EnqueueDirtyJob(repoID int64, gitRef, branch, agent, model, reason
 	now := time.Now()
 	nowStr := now.Format(time.RFC3339)
 
-	result, err := db.Exec(`INSERT INTO review_jobs (repo_id, commit_id, git_ref, branch, agent, model, reasoning, status, diff_content, uuid, source_machine_id, updated_at) VALUES (?, NULL, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)`,
+	result, err := db.Exec(`INSERT INTO review_jobs (repo_id, commit_id, git_ref, branch, agent, model, reasoning, status, job_type, diff_content, uuid, source_machine_id, updated_at) VALUES (?, NULL, ?, ?, ?, ?, ?, 'queued', 'dirty', ?, ?, ?, ?)`,
 		repoID, gitRef, nullString(branch), agent, nullString(model), reasoning, diffContent, uuid, machineID, nowStr)
 	if err != nil {
 		return nil, err
@@ -785,6 +787,7 @@ func (db *DB) EnqueueDirtyJob(repoID int64, gitRef, branch, agent, model, reason
 		Agent:           agent,
 		Model:           model,
 		Reasoning:       reasoning,
+		JobType:         JobTypeDirty,
 		Status:          JobStatusQueued,
 		EnqueuedAt:      now,
 		DiffContent:     &diffContent,
@@ -827,7 +830,7 @@ func (db *DB) EnqueuePromptJob(opts PromptJobOptions) (*ReviewJob, error) {
 	now := time.Now()
 	nowStr := now.Format(time.RFC3339)
 
-	result, err := db.Exec(`INSERT INTO review_jobs (repo_id, commit_id, git_ref, branch, agent, model, reasoning, status, prompt, agentic, output_prefix, uuid, source_machine_id, updated_at) VALUES (?, NULL, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)`,
+	result, err := db.Exec(`INSERT INTO review_jobs (repo_id, commit_id, git_ref, branch, agent, model, reasoning, status, job_type, prompt, agentic, output_prefix, uuid, source_machine_id, updated_at) VALUES (?, NULL, ?, ?, ?, ?, ?, 'queued', 'task', ?, ?, ?, ?, ?, ?)`,
 		opts.RepoID, label, nullString(opts.Branch), opts.Agent, nullString(opts.Model), reasoning, opts.Prompt, agenticInt, nullString(opts.OutputPrefix), uuid, machineID, nowStr)
 	if err != nil {
 		return nil, err
@@ -843,6 +846,7 @@ func (db *DB) EnqueuePromptJob(opts PromptJobOptions) (*ReviewJob, error) {
 		Agent:           opts.Agent,
 		Model:           opts.Model,
 		Reasoning:       reasoning,
+		JobType:         JobTypeTask,
 		Status:          JobStatusQueued,
 		EnqueuedAt:      now,
 		Prompt:          opts.Prompt,
@@ -893,9 +897,10 @@ func (db *DB) ClaimJob(workerID string) (*ReviewJob, error) {
 	var prompt sql.NullString
 	var model, branch sql.NullString
 	var agenticInt int
+	var jobType sql.NullString
 	err = db.QueryRow(`
 		SELECT j.id, j.repo_id, j.commit_id, j.git_ref, j.branch, j.agent, j.model, j.reasoning, j.status, j.enqueued_at,
-		       r.root_path, r.name, c.subject, j.diff_content, j.prompt, COALESCE(j.agentic, 0)
+		       r.root_path, r.name, c.subject, j.diff_content, j.prompt, COALESCE(j.agentic, 0), j.job_type
 		FROM review_jobs j
 		JOIN repos r ON r.id = j.repo_id
 		LEFT JOIN commits c ON c.id = j.commit_id
@@ -903,7 +908,7 @@ func (db *DB) ClaimJob(workerID string) (*ReviewJob, error) {
 		ORDER BY j.started_at DESC
 		LIMIT 1
 	`, workerID).Scan(&job.ID, &job.RepoID, &commitID, &job.GitRef, &branch, &job.Agent, &model, &job.Reasoning, &job.Status, &enqueuedAt,
-		&job.RepoPath, &job.RepoName, &commitSubject, &diffContent, &prompt, &agenticInt)
+		&job.RepoPath, &job.RepoName, &commitSubject, &diffContent, &prompt, &agenticInt, &jobType)
 	if err != nil {
 		return nil, err
 	}
@@ -927,6 +932,9 @@ func (db *DB) ClaimJob(workerID string) (*ReviewJob, error) {
 		job.Branch = branch.String
 	}
 	job.Agentic = agenticInt != 0
+	if jobType.Valid {
+		job.JobType = jobType.String
+	}
 	job.EnqueuedAt = parseSQLiteTime(enqueuedAt)
 	job.Status = JobStatusRunning
 	job.WorkerID = workerID
@@ -1166,7 +1174,7 @@ func (db *DB) ListJobs(statusFilter string, repoFilter string, limit, offset int
 		SELECT j.id, j.repo_id, j.commit_id, j.git_ref, j.branch, j.agent, j.reasoning, j.status, j.enqueued_at,
 		       j.started_at, j.finished_at, j.worker_id, j.error, j.prompt, j.retry_count,
 		       COALESCE(j.agentic, 0), r.root_path, r.name, c.subject, rv.addressed, rv.output,
-		       j.source_machine_id, j.uuid, j.model
+		       j.source_machine_id, j.uuid, j.model, j.job_type
 		FROM review_jobs j
 		JOIN repos r ON r.id = j.repo_id
 		LEFT JOIN commits c ON c.id = j.commit_id
@@ -1233,7 +1241,7 @@ func (db *DB) ListJobs(statusFilter string, repoFilter string, limit, offset int
 	for rows.Next() {
 		var j ReviewJob
 		var enqueuedAt string
-		var startedAt, finishedAt, workerID, errMsg, prompt, output, sourceMachineID, jobUUID, model, branch sql.NullString
+		var startedAt, finishedAt, workerID, errMsg, prompt, output, sourceMachineID, jobUUID, model, branch, jobTypeStr sql.NullString
 		var commitID sql.NullInt64
 		var commitSubject sql.NullString
 		var addressed sql.NullInt64
@@ -1242,7 +1250,7 @@ func (db *DB) ListJobs(statusFilter string, repoFilter string, limit, offset int
 		err := rows.Scan(&j.ID, &j.RepoID, &commitID, &j.GitRef, &branch, &j.Agent, &j.Reasoning, &j.Status, &enqueuedAt,
 			&startedAt, &finishedAt, &workerID, &errMsg, &prompt, &j.RetryCount,
 			&agentic, &j.RepoPath, &j.RepoName, &commitSubject, &addressed, &output,
-			&sourceMachineID, &jobUUID, &model)
+			&sourceMachineID, &jobUUID, &model, &jobTypeStr)
 		if err != nil {
 			return nil, err
 		}
@@ -1281,6 +1289,9 @@ func (db *DB) ListJobs(statusFilter string, repoFilter string, limit, offset int
 		if model.Valid {
 			j.Model = model.String
 		}
+		if jobTypeStr.Valid {
+			j.JobType = jobTypeStr.String
+		}
 		if branch.Valid {
 			j.Branch = branch.String
 		}
@@ -1310,18 +1321,18 @@ func (db *DB) GetJobByID(id int64) (*ReviewJob, error) {
 	var commitSubject sql.NullString
 	var agentic int
 
-	var model, branch sql.NullString
+	var model, branch, jobTypeStr sql.NullString
 	err := db.QueryRow(`
 		SELECT j.id, j.repo_id, j.commit_id, j.git_ref, j.branch, j.agent, j.reasoning, j.status, j.enqueued_at,
 		       j.started_at, j.finished_at, j.worker_id, j.error, j.prompt, COALESCE(j.agentic, 0),
-		       r.root_path, r.name, c.subject, j.model
+		       r.root_path, r.name, c.subject, j.model, j.job_type
 		FROM review_jobs j
 		JOIN repos r ON r.id = j.repo_id
 		LEFT JOIN commits c ON c.id = j.commit_id
 		WHERE j.id = ?
 	`, id).Scan(&j.ID, &j.RepoID, &commitID, &j.GitRef, &branch, &j.Agent, &j.Reasoning, &j.Status, &enqueuedAt,
 		&startedAt, &finishedAt, &workerID, &errMsg, &prompt, &agentic,
-		&j.RepoPath, &j.RepoName, &commitSubject, &model)
+		&j.RepoPath, &j.RepoName, &commitSubject, &model, &jobTypeStr)
 	if err != nil {
 		return nil, err
 	}
@@ -1353,6 +1364,9 @@ func (db *DB) GetJobByID(id int64) (*ReviewJob, error) {
 	}
 	if model.Valid {
 		j.Model = model.String
+	}
+	if jobTypeStr.Valid {
+		j.JobType = jobTypeStr.String
 	}
 	if branch.Valid {
 		j.Branch = branch.String

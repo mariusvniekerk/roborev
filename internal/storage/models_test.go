@@ -9,47 +9,78 @@ func TestIsTaskJob(t *testing.T) {
 		want bool
 	}{
 		{
-			name: "single commit review",
+			name: "single commit review by job_type",
+			job:  ReviewJob{JobType: JobTypeReview, CommitID: ptr(int64(1)), GitRef: "abc123"},
+			want: false,
+		},
+		{
+			name: "dirty review by job_type",
+			job:  ReviewJob{JobType: JobTypeDirty, GitRef: "dirty"},
+			want: false,
+		},
+		{
+			name: "dirty review by job_type with diff content",
+			job:  ReviewJob{JobType: JobTypeDirty, GitRef: "dirty", DiffContent: ptr("diff")},
+			want: false,
+		},
+		{
+			name: "range review by job_type",
+			job:  ReviewJob{JobType: JobTypeRange, GitRef: "abc123..def456"},
+			want: false,
+		},
+		{
+			name: "task job by job_type",
+			job:  ReviewJob{JobType: JobTypeTask, GitRef: "run:lint"},
+			want: true,
+		},
+		{
+			name: "task job analyze by job_type",
+			job:  ReviewJob{JobType: JobTypeTask, GitRef: "analyze"},
+			want: true,
+		},
+		// Fallback heuristic tests (when JobType is empty)
+		{
+			name: "fallback: single commit review",
 			job:  ReviewJob{CommitID: ptr(int64(1)), GitRef: "abc123"},
 			want: false,
 		},
 		{
-			name: "dirty review",
+			name: "fallback: dirty review",
 			job:  ReviewJob{GitRef: "dirty"},
 			want: false,
 		},
 		{
-			name: "dirty review with diff content",
+			name: "fallback: dirty review with diff content",
 			job:  ReviewJob{GitRef: "dirty", DiffContent: ptr("diff")},
 			want: false,
 		},
 		{
-			name: "branch range review",
+			name: "fallback: branch range review",
 			job:  ReviewJob{GitRef: "abc123..def456"},
 			want: false,
 		},
 		{
-			name: "triple-dot range review",
+			name: "fallback: triple-dot range review",
 			job:  ReviewJob{GitRef: "main...feature"},
 			want: false,
 		},
 		{
-			name: "task job with label",
+			name: "fallback: task job with label",
 			job:  ReviewJob{GitRef: "run:lint"},
 			want: true,
 		},
 		{
-			name: "task job analyze",
+			name: "fallback: task job analyze",
 			job:  ReviewJob{GitRef: "analyze"},
 			want: true,
 		},
 		{
-			name: "task job run",
+			name: "fallback: task job run",
 			job:  ReviewJob{GitRef: "run"},
 			want: true,
 		},
 		{
-			name: "empty git ref",
+			name: "fallback: empty git ref",
 			job:  ReviewJob{GitRef: ""},
 			want: false,
 		},
