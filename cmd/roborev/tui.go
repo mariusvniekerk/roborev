@@ -424,7 +424,7 @@ func (m *tuiModel) getBranchForJob(job storage.ReviewJob) string {
 	}
 
 	// For task jobs (run, analyze, custom) or dirty jobs, no branch makes sense
-	if job.IsTaskJob() || job.JobType == storage.JobTypeDirty {
+	if job.IsTaskJob() || job.IsDirtyJob() {
 		return ""
 	}
 
@@ -732,7 +732,7 @@ func (m tuiModel) fetchBranches() tea.Cmd {
 						continue // Already has branch (including "(none)" sentinel)
 					}
 					// Mark task jobs (run, analyze, custom) or dirty jobs with "(none)" sentinel
-					if job.IsTaskJob() || job.JobType == storage.JobTypeDirty {
+					if job.IsTaskJob() || job.IsDirtyJob() {
 						toBackfill = append(toBackfill, backfillJob{id: job.ID, branch: "(none)"})
 						continue
 					}
@@ -1067,7 +1067,7 @@ func (m tuiModel) fetchCommitMsg(job *storage.ReviewJob) tea.Cmd {
 		}
 
 		// Handle dirty reviews (uncommitted changes)
-		if job.DiffContent != nil || job.JobType == storage.JobTypeDirty {
+		if job.DiffContent != nil || job.IsDirtyJob() {
 			return tuiCommitMsgMsg{
 				jobID: jobID,
 				err:   fmt.Errorf("no commit message for uncommitted changes"),

@@ -2564,6 +2564,96 @@ func TestListJobsVerdictForBranchRangeReview(t *testing.T) {
 	}
 }
 
+func TestJobTypeBackfill(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	repo := createRepo(t, db, "/tmp/backfill-test")
+
+	// Insert jobs with job_type='review' to simulate pre-migration state
+	// 1. Normal commit review - should stay 'review'
+	commit := createCommit(t, db, repo.ID, "abc123")
+	_, err := db.Exec(`INSERT INTO review_jobs (repo_id, commit_id, git_ref, agent, status, job_type) VALUES (?, ?, 'abc123', 'codex', 'done', 'review')`,
+		repo.ID, commit.ID)
+	if err != nil {
+		t.Fatalf("insert review job: %v", err)
+	}
+
+	// 2. Dirty job (git_ref='dirty') - should become 'dirty'
+	_, err = db.Exec(`INSERT INTO review_jobs (repo_id, git_ref, agent, status, job_type) VALUES (?, 'dirty', 'codex', 'done', 'review')`, repo.ID)
+	if err != nil {
+		t.Fatalf("insert dirty job: %v", err)
+	}
+
+	// 3. Dirty job (diff_content set) - should become 'dirty'
+	_, err = db.Exec(`INSERT INTO review_jobs (repo_id, git_ref, agent, status, job_type, diff_content) VALUES (?, 'some-ref', 'codex', 'done', 'review', 'diff here')`, repo.ID)
+	if err != nil {
+		t.Fatalf("insert dirty-with-diff job: %v", err)
+	}
+
+	// 4. Range job (git_ref has ..) - should become 'range'
+	_, err = db.Exec(`INSERT INTO review_jobs (repo_id, git_ref, agent, status, job_type) VALUES (?, 'abc..def', 'codex', 'done', 'review')`, repo.ID)
+	if err != nil {
+		t.Fatalf("insert range job: %v", err)
+	}
+
+	// 5. Task job (no commit_id, no diff, non-dirty git_ref) - should become 'task'
+	_, err = db.Exec(`INSERT INTO review_jobs (repo_id, git_ref, agent, status, job_type) VALUES (?, 'analyze', 'codex', 'done', 'review')`, repo.ID)
+	if err != nil {
+		t.Fatalf("insert task job: %v", err)
+	}
+
+	// Run backfill SQL (same as migration)
+	_, err = db.Exec(`UPDATE review_jobs SET job_type = 'dirty' WHERE (git_ref = 'dirty' OR diff_content IS NOT NULL) AND job_type = 'review'`)
+	if err != nil {
+		t.Fatalf("backfill dirty: %v", err)
+	}
+	_, err = db.Exec(`UPDATE review_jobs SET job_type = 'range' WHERE git_ref LIKE '%..%' AND commit_id IS NULL AND job_type = 'review'`)
+	if err != nil {
+		t.Fatalf("backfill range: %v", err)
+	}
+	_, err = db.Exec(`UPDATE review_jobs SET job_type = 'task' WHERE commit_id IS NULL AND diff_content IS NULL AND git_ref != 'dirty' AND git_ref NOT LIKE '%..%' AND git_ref != '' AND job_type = 'review'`)
+	if err != nil {
+		t.Fatalf("backfill task: %v", err)
+	}
+
+	// Verify results
+	rows, err := db.Query(`SELECT git_ref, job_type FROM review_jobs ORDER BY id`)
+	if err != nil {
+		t.Fatalf("query jobs: %v", err)
+	}
+	defer rows.Close()
+
+	expected := []struct {
+		gitRef  string
+		jobType string
+	}{
+		{"abc123", "review"},
+		{"dirty", "dirty"},
+		{"some-ref", "dirty"},
+		{"abc..def", "range"},
+		{"analyze", "task"},
+	}
+
+	i := 0
+	for rows.Next() {
+		var gitRef, jobType string
+		if err := rows.Scan(&gitRef, &jobType); err != nil {
+			t.Fatalf("scan row: %v", err)
+		}
+		if i >= len(expected) {
+			t.Fatalf("more rows than expected")
+		}
+		if gitRef != expected[i].gitRef || jobType != expected[i].jobType {
+			t.Errorf("row %d: got (%q, %q), want (%q, %q)", i, gitRef, jobType, expected[i].gitRef, expected[i].jobType)
+		}
+		i++
+	}
+	if i != len(expected) {
+		t.Errorf("got %d rows, want %d", i, len(expected))
+	}
+}
+
 // createJobChain creates a repo, commit, and enqueued job, returning all three.
 func createJobChain(t *testing.T, db *DB, repoPath, sha string) (*Repo, *Commit, *ReviewJob) {
 	t.Helper()

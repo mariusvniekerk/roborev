@@ -96,4 +96,57 @@ func TestIsTaskJob(t *testing.T) {
 	}
 }
 
+func TestIsDirtyJob(t *testing.T) {
+	tests := []struct {
+		name string
+		job  ReviewJob
+		want bool
+	}{
+		{
+			name: "dirty by job_type",
+			job:  ReviewJob{JobType: JobTypeDirty, GitRef: "dirty"},
+			want: true,
+		},
+		{
+			name: "review by job_type",
+			job:  ReviewJob{JobType: JobTypeReview, GitRef: "abc123"},
+			want: false,
+		},
+		{
+			name: "task by job_type",
+			job:  ReviewJob{JobType: JobTypeTask, GitRef: "run"},
+			want: false,
+		},
+		{
+			name: "fallback: git_ref dirty",
+			job:  ReviewJob{GitRef: "dirty"},
+			want: true,
+		},
+		{
+			name: "fallback: diff content set",
+			job:  ReviewJob{GitRef: "some-ref", DiffContent: ptr("diff")},
+			want: true,
+		},
+		{
+			name: "fallback: normal commit",
+			job:  ReviewJob{GitRef: "abc123", CommitID: ptr(int64(1))},
+			want: false,
+		},
+		{
+			name: "fallback: range",
+			job:  ReviewJob{GitRef: "abc..def"},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.job.IsDirtyJob()
+			if got != tt.want {
+				t.Errorf("IsDirtyJob() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func ptr[T any](v T) *T { return &v }
