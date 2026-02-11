@@ -125,7 +125,7 @@ func SetConfigValue(cfg interface{}, key string, value string) error {
 		return fmt.Errorf("expected pointer to struct, got %s", v.Kind())
 	}
 
-	field, err := FindFieldByTOMLKey(v, key)
+	field, err := FindOrCreateFieldByTOMLKey(v, key)
 	if err != nil {
 		return err
 	}
@@ -209,7 +209,18 @@ func MergedConfigWithOrigin(global *Config, repo *RepoConfig) []KeyValueOrigin {
 }
 
 // FindFieldByTOMLKey locates a struct field by its TOML tag, supporting dot notation.
+// It never mutates the struct; nil pointer fields are resolved via a throwaway zero struct.
 func FindFieldByTOMLKey(v reflect.Value, key string) (reflect.Value, error) {
+	return findFieldByTOMLKey(v, key, false)
+}
+
+// FindOrCreateFieldByTOMLKey is like FindFieldByTOMLKey but initializes nil pointer
+// fields so the returned field is settable. Use this in SetConfigValue.
+func FindOrCreateFieldByTOMLKey(v reflect.Value, key string) (reflect.Value, error) {
+	return findFieldByTOMLKey(v, key, true)
+}
+
+func findFieldByTOMLKey(v reflect.Value, key string, initPointers bool) (reflect.Value, error) {
 	parts := strings.SplitN(key, ".", 2)
 	tagName := parts[0]
 
@@ -232,19 +243,19 @@ func FindFieldByTOMLKey(v reflect.Value, key string) (reflect.Value, error) {
 		if len(parts) == 2 {
 			if fieldVal.Kind() == reflect.Ptr {
 				if fieldVal.IsNil() {
-					if fieldVal.CanSet() {
+					if initPointers && fieldVal.CanSet() {
 						// Initialize the nil pointer so the returned field is settable.
 						fieldVal.Set(reflect.New(fieldVal.Type().Elem()))
 					} else {
-						// Read-only path (e.g. IsValidKey): use a throwaway zero struct.
+						// Read-only path: use a throwaway zero struct.
 						zeroStruct := reflect.New(fieldVal.Type().Elem()).Elem()
-						return FindFieldByTOMLKey(zeroStruct, parts[1])
+						return findFieldByTOMLKey(zeroStruct, parts[1], initPointers)
 					}
 				}
 				fieldVal = fieldVal.Elem()
 			}
 			if fieldVal.Kind() == reflect.Struct {
-				return FindFieldByTOMLKey(fieldVal, parts[1])
+				return findFieldByTOMLKey(fieldVal, parts[1], initPointers)
 			}
 			return reflect.Value{}, fmt.Errorf("key %q: %q is not a nested struct", key, tagName)
 		}

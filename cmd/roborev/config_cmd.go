@@ -260,7 +260,7 @@ func setConfigKey(path, key, value string) error {
 	// Validate the key exists on one of the config structs
 	// and convert the value to the correct type.
 	// Try both Config and RepoConfig since either key set is valid in either file.
-	globalCfg := &config.Config{}
+	globalCfg := config.DefaultConfig()
 	repoCfg := &config.RepoConfig{}
 	var validationCfg interface{}
 	if err := config.SetConfigValue(globalCfg, key, value); err == nil {
