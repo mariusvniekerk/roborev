@@ -186,7 +186,10 @@ func TestMergedConfigWithOrigin(t *testing.T) {
 		Agent: "claude-code",
 	}
 
-	kvos := MergedConfigWithOrigin(global, repo)
+	rawGlobal := map[string]interface{}{"default_agent": "gemini"}
+	rawRepo := map[string]interface{}{"agent": "claude-code"}
+
+	kvos := MergedConfigWithOrigin(global, repo, rawGlobal, rawRepo)
 	if len(kvos) == 0 {
 		t.Fatal("expected non-empty list")
 	}
@@ -249,7 +252,10 @@ func TestMergedConfigWithOriginLocalOverridesGlobal(t *testing.T) {
 		ReviewContextCount: 10,
 	}
 
-	kvos := MergedConfigWithOrigin(global, repo)
+	rawGlobal := map[string]interface{}{"review_context_count": int64(5)}
+	rawRepo := map[string]interface{}{"review_context_count": int64(10)}
+
+	kvos := MergedConfigWithOrigin(global, repo, rawGlobal, rawRepo)
 	found := make(map[string]KeyValueOrigin)
 	for _, kvo := range kvos {
 		found[kvo.Key] = kvo
@@ -269,7 +275,8 @@ func TestMergedConfigWithOriginShowsAllOrigins(t *testing.T) {
 	global := DefaultConfig()
 	global.DefaultAgent = "gemini" // override from default
 
-	kvos := MergedConfigWithOrigin(global, nil)
+	rawGlobal := map[string]interface{}{"default_agent": "gemini"}
+	kvos := MergedConfigWithOrigin(global, nil, rawGlobal, nil)
 
 	origins := make(map[string]string)
 	for _, kvo := range kvos {

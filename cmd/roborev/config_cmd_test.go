@@ -12,7 +12,7 @@ func TestSetConfigKey(t *testing.T) {
 	path := filepath.Join(dir, "config.toml")
 
 	// Set a string value (creates file)
-	if err := setConfigKey(path, "default_agent", "gemini"); err != nil {
+	if err := setConfigKey(path, "default_agent", "gemini", true); err != nil {
 		t.Fatalf("setConfigKey string: %v", err)
 	}
 
@@ -22,7 +22,7 @@ func TestSetConfigKey(t *testing.T) {
 	}
 
 	// Set an integer value
-	if err := setConfigKey(path, "max_workers", "8"); err != nil {
+	if err := setConfigKey(path, "max_workers", "8", true); err != nil {
 		t.Fatalf("setConfigKey int: %v", err)
 	}
 
@@ -36,7 +36,7 @@ func TestSetConfigKey(t *testing.T) {
 	}
 
 	// Set a boolean value
-	if err := setConfigKey(path, "sync.enabled", "true"); err != nil {
+	if err := setConfigKey(path, "sync.enabled", "true", true); err != nil {
 		t.Fatalf("setConfigKey bool: %v", err)
 	}
 
@@ -55,7 +55,7 @@ func TestSetConfigKeyNestedCreation(t *testing.T) {
 	path := filepath.Join(dir, "config.toml")
 
 	// Set a nested key on a new file
-	if err := setConfigKey(path, "ci.poll_interval", "10m"); err != nil {
+	if err := setConfigKey(path, "ci.poll_interval", "10m", true); err != nil {
 		t.Fatalf("setConfigKey nested: %v", err)
 	}
 
@@ -73,7 +73,7 @@ func TestSetConfigKeyInvalidKey(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 
-	err := setConfigKey(path, "nonexistent_key", "value")
+	err := setConfigKey(path, "nonexistent_key", "value", true)
 	if err == nil {
 		t.Fatal("expected error for invalid key")
 	}
@@ -83,7 +83,7 @@ func TestSetConfigKeySlice(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 
-	if err := setConfigKey(path, "ci.repos", "org/repo1,org/repo2"); err != nil {
+	if err := setConfigKey(path, "ci.repos", "org/repo1,org/repo2", true); err != nil {
 		t.Fatalf("setConfigKey slice: %v", err)
 	}
 
@@ -105,7 +105,7 @@ func TestSetConfigKeyRepoConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".roborev.toml")
 
-	if err := setConfigKey(path, "agent", "claude-code"); err != nil {
+	if err := setConfigKey(path, "agent", "claude-code", false); err != nil {
 		t.Fatalf("setConfigKey repo: %v", err)
 	}
 

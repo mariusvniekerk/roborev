@@ -2,10 +2,14 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/BurntSushi/toml"
 )
 
 // KeyValue represents a config key and its value
@@ -95,6 +99,47 @@ func IsConfigValueSet(cfg interface{}, key string) bool {
 	return !field.IsZero()
 }
 
+// LoadRawGlobal loads the global config file as a raw TOML map.
+func LoadRawGlobal() (map[string]interface{}, error) {
+	return LoadRawTOML(GlobalConfigPath())
+}
+
+// LoadRawRepo loads the repo config file as a raw TOML map.
+func LoadRawRepo(repoPath string) (map[string]interface{}, error) {
+	return LoadRawTOML(filepath.Join(repoPath, ".roborev.toml"))
+}
+
+// LoadRawTOML loads a TOML file as a raw map.
+func LoadRawTOML(path string) (map[string]interface{}, error) {
+	raw := make(map[string]interface{})
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil, nil
+	}
+	if _, err := toml.DecodeFile(path, &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// IsKeyInTOMLFile checks whether a dot-separated key was explicitly present
+// in a raw TOML map (as returned by toml.Decode into map[string]interface{}).
+// This correctly detects explicit false/0 values that IsZero would miss.
+func IsKeyInTOMLFile(raw map[string]interface{}, key string) bool {
+	parts := strings.SplitN(key, ".", 2)
+	val, ok := raw[parts[0]]
+	if !ok {
+		return false
+	}
+	if len(parts) == 1 {
+		return true
+	}
+	sub, ok := val.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	return IsKeyInTOMLFile(sub, parts[1])
+}
+
 // GetConfigValue retrieves a value from a config struct by its TOML key.
 // Supports dot-separated keys for nested structs (e.g., "sync.enabled").
 func GetConfigValue(cfg interface{}, key string) (string, error) {
@@ -150,13 +195,20 @@ func ListConfigKeys(cfg interface{}) []KeyValue {
 	return listFields(v, "")
 }
 
-// MergedConfigWithOrigin returns all config values with their origin.
+// MergedConfigWithOrigin returns all effective config values with their origin.
 // global is the loaded global config (already has defaults applied by LoadGlobal).
 // repo is the loaded repo config (nil if no .roborev.toml).
-// Values are attributed: local if set (non-zero) in repo config, global if
-// different from the default, otherwise default.
-func MergedConfigWithOrigin(global *Config, repo *RepoConfig) []KeyValueOrigin {
+// rawGlobal and rawRepo are raw TOML maps for detecting explicit presence of
+// false/0 values. Pass nil if not available.
+func MergedConfigWithOrigin(global *Config, repo *RepoConfig, rawGlobal, rawRepo map[string]interface{}) []KeyValueOrigin {
 	defaults := DefaultConfig()
+
+	if rawGlobal == nil {
+		rawGlobal = make(map[string]interface{})
+	}
+	if rawRepo == nil {
+		rawRepo = make(map[string]interface{})
+	}
 
 	// Get all keys from the global config (which includes defaults)
 	globalKVs := listAllFields(reflect.ValueOf(global).Elem(), "")
@@ -165,24 +217,33 @@ func MergedConfigWithOrigin(global *Config, repo *RepoConfig) []KeyValueOrigin {
 		defaultMap[kv.Key] = kv.Value
 	}
 
-	// Get non-zero repo values (these are actual overrides)
-	repoMap := make(map[string]string)
+	// Get formatted repo values for all fields
+	repoValMap := make(map[string]string)
 	if repo != nil {
-		for _, kv := range listFields(reflect.ValueOf(repo).Elem(), "") {
-			repoMap[kv.Key] = kv.Value
+		for _, kv := range listAllFields(reflect.ValueOf(repo).Elem(), "") {
+			repoValMap[kv.Key] = kv.Value
 		}
 	}
 
 	var result []KeyValueOrigin
 	for _, kv := range globalKVs {
-		// Check if repo overrides this key
-		if repoVal, ok := repoMap[kv.Key]; ok {
-			result = append(result, KeyValueOrigin{Key: kv.Key, Value: repoVal, Origin: "local"})
+		// Check if repo explicitly sets this key (via raw TOML presence)
+		if IsKeyInTOMLFile(rawRepo, kv.Key) {
+			val := repoValMap[kv.Key]
+			result = append(result, KeyValueOrigin{Key: kv.Key, Value: val, Origin: "local"})
 			continue
 		}
 
-		// Check if global value differs from default
-		if defaultVal, ok := defaultMap[kv.Key]; ok && kv.Value == defaultVal {
+		// Skip empty/zero default values not explicitly set in global config file
+		isDefault := defaultMap[kv.Key] == kv.Value
+		isEmptyDefault := kv.Value == "" || kv.Value == "0" || kv.Value == "false"
+		explicitInGlobal := IsKeyInTOMLFile(rawGlobal, kv.Key)
+
+		if isEmptyDefault && !explicitInGlobal {
+			continue
+		}
+
+		if isDefault {
 			result = append(result, KeyValueOrigin{Key: kv.Key, Value: kv.Value, Origin: "default"})
 		} else {
 			result = append(result, KeyValueOrigin{Key: kv.Key, Value: kv.Value, Origin: "global"})
@@ -195,14 +256,14 @@ func MergedConfigWithOrigin(global *Config, repo *RepoConfig) []KeyValueOrigin {
 		globalKeySet[kv.Key] = true
 	}
 	var repoOnlyKeys []string
-	for key := range repoMap {
-		if !globalKeySet[key] {
+	for key := range repoValMap {
+		if !globalKeySet[key] && IsKeyInTOMLFile(rawRepo, key) {
 			repoOnlyKeys = append(repoOnlyKeys, key)
 		}
 	}
 	sort.Strings(repoOnlyKeys)
 	for _, key := range repoOnlyKeys {
-		result = append(result, KeyValueOrigin{Key: key, Value: repoMap[key], Origin: "local"})
+		result = append(result, KeyValueOrigin{Key: key, Value: repoValMap[key], Origin: "local"})
 	}
 
 	return result
