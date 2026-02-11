@@ -348,6 +348,8 @@ func coerceValue(validationCfg interface{}, key, rawVal string) interface{} {
 	}
 
 	switch field.Kind() {
+	case reflect.String:
+		return rawVal
 	case reflect.Bool:
 		return field.Bool()
 	case reflect.Int, reflect.Int64:

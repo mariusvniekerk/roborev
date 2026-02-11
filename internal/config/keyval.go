@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -37,8 +38,12 @@ func collectSensitiveKeys(t reflect.Type, prefix string, out map[string]bool) {
 		if prefix != "" {
 			fullKey = prefix + "." + tagKey
 		}
-		if field.Type.Kind() == reflect.Struct {
-			collectSensitiveKeys(field.Type, fullKey, out)
+		ft := field.Type
+		if ft.Kind() == reflect.Ptr {
+			ft = ft.Elem()
+		}
+		if ft.Kind() == reflect.Struct {
+			collectSensitiveKeys(ft, fullKey, out)
 			continue
 		}
 		if field.Tag.Get("sensitive") == "true" {
@@ -189,10 +194,15 @@ func MergedConfigWithOrigin(global *Config, repo *RepoConfig) []KeyValueOrigin {
 	for _, kv := range globalKVs {
 		globalKeySet[kv.Key] = true
 	}
-	for key, val := range repoMap {
+	var repoOnlyKeys []string
+	for key := range repoMap {
 		if !globalKeySet[key] {
-			result = append(result, KeyValueOrigin{Key: key, Value: val, Origin: "local"})
+			repoOnlyKeys = append(repoOnlyKeys, key)
 		}
+	}
+	sort.Strings(repoOnlyKeys)
+	for _, key := range repoOnlyKeys {
+		result = append(result, KeyValueOrigin{Key: key, Value: repoMap[key], Origin: "local"})
 	}
 
 	return result
@@ -338,6 +348,10 @@ func listFields(v reflect.Value, prefix string) []KeyValue {
 		fieldVal := v.Field(i)
 
 		// Recurse into nested structs (but not slices of structs or maps)
+		if fieldVal.Kind() == reflect.Ptr && !fieldVal.IsNil() && fieldVal.Elem().Kind() == reflect.Struct {
+			result = append(result, listFields(fieldVal.Elem(), fullKey)...)
+			continue
+		}
 		if fieldVal.Kind() == reflect.Struct {
 			result = append(result, listFields(fieldVal, fullKey)...)
 			continue
@@ -376,6 +390,10 @@ func listAllFields(v reflect.Value, prefix string) []KeyValue {
 		fieldVal := v.Field(i)
 
 		// Recurse into nested structs
+		if fieldVal.Kind() == reflect.Ptr && !fieldVal.IsNil() && fieldVal.Elem().Kind() == reflect.Struct {
+			result = append(result, listAllFields(fieldVal.Elem(), fullKey)...)
+			continue
+		}
 		if fieldVal.Kind() == reflect.Struct {
 			result = append(result, listAllFields(fieldVal, fullKey)...)
 			continue
