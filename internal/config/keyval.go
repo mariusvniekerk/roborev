@@ -74,6 +74,22 @@ type KeyValueOrigin struct {
 	Origin string // "global", "local", "default"
 }
 
+// IsConfigValueSet returns true if the field for key exists and is non-zero.
+func IsConfigValueSet(cfg interface{}, key string) bool {
+	v := reflect.ValueOf(cfg)
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return false
+	}
+	field, err := FindFieldByTOMLKey(v, key)
+	if err != nil {
+		return false
+	}
+	return !field.IsZero()
+}
+
 // GetConfigValue retrieves a value from a config struct by its TOML key.
 // Supports dot-separated keys for nested structs (e.g., "sync.enabled").
 func GetConfigValue(cfg interface{}, key string) (string, error) {
@@ -206,10 +222,14 @@ func FindFieldByTOMLKey(v reflect.Value, key string) (reflect.Value, error) {
 		if len(parts) == 2 {
 			if fieldVal.Kind() == reflect.Ptr {
 				if fieldVal.IsNil() {
-					// Return the zero value of the pointed-to struct's field
-					// so callers get "" instead of an error for unset sections.
-					zeroStruct := reflect.New(fieldVal.Type().Elem()).Elem()
-					return FindFieldByTOMLKey(zeroStruct, parts[1])
+					if fieldVal.CanSet() {
+						// Initialize the nil pointer so the returned field is settable.
+						fieldVal.Set(reflect.New(fieldVal.Type().Elem()))
+					} else {
+						// Read-only path (e.g. IsValidKey): use a throwaway zero struct.
+						zeroStruct := reflect.New(fieldVal.Type().Elem()).Elem()
+						return FindFieldByTOMLKey(zeroStruct, parts[1])
+					}
 				}
 				fieldVal = fieldVal.Elem()
 			}

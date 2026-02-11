@@ -50,7 +50,7 @@ func configGetCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if val == "" {
+				if !config.IsConfigValueSet(cfg, key) {
 					return fmt.Errorf("key %q is not set in global config", key)
 				}
 				fmt.Println(val)
@@ -73,7 +73,7 @@ func configGetCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if val == "" {
+				if !config.IsConfigValueSet(repoCfg, key) {
 					return fmt.Errorf("key %q is not set in local config", key)
 				}
 				fmt.Println(val)
@@ -88,7 +88,8 @@ func configGetCmd() *cobra.Command {
 			repoPath, _ := findRepoRoot()
 			if repoPath != "" {
 				if repoCfg, loadErr := config.LoadRepoConfig(repoPath); loadErr == nil && repoCfg != nil {
-					if val, getErr := config.GetConfigValue(repoCfg, key); getErr == nil && val != "" {
+					if config.IsConfigValueSet(repoCfg, key) {
+						val, _ := config.GetConfigValue(repoCfg, key)
 						fmt.Println(val)
 						return nil
 					}
@@ -104,7 +105,7 @@ func configGetCmd() *cobra.Command {
 				// Key is valid (checked above) but not in Config struct — not set globally.
 				return fmt.Errorf("key %q is not set", key)
 			}
-			if val == "" {
+			if !config.IsConfigValueSet(cfg, key) {
 				return fmt.Errorf("key %q is not set", key)
 			}
 			fmt.Println(val)
