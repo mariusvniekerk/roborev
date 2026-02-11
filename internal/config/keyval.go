@@ -170,6 +170,12 @@ func FindFieldByTOMLKey(v reflect.Value, key string) (reflect.Value, error) {
 
 		// If there's a remaining dot path, recurse into nested struct
 		if len(parts) == 2 {
+			if fieldVal.Kind() == reflect.Ptr {
+				if fieldVal.IsNil() {
+					return reflect.Value{}, fmt.Errorf("key %q: %q is nil", key, tagName)
+				}
+				fieldVal = fieldVal.Elem()
+			}
 			if fieldVal.Kind() == reflect.Struct {
 				return FindFieldByTOMLKey(fieldVal, parts[1])
 			}

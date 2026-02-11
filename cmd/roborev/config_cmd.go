@@ -83,10 +83,15 @@ func configGetCmd() *cobra.Command {
 			// Merged: try local first, then global
 			repoPath, _ := findRepoRoot()
 			if repoPath != "" {
-				if repoCfg, err := config.LoadRepoConfig(repoPath); err == nil && repoCfg != nil {
-					if val, err := config.GetConfigValue(repoCfg, key); err == nil && val != "" {
+				if repoCfg, loadErr := config.LoadRepoConfig(repoPath); loadErr == nil && repoCfg != nil {
+					val, getErr := config.GetConfigValue(repoCfg, key)
+					if getErr == nil && val != "" {
 						fmt.Println(val)
 						return nil
+					}
+					// If the key is valid but returned an unexpected error, report it
+					if getErr != nil && !strings.Contains(getErr.Error(), "unknown config key") {
+						return fmt.Errorf("repo config: %w", getErr)
 					}
 				}
 			}
@@ -252,10 +257,10 @@ func setConfigKey(path, key, value string) error {
 	var validationCfg interface{}
 	if err := config.SetConfigValue(globalCfg, key, value); err == nil {
 		validationCfg = globalCfg
-	} else if err2 := config.SetConfigValue(repoCfg, key, value); err2 == nil {
+	} else if err := config.SetConfigValue(repoCfg, key, value); err == nil {
 		validationCfg = repoCfg
 	} else {
-		return err2
+		return fmt.Errorf("unknown config key: %q", key)
 	}
 
 	// Set in raw map, handling dot notation for nested keys
@@ -274,14 +279,13 @@ func setConfigKey(path, key, value string) error {
 		return err
 	}
 	tmpPath := f.Name()
+	defer func() { os.Remove(tmpPath) }() // no-op if already renamed
 
 	if err := toml.NewEncoder(f).Encode(raw); err != nil {
 		f.Close()
-		os.Remove(tmpPath)
 		return err
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(tmpPath)
 		return err
 	}
 
