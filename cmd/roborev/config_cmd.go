@@ -101,11 +101,7 @@ func configGetCmd() *cobra.Command {
 				return fmt.Errorf("load global config: %w", err)
 			}
 			val, err := config.GetConfigValue(cfg, key)
-			if err != nil {
-				// Key is valid (checked above) but not in Config struct — not set globally.
-				return fmt.Errorf("key %q is not set", key)
-			}
-			if !config.IsConfigValueSet(cfg, key) {
+			if err != nil || !config.IsConfigValueSet(cfg, key) {
 				return fmt.Errorf("key %q is not set", key)
 			}
 			fmt.Println(val)
@@ -289,19 +285,17 @@ func setConfigKey(path, key, value string) error {
 		return err
 	}
 	tmpPath := f.Name()
+	defer os.Remove(tmpPath) // clean up on any failure; no-op after successful rename
 
 	if err := toml.NewEncoder(f).Encode(raw); err != nil {
 		f.Close()
-		os.Remove(tmpPath)
 		return err
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(tmpPath)
 		return err
 	}
 
 	if err := os.Chmod(tmpPath, mode); err != nil {
-		os.Remove(tmpPath)
 		return err
 	}
 

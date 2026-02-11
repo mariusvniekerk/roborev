@@ -221,6 +221,71 @@ func TestMergedConfigWithOrigin(t *testing.T) {
 	}
 }
 
+func TestIsConfigValueSet(t *testing.T) {
+	cfg := &Config{
+		DefaultAgent: "codex",
+		MaxWorkers:   4,
+	}
+
+	if !IsConfigValueSet(cfg, "default_agent") {
+		t.Error("expected default_agent to be set")
+	}
+	if !IsConfigValueSet(cfg, "max_workers") {
+		t.Error("expected max_workers to be set")
+	}
+	if IsConfigValueSet(cfg, "cursor_cmd") {
+		t.Error("expected cursor_cmd to not be set")
+	}
+	if IsConfigValueSet(cfg, "nonexistent") {
+		t.Error("expected nonexistent to not be set")
+	}
+}
+
+func TestMergedConfigWithOriginLocalOverridesGlobal(t *testing.T) {
+	global := DefaultConfig()
+	global.ReviewContextCount = 5
+
+	repo := &RepoConfig{
+		ReviewContextCount: 10,
+	}
+
+	kvos := MergedConfigWithOrigin(global, repo)
+	found := make(map[string]KeyValueOrigin)
+	for _, kvo := range kvos {
+		found[kvo.Key] = kvo
+	}
+
+	// review_context_count should be overridden by local
+	if kvo, ok := found["review_context_count"]; ok {
+		if kvo.Value != "10" || kvo.Origin != "local" {
+			t.Errorf("review_context_count = {%q, %q}, want {10, local}", kvo.Value, kvo.Origin)
+		}
+	} else {
+		t.Error("missing review_context_count in merged output")
+	}
+}
+
+func TestMergedConfigWithOriginShowsAllOrigins(t *testing.T) {
+	global := DefaultConfig()
+	global.DefaultAgent = "gemini" // override from default
+
+	kvos := MergedConfigWithOrigin(global, nil)
+
+	origins := make(map[string]string)
+	for _, kvo := range kvos {
+		origins[kvo.Key] = kvo.Origin
+	}
+
+	// default_agent was changed from default
+	if origins["default_agent"] != "global" {
+		t.Errorf("default_agent origin = %q, want global", origins["default_agent"])
+	}
+	// max_workers should be at default
+	if origins["max_workers"] != "default" {
+		t.Errorf("max_workers origin = %q, want default", origins["max_workers"])
+	}
+}
+
 func TestIsValidKey(t *testing.T) {
 	tests := []struct {
 		key  string
