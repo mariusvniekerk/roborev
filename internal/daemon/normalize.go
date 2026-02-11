@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // ansiEscapePattern matches ANSI escape sequences (colors, cursor movement, etc.)
@@ -180,27 +181,22 @@ func NormalizeCodexOutput(line string) *OutputLine {
 	}
 
 	if err := json.Unmarshal([]byte(line), &ev); err != nil {
-		// Not JSON - return as raw text
-		return &OutputLine{Text: stripANSI(line), Type: "text"}
+		// Not JSON - return as raw text with full sanitization
+		return &OutputLine{Text: sanitizeControl(line), Type: "text"}
 	}
 
 	switch ev.Type {
-	case "item.completed", "item.updated":
+	case "item.completed":
 		switch ev.Item.Type {
 		case "agent_message":
 			if ev.Item.Text != "" {
-				text := strings.ReplaceAll(ev.Item.Text, "\n", " ")
-				text = strings.ReplaceAll(text, "\r", "")
-				return &OutputLine{Text: text, Type: "text"}
+				return &OutputLine{Text: sanitizeControl(ev.Item.Text), Type: "text"}
 			}
 		case "command_execution":
 			if ev.Item.Command != "" {
-				return &OutputLine{Text: "[Command: " + ev.Item.Command + "]", Type: "tool"}
+				return &OutputLine{Text: "[Command: " + sanitizeControl(ev.Item.Command) + "]", Type: "tool"}
 			}
-			if ev.Type == "item.completed" {
-				return &OutputLine{Text: "[Command completed]", Type: "tool"}
-			}
-			return nil
+			return &OutputLine{Text: "[Command completed]", Type: "tool"}
 		case "file_change":
 			return &OutputLine{Text: "[File change]", Type: "tool"}
 		}
@@ -210,7 +206,7 @@ func NormalizeCodexOutput(line string) *OutputLine {
 		switch ev.Item.Type {
 		case "command_execution":
 			if ev.Item.Command != "" {
-				return &OutputLine{Text: "[Command: " + ev.Item.Command + "]", Type: "tool"}
+				return &OutputLine{Text: "[Command: " + sanitizeControl(ev.Item.Command) + "]", Type: "tool"}
 			}
 		}
 		return nil
@@ -272,6 +268,24 @@ func NormalizeGenericOutput(line string) *OutputLine {
 // stripANSI removes ANSI escape sequences from a string.
 func stripANSI(s string) string {
 	return ansiEscapePattern.ReplaceAllString(s, "")
+}
+
+// sanitizeControl strips ANSI escapes and non-printable control characters,
+// replacing newlines with spaces to avoid collapsing words. Used for
+// untrusted model/subprocess output that reaches terminals.
+func sanitizeControl(s string) string {
+	s = stripANSI(s)
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r == '\t' || !unicode.IsControl(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // isToolCallJSON checks if a line is a tool call JSON object.

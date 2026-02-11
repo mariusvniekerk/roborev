@@ -223,6 +223,30 @@ func TestNormalizeCodexOutput(t *testing.T) {
 			wantType: "text",
 		},
 		{
+			name:     "AgentMessageStripsANSI",
+			input:    `{"type":"item.completed","item":{"type":"agent_message","text":"\u001b[31mred\u001b[0m text"}}`,
+			wantText: "red text",
+			wantType: "text",
+		},
+		{
+			name:     "AgentMessageStripsControlChars",
+			input:    `{"type":"item.completed","item":{"type":"agent_message","text":"hello\u0007world"}}`,
+			wantText: "helloworld",
+			wantType: "text",
+		},
+		{
+			name:     "CommandStartedStripsANSI",
+			input:    `{"type":"item.started","item":{"type":"command_execution","command":"bash -lc \u001b[32mls\u001b[0m"}}`,
+			wantText: "[Command: bash -lc ls]",
+			wantType: "tool",
+		},
+		{
+			name:     "CommandCompletedStripsControlChars",
+			input:    `{"type":"item.completed","item":{"type":"command_execution","command":"ls\u0007\u001b[31m -la"}}`,
+			wantText: "[Command: ls -la]",
+			wantType: "tool",
+		},
+		{
 			name:     "CommandStarted",
 			input:    `{"type":"item.started","item":{"type":"command_execution","command":"bash -lc ls"}}`,
 			wantText: "[Command: bash -lc ls]",
@@ -243,6 +267,16 @@ func TestNormalizeCodexOutput(t *testing.T) {
 		{
 			name:    "CommandUpdatedNoCommand",
 			input:   `{"type":"item.updated","item":{"type":"command_execution"}}`,
+			wantNil: true,
+		},
+		{
+			name:    "CommandUpdatedWithCommand",
+			input:   `{"type":"item.updated","item":{"type":"command_execution","command":"bash -lc ls"}}`,
+			wantNil: true,
+		},
+		{
+			name:    "FileChangeUpdated",
+			input:   `{"type":"item.updated","item":{"type":"file_change"}}`,
 			wantNil: true,
 		},
 		{
@@ -287,6 +321,12 @@ func TestNormalizeCodexOutput(t *testing.T) {
 			name:     "NonJSON",
 			input:    "some plain text output",
 			wantText: "some plain text output",
+			wantType: "text",
+		},
+		{
+			name:     "NonJSONStripsControlChars",
+			input:    "text with \x07bell and \x1b[31mcolor\x1b[0m",
+			wantText: "text with bell and color",
 			wantType: "text",
 		},
 	})
