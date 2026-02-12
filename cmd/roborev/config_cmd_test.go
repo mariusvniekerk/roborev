@@ -2,76 +2,93 @@ package main
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/BurntSushi/toml"
 )
 
-func TestSetConfigKey(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.toml")
+func setupConfigFile(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "config.toml")
+}
 
-	// Set a string value (creates file)
-	if err := setConfigKey(path, "default_agent", "gemini", true); err != nil {
-		t.Fatalf("setConfigKey string: %v", err)
+func readTOML(t *testing.T, path string) map[string]interface{} {
+	t.Helper()
+	raw := make(map[string]interface{})
+	if _, err := toml.DecodeFile(path, &raw); err != nil {
+		t.Fatalf("read TOML %s: %v", path, err)
 	}
+	return raw
+}
 
+// getNestedValue traverses a dot-separated key path in a nested map.
+func getNestedValue(t *testing.T, raw map[string]interface{}, dotKey string) interface{} {
+	t.Helper()
+	parts := strings.Split(dotKey, ".")
+	var current interface{} = raw
+	for _, part := range parts {
+		m, ok := current.(map[string]interface{})
+		if !ok {
+			t.Fatalf("key %q: expected map at %q, got %T", dotKey, part, current)
+		}
+		current = m[part]
+	}
+	return current
+}
+
+func assertConfigValue(t *testing.T, path, dotKey string, expected interface{}) {
+	t.Helper()
 	raw := readTOML(t, path)
-	if raw["default_agent"] != "gemini" {
-		t.Errorf("default_agent = %v, want gemini", raw["default_agent"])
+	val := getNestedValue(t, raw, dotKey)
+	if val != expected {
+		t.Errorf("%s = %v (%T), want %v (%T)", dotKey, val, val, expected, expected)
 	}
+}
 
-	// Set an integer value
-	if err := setConfigKey(path, "max_workers", "8", true); err != nil {
-		t.Fatalf("setConfigKey int: %v", err)
-	}
+func TestSetConfigKey(t *testing.T) {
+	path := setupConfigFile(t)
 
-	raw = readTOML(t, path)
-	if raw["max_workers"] != int64(8) {
-		t.Errorf("max_workers = %v (%T), want 8", raw["max_workers"], raw["max_workers"])
-	}
-	// Previous value should be preserved
-	if raw["default_agent"] != "gemini" {
-		t.Errorf("default_agent lost after second set: %v", raw["default_agent"])
-	}
+	t.Run("String", func(t *testing.T) {
+		if err := setConfigKey(path, "default_agent", "gemini", true); err != nil {
+			t.Fatalf("setConfigKey: %v", err)
+		}
+		assertConfigValue(t, path, "default_agent", "gemini")
+	})
 
-	// Set a boolean value
-	if err := setConfigKey(path, "sync.enabled", "true", true); err != nil {
-		t.Fatalf("setConfigKey bool: %v", err)
-	}
+	t.Run("Integer", func(t *testing.T) {
+		if err := setConfigKey(path, "max_workers", "8", true); err != nil {
+			t.Fatalf("setConfigKey: %v", err)
+		}
+		assertConfigValue(t, path, "max_workers", int64(8))
+	})
 
-	raw = readTOML(t, path)
-	sync, ok := raw["sync"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("sync is not a map: %v (%T)", raw["sync"], raw["sync"])
-	}
-	if sync["enabled"] != true {
-		t.Errorf("sync.enabled = %v, want true", sync["enabled"])
-	}
+	t.Run("Boolean", func(t *testing.T) {
+		if err := setConfigKey(path, "sync.enabled", "true", true); err != nil {
+			t.Fatalf("setConfigKey: %v", err)
+		}
+		assertConfigValue(t, path, "sync.enabled", true)
+	})
+
+	t.Run("Persistence", func(t *testing.T) {
+		// Previous values should still be present after multiple sets.
+		assertConfigValue(t, path, "default_agent", "gemini")
+		assertConfigValue(t, path, "max_workers", int64(8))
+		assertConfigValue(t, path, "sync.enabled", true)
+	})
 }
 
 func TestSetConfigKeyNestedCreation(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.toml")
+	path := setupConfigFile(t)
 
-	// Set a nested key on a new file
 	if err := setConfigKey(path, "ci.poll_interval", "10m", true); err != nil {
 		t.Fatalf("setConfigKey nested: %v", err)
 	}
-
-	raw := readTOML(t, path)
-	ci, ok := raw["ci"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("ci is not a map: %v (%T)", raw["ci"], raw["ci"])
-	}
-	if ci["poll_interval"] != "10m" {
-		t.Errorf("ci.poll_interval = %v, want 10m", ci["poll_interval"])
-	}
+	assertConfigValue(t, path, "ci.poll_interval", "10m")
 }
 
 func TestSetConfigKeyInvalidKey(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.toml")
+	path := setupConfigFile(t)
 
 	err := setConfigKey(path, "nonexistent_key", "value", true)
 	if err == nil {
@@ -80,21 +97,16 @@ func TestSetConfigKeyInvalidKey(t *testing.T) {
 }
 
 func TestSetConfigKeySlice(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.toml")
+	path := setupConfigFile(t)
 
 	if err := setConfigKey(path, "ci.repos", "org/repo1,org/repo2", true); err != nil {
 		t.Fatalf("setConfigKey slice: %v", err)
 	}
 
 	raw := readTOML(t, path)
-	ci, ok := raw["ci"].(map[string]interface{})
+	repos, ok := getNestedValue(t, raw, "ci.repos").([]interface{})
 	if !ok {
-		t.Fatalf("ci is not a map: %v (%T)", raw["ci"], raw["ci"])
-	}
-	repos, ok := ci["repos"].([]interface{})
-	if !ok {
-		t.Fatalf("ci.repos is not a slice: %v (%T)", ci["repos"], ci["repos"])
+		t.Fatalf("ci.repos is not a slice: %v (%T)", getNestedValue(t, raw, "ci.repos"), getNestedValue(t, raw, "ci.repos"))
 	}
 	if len(repos) != 2 {
 		t.Errorf("ci.repos length = %d, want 2", len(repos))
@@ -108,42 +120,41 @@ func TestSetConfigKeyRepoConfig(t *testing.T) {
 	if err := setConfigKey(path, "agent", "claude-code", false); err != nil {
 		t.Fatalf("setConfigKey repo: %v", err)
 	}
-
-	raw := readTOML(t, path)
-	if raw["agent"] != "claude-code" {
-		t.Errorf("agent = %v, want claude-code", raw["agent"])
-	}
+	assertConfigValue(t, path, "agent", "claude-code")
 }
 
 func TestSetRawMapKey(t *testing.T) {
-	m := make(map[string]interface{})
-
-	// Simple key
-	setRawMapKey(m, "foo", "bar")
-	if m["foo"] != "bar" {
-		t.Errorf("foo = %v, want bar", m["foo"])
+	tests := []struct {
+		name string
+		key  string
+		val  interface{}
+		path string // dot-path to check in the resulting map
+		want interface{}
+	}{
+		{
+			name: "SimpleKey",
+			key:  "foo",
+			val:  "bar",
+			path: "foo",
+			want: "bar",
+		},
+		{
+			name: "NestedKey",
+			key:  "a.b.c",
+			val:  42,
+			path: "a.b.c",
+			want: 42,
+		},
 	}
 
-	// Nested key
-	setRawMapKey(m, "a.b.c", 42)
-	a, ok := m["a"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("a is not a map")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := make(map[string]interface{})
+			setRawMapKey(m, tt.key, tt.val)
+			got := getNestedValue(t, m, tt.path)
+			if got != tt.want {
+				t.Errorf("%s = %v (%T), want %v (%T)", tt.path, got, got, tt.want, tt.want)
+			}
+		})
 	}
-	b, ok := a["b"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("a.b is not a map")
-	}
-	if b["c"] != 42 {
-		t.Errorf("a.b.c = %v, want 42", b["c"])
-	}
-}
-
-func readTOML(t *testing.T, path string) map[string]interface{} {
-	t.Helper()
-	raw := make(map[string]interface{})
-	if _, err := toml.DecodeFile(path, &raw); err != nil {
-		t.Fatalf("read TOML %s: %v", path, err)
-	}
-	return raw
 }
