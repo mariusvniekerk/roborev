@@ -57,6 +57,10 @@ func TestGetConfigValueNested(t *testing.T) {
 		},
 		CI: CIConfig{
 			PollInterval: "10m",
+			GitHubAppConfig: GitHubAppConfig{
+				GitHubAppID:         12345,
+				GitHubAppPrivateKey: "test-private-key",
+			},
 		},
 	}
 
@@ -67,6 +71,8 @@ func TestGetConfigValueNested(t *testing.T) {
 		{"sync.enabled", "true"},
 		{"sync.postgres_url", "postgres://localhost/test"},
 		{"ci.poll_interval", "10m"},
+		{"ci.github_app_id", "12345"},
+		{"ci.github_app_private_key", "test-private-key"},
 	}
 
 	for _, tt := range tests {
@@ -114,6 +120,18 @@ func TestSetConfigValue(t *testing.T) {
 			key:    "sync.enabled",
 			val:    "true",
 			verify: func(c *Config) bool { return c.Sync.Enabled },
+		},
+		{
+			name:   "set embedded github app id",
+			key:    "ci.github_app_id",
+			val:    "98765",
+			verify: func(c *Config) bool { return c.CI.GitHubAppID == 98765 },
+		},
+		{
+			name:   "set embedded github app private key",
+			key:    "ci.github_app_private_key",
+			val:    "private-key-data",
+			verify: func(c *Config) bool { return c.CI.GitHubAppPrivateKey == "private-key-data" },
 		},
 	}
 
@@ -167,6 +185,12 @@ func TestListConfigKeys(t *testing.T) {
 		Sync: SyncConfig{
 			Enabled: true,
 		},
+		CI: CIConfig{
+			GitHubAppConfig: GitHubAppConfig{
+				GitHubAppID:         12345,
+				GitHubAppPrivateKey: "private-key-data",
+			},
+		},
 	}
 
 	kvs := ListConfigKeys(cfg)
@@ -184,6 +208,12 @@ func TestListConfigKeys(t *testing.T) {
 	}
 	if found["sync.enabled"] != "true" {
 		t.Errorf("missing or wrong sync.enabled: %q", found["sync.enabled"])
+	}
+	if found["ci.github_app_id"] != "12345" {
+		t.Errorf("missing or wrong ci.github_app_id: %q", found["ci.github_app_id"])
+	}
+	if found["ci.github_app_private_key"] != "private-key-data" {
+		t.Errorf("missing or wrong ci.github_app_private_key: %q", found["ci.github_app_private_key"])
 	}
 }
 
@@ -314,10 +344,12 @@ func TestIsValidKey(t *testing.T) {
 		key  string
 		want bool
 	}{
-		{"default_agent", true}, // Config only
-		{"agent", true},         // RepoConfig only
-		{"max_workers", true},   // Config only
-		{"sync.enabled", true},  // nested Config
+		{"default_agent", true},             // Config only
+		{"agent", true},                     // RepoConfig only
+		{"max_workers", true},               // Config only
+		{"sync.enabled", true},              // nested Config
+		{"ci.github_app_id", true},          // inline embedded config
+		{"ci.github_app_private_key", true}, // inline embedded sensitive config
 		{"nonexistent", false},
 		{"fake.key", false},
 	}
@@ -329,5 +361,14 @@ func TestIsValidKey(t *testing.T) {
 				t.Errorf("IsValidKey(%q) = %v, want %v", tt.key, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestIsSensitiveKey(t *testing.T) {
+	if !IsSensitiveKey("ci.github_app_private_key") {
+		t.Error("expected ci.github_app_private_key to be sensitive")
+	}
+	if IsSensitiveKey("ci.github_app_id") {
+		t.Error("expected ci.github_app_id to not be sensitive")
 	}
 }

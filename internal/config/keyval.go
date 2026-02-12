@@ -39,23 +39,41 @@ func getTOMLKey(field reflect.StructField) string {
 	return strings.Split(tag, ",")[0]
 }
 
+func structType(t reflect.Type) (reflect.Type, bool) {
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	return t, t.Kind() == reflect.Struct
+}
+
+// isInlineEmbeddedStructField identifies anonymous embedded structs that are
+// represented inline (no TOML tag on the embedding field).
+func isInlineEmbeddedStructField(field reflect.StructField) bool {
+	if !field.Anonymous || getTOMLKey(field) != "" {
+		return false
+	}
+	_, isStruct := structType(field.Type)
+	return isStruct
+}
+
 // collectSensitiveKeys walks struct fields and records TOML keys tagged sensitive:"true".
 func collectSensitiveKeys(t reflect.Type, prefix string, out map[string]bool) {
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
 		tagKey := getTOMLKey(field)
+		ft, ftIsStruct := structType(field.Type)
+
 		if tagKey == "" {
+			if isInlineEmbeddedStructField(field) {
+				collectSensitiveKeys(ft, prefix, out)
+			}
 			continue
 		}
 		fullKey := tagKey
 		if prefix != "" {
 			fullKey = prefix + "." + tagKey
 		}
-		ft := field.Type
-		if ft.Kind() == reflect.Ptr {
-			ft = ft.Elem()
-		}
-		if ft.Kind() == reflect.Struct {
+		if ftIsStruct {
 			collectSensitiveKeys(ft, fullKey, out)
 			continue
 		}
@@ -298,6 +316,44 @@ func FindOrCreateFieldByTOMLKey(v reflect.Value, key string) (reflect.Value, err
 	return findFieldByTOMLKey(v, key, true)
 }
 
+type unknownConfigKeyError struct {
+	key string
+}
+
+func (e unknownConfigKeyError) Error() string {
+	return fmt.Sprintf("unknown config key: %q", e.key)
+}
+
+func isUnknownConfigKeyError(err error) bool {
+	_, ok := err.(unknownConfigKeyError)
+	return ok
+}
+
+// nestedStructValue resolves a field value to an underlying struct value.
+// For nil pointers:
+// - when initPointers=true, it initializes the pointer (if settable)
+// - otherwise, it returns a throwaway zero struct for read-only traversal
+func nestedStructValue(fieldVal reflect.Value, initPointers bool) (reflect.Value, bool) {
+	if fieldVal.Kind() == reflect.Ptr {
+		if fieldVal.IsNil() {
+			elemType, isStruct := structType(fieldVal.Type())
+			if !isStruct {
+				return reflect.Value{}, false
+			}
+			if initPointers && fieldVal.CanSet() {
+				fieldVal.Set(reflect.New(elemType))
+			} else {
+				return reflect.New(elemType).Elem(), true
+			}
+		}
+		fieldVal = fieldVal.Elem()
+	}
+	if fieldVal.Kind() != reflect.Struct {
+		return reflect.Value{}, false
+	}
+	return fieldVal, true
+}
+
 func findFieldByTOMLKey(v reflect.Value, key string, initPointers bool) (reflect.Value, error) {
 	parts := strings.SplitN(key, ".", 2)
 	tagName := parts[0]
@@ -305,30 +361,34 @@ func findFieldByTOMLKey(v reflect.Value, key string, initPointers bool) (reflect
 	t := v.Type()
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
+		fieldVal := v.Field(i)
+
+		// Anonymous embedded struct with no tag is treated inline.
+		if isInlineEmbeddedStructField(field) {
+			nested, ok := nestedStructValue(fieldVal, initPointers)
+			if !ok {
+				continue
+			}
+			found, err := findFieldByTOMLKey(nested, key, initPointers)
+			if err == nil {
+				return found, nil
+			}
+			if !isUnknownConfigKeyError(err) {
+				return reflect.Value{}, err
+			}
+			continue
+		}
+
 		tagKey := getTOMLKey(field)
 		if tagKey == "" || tagKey != tagName {
 			continue
 		}
 
-		fieldVal := v.Field(i)
-
 		// If there's a remaining dot path, recurse into nested struct
 		if len(parts) == 2 {
-			if fieldVal.Kind() == reflect.Ptr {
-				if fieldVal.IsNil() {
-					if initPointers && fieldVal.CanSet() {
-						// Initialize the nil pointer so the returned field is settable.
-						fieldVal.Set(reflect.New(fieldVal.Type().Elem()))
-					} else {
-						// Read-only path: use a throwaway zero struct.
-						zeroStruct := reflect.New(fieldVal.Type().Elem()).Elem()
-						return findFieldByTOMLKey(zeroStruct, parts[1], initPointers)
-					}
-				}
-				fieldVal = fieldVal.Elem()
-			}
-			if fieldVal.Kind() == reflect.Struct {
-				return findFieldByTOMLKey(fieldVal, parts[1], initPointers)
+			nested, ok := nestedStructValue(fieldVal, initPointers)
+			if ok {
+				return findFieldByTOMLKey(nested, parts[1], initPointers)
 			}
 			return reflect.Value{}, fmt.Errorf("key %q: %q is not a nested struct", key, tagName)
 		}
@@ -336,7 +396,7 @@ func findFieldByTOMLKey(v reflect.Value, key string, initPointers bool) (reflect
 		return fieldVal, nil
 	}
 
-	return reflect.Value{}, fmt.Errorf("unknown config key: %q", key)
+	return reflect.Value{}, unknownConfigKeyError{key: key}
 }
 
 // formatValue converts a reflect.Value to its string representation
@@ -429,8 +489,22 @@ func flattenStruct(v reflect.Value, prefix string, includeZero bool) []KeyValue 
 	t := v.Type()
 
 	for i := 0; i < t.NumField(); i++ {
-		tagKey := getTOMLKey(t.Field(i))
+		field := t.Field(i)
+		fieldVal := v.Field(i)
+		tagKey := getTOMLKey(field)
+
 		if tagKey == "" {
+			if isInlineEmbeddedStructField(field) {
+				if fieldVal.Kind() == reflect.Ptr {
+					if fieldVal.IsNil() {
+						continue
+					}
+					fieldVal = fieldVal.Elem()
+				}
+				if fieldVal.Kind() == reflect.Struct {
+					result = append(result, flattenStruct(fieldVal, prefix, includeZero)...)
+				}
+			}
 			continue
 		}
 
@@ -438,8 +512,6 @@ func flattenStruct(v reflect.Value, prefix string, includeZero bool) []KeyValue 
 		if prefix != "" {
 			fullKey = prefix + "." + tagKey
 		}
-
-		fieldVal := v.Field(i)
 
 		// Recurse into nested structs
 		if fieldVal.Kind() == reflect.Ptr && !fieldVal.IsNil() && fieldVal.Elem().Kind() == reflect.Struct {
