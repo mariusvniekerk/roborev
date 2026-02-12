@@ -21,6 +21,44 @@ func toOriginMap(kvos []KeyValueOrigin) map[string]KeyValueOrigin {
 	return m
 }
 
+func assertConfigValues(t *testing.T, actual []KeyValue, expected map[string]string) {
+	t.Helper()
+	m := toMap(actual)
+	for k, want := range expected {
+		got, ok := m[k]
+		if !ok {
+			t.Errorf("missing key %q", k)
+			continue
+		}
+		if got != want {
+			t.Errorf("key %q = %q, want %q", k, got, want)
+		}
+	}
+}
+
+type expectedOrigin struct {
+	Value  string
+	Origin string
+}
+
+func assertOrigins(t *testing.T, actual []KeyValueOrigin, expected map[string]expectedOrigin) {
+	t.Helper()
+	m := toOriginMap(actual)
+	for k, want := range expected {
+		got, ok := m[k]
+		if !ok {
+			t.Errorf("missing key %q", k)
+			continue
+		}
+		if got.Value != want.Value {
+			t.Errorf("key %q value = %q, want %q", k, got.Value, want.Value)
+		}
+		if got.Origin != want.Origin {
+			t.Errorf("key %q origin = %q, want %q", k, got.Origin, want.Origin)
+		}
+	}
+}
+
 func TestGetConfigValue(t *testing.T) {
 	cfg := &Config{
 		DefaultAgent:       "codex",
@@ -169,20 +207,13 @@ func TestSetConfigValueMultipleKeys(t *testing.T) {
 		}
 	}
 
-	found := toMap(ListConfigKeys(cfg))
-	want := map[string]string{
+	assertConfigValues(t, ListConfigKeys(cfg), map[string]string{
 		"default_agent":             "claude-code",
 		"max_workers":               "8",
 		"sync.enabled":              "true",
 		"ci.github_app_id":          "98765",
 		"ci.github_app_private_key": "private-key-data",
-	}
-
-	for key, value := range want {
-		if found[key] != value {
-			t.Errorf("key %q = %q, want %q", key, found[key], value)
-		}
-	}
+	})
 }
 
 func TestSetConfigValueBoolPtr(t *testing.T) {
@@ -243,28 +274,13 @@ func TestListConfigKeys(t *testing.T) {
 		},
 	}
 
-	kvs := ListConfigKeys(cfg)
-	if len(kvs) == 0 {
-		t.Fatal("expected non-empty list")
-	}
-
-	found := toMap(kvs)
-
-	if found["default_agent"] != "codex" {
-		t.Errorf("missing or wrong default_agent: %q", found["default_agent"])
-	}
-	if found["max_workers"] != "4" {
-		t.Errorf("missing or wrong max_workers: %q", found["max_workers"])
-	}
-	if found["sync.enabled"] != "true" {
-		t.Errorf("missing or wrong sync.enabled: %q", found["sync.enabled"])
-	}
-	if found["ci.github_app_id"] != "12345" {
-		t.Errorf("missing or wrong ci.github_app_id: %q", found["ci.github_app_id"])
-	}
-	if found["ci.github_app_private_key"] != "private-key-data" {
-		t.Errorf("missing or wrong ci.github_app_private_key: %q", found["ci.github_app_private_key"])
-	}
+	assertConfigValues(t, ListConfigKeys(cfg), map[string]string{
+		"default_agent":             "codex",
+		"max_workers":               "4",
+		"sync.enabled":              "true",
+		"ci.github_app_id":          "12345",
+		"ci.github_app_private_key": "private-key-data",
+	})
 }
 
 func TestListConfigKeysRepo(t *testing.T) {
@@ -273,15 +289,10 @@ func TestListConfigKeysRepo(t *testing.T) {
 		ReviewGuidelines: "Be thorough",
 	}
 
-	kvs := ListConfigKeys(cfg)
-	found := toMap(kvs)
-
-	if found["agent"] != "claude-code" {
-		t.Errorf("missing or wrong agent: %q", found["agent"])
-	}
-	if found["review_guidelines"] != "Be thorough" {
-		t.Errorf("missing or wrong review_guidelines: %q", found["review_guidelines"])
-	}
+	assertConfigValues(t, ListConfigKeys(cfg), map[string]string{
+		"agent":             "claude-code",
+		"review_guidelines": "Be thorough",
+	})
 }
 
 func TestListConfigKeysIncludesComplexNonZeroFields(t *testing.T) {
@@ -336,29 +347,16 @@ func TestMergedConfigWithOrigin(t *testing.T) {
 		t.Fatal("expected non-empty list")
 	}
 
-	found := toOriginMap(kvos)
-
-	// default_agent is set in global (overrides default "codex")
-	if kvo, ok := found["default_agent"]; ok {
-		if kvo.Value != "gemini" || kvo.Origin != "global" {
-			t.Errorf("default_agent = {%q, %q}, want {gemini, global}", kvo.Value, kvo.Origin)
-		}
-	} else {
-		t.Error("missing default_agent in merged output")
-	}
+	assertOrigins(t, kvos, map[string]expectedOrigin{
+		"default_agent": {Value: "gemini", Origin: "global"},
+		"agent":         {Value: "claude-code", Origin: "local"},
+	})
 
 	// max_workers is at default value
+	found := toOriginMap(kvos)
 	if kvo, ok := found["max_workers"]; ok {
 		if kvo.Origin != "default" {
 			t.Errorf("max_workers origin = %q, want default", kvo.Origin)
-		}
-	}
-
-	// repo agent key won't appear in global config merged view since it's a RepoConfig key
-	// But "agent" from repo should appear
-	if kvo, ok := found["agent"]; ok {
-		if kvo.Value != "claude-code" || kvo.Origin != "local" {
-			t.Errorf("agent = {%q, %q}, want {claude-code, local}", kvo.Value, kvo.Origin)
 		}
 	}
 }
@@ -394,17 +392,9 @@ func TestMergedConfigWithOriginLocalOverridesGlobal(t *testing.T) {
 	rawGlobal := map[string]interface{}{"review_context_count": int64(5)}
 	rawRepo := map[string]interface{}{"review_context_count": int64(10)}
 
-	kvos := MergedConfigWithOrigin(global, repo, rawGlobal, rawRepo)
-	found := toOriginMap(kvos)
-
-	// review_context_count should be overridden by local
-	if kvo, ok := found["review_context_count"]; ok {
-		if kvo.Value != "10" || kvo.Origin != "local" {
-			t.Errorf("review_context_count = {%q, %q}, want {10, local}", kvo.Value, kvo.Origin)
-		}
-	} else {
-		t.Error("missing review_context_count in merged output")
-	}
+	assertOrigins(t, MergedConfigWithOrigin(global, repo, rawGlobal, rawRepo), map[string]expectedOrigin{
+		"review_context_count": {Value: "10", Origin: "local"},
+	})
 }
 
 func TestMergedConfigWithOriginShowsAllOrigins(t *testing.T) {
@@ -412,14 +402,13 @@ func TestMergedConfigWithOriginShowsAllOrigins(t *testing.T) {
 	global.DefaultAgent = "gemini" // override from default
 
 	rawGlobal := map[string]interface{}{"default_agent": "gemini"}
+	assertOrigins(t, MergedConfigWithOrigin(global, nil, rawGlobal, nil), map[string]expectedOrigin{
+		"default_agent": {Value: "gemini", Origin: "global"},
+	})
+
+	// max_workers should be at default
 	kvos := MergedConfigWithOrigin(global, nil, rawGlobal, nil)
 	found := toOriginMap(kvos)
-
-	// default_agent was changed from default
-	if found["default_agent"].Origin != "global" {
-		t.Errorf("default_agent origin = %q, want global", found["default_agent"].Origin)
-	}
-	// max_workers should be at default
 	if found["max_workers"].Origin != "default" {
 		t.Errorf("max_workers origin = %q, want default", found["max_workers"].Origin)
 	}
@@ -447,24 +436,10 @@ func TestMergedConfigWithOriginIncludesComplexFields(t *testing.T) {
 		},
 	}
 
-	kvos := MergedConfigWithOrigin(global, nil, rawGlobal, nil)
-	found := toOriginMap(kvos)
-
-	if kvo, ok := found["sync.repo_names"]; !ok {
-		t.Error("missing sync.repo_names in merged output")
-	} else if !strings.Contains(kvo.Value, "org/repo:my-project") {
-		t.Errorf("sync.repo_names value = %q, want to contain org/repo:my-project", kvo.Value)
-	} else if kvo.Origin != "global" {
-		t.Errorf("sync.repo_names origin = %q, want global", kvo.Origin)
-	}
-
-	if kvo, ok := found["ci.github_app_installations"]; !ok {
-		t.Error("missing ci.github_app_installations in merged output")
-	} else if !strings.Contains(kvo.Value, "org:1234") {
-		t.Errorf("ci.github_app_installations value = %q, want to contain org:1234", kvo.Value)
-	} else if kvo.Origin != "global" {
-		t.Errorf("ci.github_app_installations origin = %q, want global", kvo.Origin)
-	}
+	assertOrigins(t, MergedConfigWithOrigin(global, nil, rawGlobal, nil), map[string]expectedOrigin{
+		"sync.repo_names":             {Value: "org/repo:my-project", Origin: "global"},
+		"ci.github_app_installations": {Value: "org:1234", Origin: "global"},
+	})
 }
 
 func TestMergedConfigWithOriginOmitsUnsetComplexFields(t *testing.T) {
