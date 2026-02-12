@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -231,6 +232,42 @@ func TestListConfigKeysRepo(t *testing.T) {
 	}
 	if found["review_guidelines"] != "Be thorough" {
 		t.Errorf("missing or wrong review_guidelines: %q", found["review_guidelines"])
+	}
+}
+
+func TestListConfigKeysIncludesComplexNonZeroFields(t *testing.T) {
+	cfg := &Config{
+		Hooks: []HookConfig{
+			{
+				Event:   "review.failed",
+				Command: "echo failed",
+				Type:    "command",
+			},
+		},
+		Sync: SyncConfig{
+			RepoNames: map[string]string{
+				"org/repo": "my-project",
+			},
+		},
+		CI: CIConfig{
+			GitHubAppConfig: GitHubAppConfig{
+				GitHubAppInstallations: map[string]int64{
+					"org": 1234,
+				},
+			},
+		},
+	}
+
+	found := toMap(ListConfigKeys(cfg))
+
+	if got, ok := found["sync.repo_names"]; !ok || !strings.Contains(got, "org/repo:my-project") {
+		t.Errorf("missing or wrong sync.repo_names: %q", got)
+	}
+	if got, ok := found["ci.github_app_installations"]; !ok || !strings.Contains(got, "org:1234") {
+		t.Errorf("missing or wrong ci.github_app_installations: %q", got)
+	}
+	if got, ok := found["hooks"]; !ok || !strings.Contains(got, "review.failed") {
+		t.Errorf("missing or wrong hooks: %q", got)
 	}
 }
 
