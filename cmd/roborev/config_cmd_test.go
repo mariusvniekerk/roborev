@@ -49,22 +49,48 @@ func assertConfigValue(t *testing.T, path, dotKey string, expected interface{}) 
 	}
 }
 
-func stubRepoRootResolution(t *testing.T, gitFn func(string) (string, error), wdFn func() (string, error)) {
+// stubRepoEnv stubs the repoRootFromGit and currentWorkingDir functions for
+// tests and restores them on cleanup.
+type stubRepoEnv struct {
+	t *testing.T
+}
+
+func newStubRepoEnv(t *testing.T) *stubRepoEnv {
 	t.Helper()
 	oldGit := repoRootFromGit
 	oldWD := currentWorkingDir
-
-	if gitFn != nil {
-		repoRootFromGit = gitFn
-	}
-	if wdFn != nil {
-		currentWorkingDir = wdFn
-	}
-
 	t.Cleanup(func() {
 		repoRootFromGit = oldGit
 		currentWorkingDir = oldWD
 	})
+	return &stubRepoEnv{t: t}
+}
+
+func (s *stubRepoEnv) SetGitRoot(path string) {
+	repoRootFromGit = func(string) (string, error) { return path, nil }
+}
+
+func (s *stubRepoEnv) SetGitError(err error) {
+	repoRootFromGit = func(string) (string, error) { return "", err }
+}
+
+func (s *stubRepoEnv) SetWorkingDir(path string) {
+	currentWorkingDir = func() (string, error) { return path, nil }
+}
+
+func (s *stubRepoEnv) SetWorkingDirError(err error) {
+	currentWorkingDir = func() (string, error) { return "", err }
+}
+
+// createFakeGitRepo creates a temporary directory with a .git subdirectory,
+// simulating a repository root without running git init.
+func createFakeGitRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".git"), 0755); err != nil {
+		t.Fatalf("create .git dir: %v", err)
+	}
+	return dir
 }
 
 func TestDetermineScope(t *testing.T) {
@@ -122,12 +148,8 @@ func TestDetermineScope(t *testing.T) {
 
 func TestRepoRoot(t *testing.T) {
 	t.Run("uses git resolver when available", func(t *testing.T) {
-		stubRepoRootResolution(t,
-			func(path string) (string, error) {
-				return "/tmp/from-git", nil
-			},
-			nil,
-		)
+		env := newStubRepoEnv(t)
+		env.SetGitRoot("/tmp/from-git")
 
 		got, err := repoRoot()
 		if err != nil {
@@ -139,23 +161,15 @@ func TestRepoRoot(t *testing.T) {
 	})
 
 	t.Run("falls back to filesystem when git resolver fails", func(t *testing.T) {
-		repoDir := t.TempDir()
-		if err := os.Mkdir(filepath.Join(repoDir, ".git"), 0755); err != nil {
-			t.Fatalf("create .git dir: %v", err)
-		}
+		repoDir := createFakeGitRepo(t)
 		nestedDir := filepath.Join(repoDir, "nested", "deeper")
 		if err := os.MkdirAll(nestedDir, 0755); err != nil {
 			t.Fatalf("create nested dir: %v", err)
 		}
 
-		stubRepoRootResolution(t,
-			func(path string) (string, error) {
-				return "", fmt.Errorf("git unavailable")
-			},
-			func() (string, error) {
-				return nestedDir, nil
-			},
-		)
+		env := newStubRepoEnv(t)
+		env.SetGitError(fmt.Errorf("git unavailable"))
+		env.SetWorkingDir(nestedDir)
 
 		got, err := repoRoot()
 		if err != nil {
@@ -167,15 +181,9 @@ func TestRepoRoot(t *testing.T) {
 	})
 
 	t.Run("optional lookup returns empty when not in repo", func(t *testing.T) {
-		workDir := t.TempDir()
-		stubRepoRootResolution(t,
-			func(path string) (string, error) {
-				return "", fmt.Errorf("git unavailable")
-			},
-			func() (string, error) {
-				return workDir, nil
-			},
-		)
+		env := newStubRepoEnv(t)
+		env.SetGitError(fmt.Errorf("git unavailable"))
+		env.SetWorkingDir(t.TempDir())
 
 		got, err := repoRoot()
 		if err != nil {
@@ -189,15 +197,9 @@ func TestRepoRoot(t *testing.T) {
 
 func TestRequireRepoRoot(t *testing.T) {
 	t.Run("returns not repo error when required and missing", func(t *testing.T) {
-		workDir := t.TempDir()
-		stubRepoRootResolution(t,
-			func(path string) (string, error) {
-				return "", fmt.Errorf("git unavailable")
-			},
-			func() (string, error) {
-				return workDir, nil
-			},
-		)
+		env := newStubRepoEnv(t)
+		env.SetGitError(fmt.Errorf("git unavailable"))
+		env.SetWorkingDir(t.TempDir())
 
 		_, err := requireRepoRoot()
 		if err == nil {
@@ -209,14 +211,9 @@ func TestRequireRepoRoot(t *testing.T) {
 	})
 
 	t.Run("surfaces resolver errors", func(t *testing.T) {
-		stubRepoRootResolution(t,
-			func(path string) (string, error) {
-				return "", fmt.Errorf("git unavailable")
-			},
-			func() (string, error) {
-				return "", fmt.Errorf("cwd failed")
-			},
-		)
+		env := newStubRepoEnv(t)
+		env.SetGitError(fmt.Errorf("git unavailable"))
+		env.SetWorkingDirError(fmt.Errorf("cwd failed"))
 
 		_, err := requireRepoRoot()
 		if err == nil {
@@ -233,18 +230,12 @@ func TestGetValueForScopeMergedPrefersLocal(t *testing.T) {
 	t.Setenv("ROBOREV_DATA_DIR", dataDir)
 
 	globalPath := filepath.Join(dataDir, "config.toml")
-	globalTOML := "review_agent = \"global-agent\"\n"
-	if err := os.WriteFile(globalPath, []byte(globalTOML), 0644); err != nil {
+	if err := os.WriteFile(globalPath, []byte("review_agent = \"global-agent\"\n"), 0644); err != nil {
 		t.Fatalf("write global config: %v", err)
 	}
 
-	repoDir := t.TempDir()
-	if err := os.Mkdir(filepath.Join(repoDir, ".git"), 0755); err != nil {
-		t.Fatalf("create .git dir: %v", err)
-	}
-	localPath := filepath.Join(repoDir, ".roborev.toml")
-	localTOML := "review_agent = \"local-agent\"\n"
-	if err := os.WriteFile(localPath, []byte(localTOML), 0644); err != nil {
+	repoDir := createFakeGitRepo(t)
+	if err := os.WriteFile(filepath.Join(repoDir, ".roborev.toml"), []byte("review_agent = \"local-agent\"\n"), 0644); err != nil {
 		t.Fatalf("write local config: %v", err)
 	}
 
@@ -253,14 +244,9 @@ func TestGetValueForScopeMergedPrefersLocal(t *testing.T) {
 		t.Fatalf("create nested dir: %v", err)
 	}
 
-	stubRepoRootResolution(t,
-		func(path string) (string, error) {
-			return "", fmt.Errorf("git unavailable")
-		},
-		func() (string, error) {
-			return nestedDir, nil
-		},
-	)
+	env := newStubRepoEnv(t)
+	env.SetGitError(fmt.Errorf("git unavailable"))
+	env.SetWorkingDir(nestedDir)
 
 	got, err := getValueForScope("review_agent", scopeMerged)
 	if err != nil {
@@ -275,14 +261,9 @@ func TestGetValueForScopeMergedRepoResolutionError(t *testing.T) {
 	dataDir := t.TempDir()
 	t.Setenv("ROBOREV_DATA_DIR", dataDir)
 
-	stubRepoRootResolution(t,
-		func(path string) (string, error) {
-			return "", fmt.Errorf("git unavailable")
-		},
-		func() (string, error) {
-			return "", fmt.Errorf("cwd failed")
-		},
-	)
+	env := newStubRepoEnv(t)
+	env.SetGitError(fmt.Errorf("git unavailable"))
+	env.SetWorkingDirError(fmt.Errorf("cwd failed"))
 
 	_, err := getValueForScope("review_agent", scopeMerged)
 	if err == nil {
@@ -297,14 +278,9 @@ func TestListMergedConfigRepoResolutionError(t *testing.T) {
 	dataDir := t.TempDir()
 	t.Setenv("ROBOREV_DATA_DIR", dataDir)
 
-	stubRepoRootResolution(t,
-		func(path string) (string, error) {
-			return "", fmt.Errorf("git unavailable")
-		},
-		func() (string, error) {
-			return "", fmt.Errorf("cwd failed")
-		},
-	)
+	env := newStubRepoEnv(t)
+	env.SetGitError(fmt.Errorf("git unavailable"))
+	env.SetWorkingDirError(fmt.Errorf("cwd failed"))
 
 	err := listMergedConfig(false)
 	if err == nil {
@@ -463,18 +439,13 @@ func TestGetValueForScopeMergedMalformedLocalConfig(t *testing.T) {
 	}
 
 	// Create repo with malformed .roborev.toml
-	repoDir := t.TempDir()
-	if err := os.Mkdir(filepath.Join(repoDir, ".git"), 0755); err != nil {
-		t.Fatalf("create .git dir: %v", err)
-	}
+	repoDir := createFakeGitRepo(t)
 	if err := os.WriteFile(filepath.Join(repoDir, ".roborev.toml"), []byte("invalid toml [[["), 0644); err != nil {
 		t.Fatalf("write malformed config: %v", err)
 	}
 
-	stubRepoRootResolution(t,
-		func(path string) (string, error) { return repoDir, nil },
-		nil,
-	)
+	env := newStubRepoEnv(t)
+	env.SetGitRoot(repoDir)
 
 	_, err := getValueForScope("review_agent", scopeMerged)
 	if err == nil {
@@ -490,18 +461,13 @@ func TestListMergedConfigMalformedLocalConfig(t *testing.T) {
 	t.Setenv("ROBOREV_DATA_DIR", dataDir)
 
 	// Create repo with malformed .roborev.toml
-	repoDir := t.TempDir()
-	if err := os.Mkdir(filepath.Join(repoDir, ".git"), 0755); err != nil {
-		t.Fatalf("create .git dir: %v", err)
-	}
+	repoDir := createFakeGitRepo(t)
 	if err := os.WriteFile(filepath.Join(repoDir, ".roborev.toml"), []byte("invalid toml [[["), 0644); err != nil {
 		t.Fatalf("write malformed config: %v", err)
 	}
 
-	stubRepoRootResolution(t,
-		func(path string) (string, error) { return repoDir, nil },
-		nil,
-	)
+	env := newStubRepoEnv(t)
+	env.SetGitRoot(repoDir)
 
 	err := listMergedConfig(false)
 	if err == nil {
@@ -523,11 +489,9 @@ func TestGetValueForScopeMergedRepoOnlyKeyNotSet(t *testing.T) {
 	}
 
 	// No repo (no .git dir)
-	workDir := t.TempDir()
-	stubRepoRootResolution(t,
-		func(path string) (string, error) { return "", fmt.Errorf("git unavailable") },
-		func() (string, error) { return workDir, nil },
-	)
+	env := newStubRepoEnv(t)
+	env.SetGitError(fmt.Errorf("git unavailable"))
+	env.SetWorkingDir(t.TempDir())
 
 	// "agent" is a repo-only key — should not fall through to global config
 	_, err := getValueForScope("agent", scopeMerged)
