@@ -382,6 +382,30 @@ func TestSetConfigKeySlice(t *testing.T) {
 	}
 }
 
+func TestSetConfigKeySliceEmpty(t *testing.T) {
+	path := setupConfigFile(t)
+
+	// Seed with a non-empty slice first.
+	if err := setConfigKey(path, "ci.repos", "org/repo1,org/repo2", true); err != nil {
+		t.Fatalf("setConfigKey seed: %v", err)
+	}
+
+	// Clear the slice by setting it to an empty string.
+	if err := setConfigKey(path, "ci.repos", "", true); err != nil {
+		t.Fatalf("setConfigKey empty: %v", err)
+	}
+
+	raw := readTOML(t, path)
+	repos := getNestedValue(t, raw, "ci.repos")
+	slice, ok := repos.([]interface{})
+	if !ok {
+		t.Fatalf("ci.repos is not a slice after clearing: %v (%T)", repos, repos)
+	}
+	if len(slice) != 0 {
+		t.Errorf("ci.repos length = %d, want 0", len(slice))
+	}
+}
+
 func TestSetConfigKeyRepoConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".roborev.toml")
