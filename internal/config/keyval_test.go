@@ -1,6 +1,8 @@
 package config
 
 import (
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -488,6 +490,46 @@ func TestFormatMapDeterministic(t *testing.T) {
 	want := "a/repo:alpha,b/repo:bravo,c/repo:charlie"
 	if found["sync.repo_names"] != want {
 		t.Errorf("sync.repo_names = %q, want %q", found["sync.repo_names"], want)
+	}
+}
+
+// collidingKey is a custom type whose String() always returns the same value,
+// used to test formatMap's tie-breaking behavior with colliding keys.
+type collidingKey int
+
+func (k collidingKey) String() string { return "same" }
+
+func TestFormatMapCollidingKeys(t *testing.T) {
+	// Build a map[collidingKey]string where all keys stringify to "same"
+	m := map[collidingKey]string{
+		collidingKey(1): "alpha",
+		collidingKey(2): "bravo",
+		collidingKey(3): "charlie",
+	}
+
+	// Run multiple times to verify determinism despite colliding String() output
+	var prev string
+	for i := 0; i < 20; i++ {
+		got := formatMap(reflect.ValueOf(m))
+		if prev != "" && got != prev {
+			t.Fatalf("non-deterministic output on iteration %d: %q vs %q", i, prev, got)
+		}
+		prev = got
+	}
+
+	// All three entries must be present
+	result := formatMap(reflect.ValueOf(m))
+	for _, val := range []string{"alpha", "bravo", "charlie"} {
+		if !strings.Contains(result, val) {
+			t.Errorf("result %q missing value %q", result, val)
+		}
+	}
+
+	// Verify exact expected output: keys sorted by %#v tie-breaker
+	// collidingKey(1) < collidingKey(2) < collidingKey(3) by %#v
+	want := fmt.Sprintf("same:alpha,same:bravo,same:charlie")
+	if result != want {
+		t.Errorf("formatMap = %q, want %q", result, want)
 	}
 }
 

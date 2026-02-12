@@ -453,7 +453,12 @@ func formatMap(v reflect.Value) string {
 		})
 	}
 	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].str < entries[j].str
+		if entries[i].str != entries[j].str {
+			return entries[i].str < entries[j].str
+		}
+		// Tie-breaker: use detailed key representation for deterministic ordering
+		// when different keys produce the same String() output.
+		return fmt.Sprintf("%#v", entries[i].key.Interface()) < fmt.Sprintf("%#v", entries[j].key.Interface())
 	})
 	parts := make([]string, 0, len(entries))
 	for _, e := range entries {
