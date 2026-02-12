@@ -150,6 +150,41 @@ func TestSetConfigValue(t *testing.T) {
 	}
 }
 
+func TestSetConfigValueMultipleKeys(t *testing.T) {
+	cfg := &Config{}
+	updates := []struct {
+		key string
+		val string
+	}{
+		{key: "default_agent", val: "claude-code"},
+		{key: "max_workers", val: "8"},
+		{key: "sync.enabled", val: "true"},
+		{key: "ci.github_app_id", val: "98765"},
+		{key: "ci.github_app_private_key", val: "private-key-data"},
+	}
+
+	for _, update := range updates {
+		if err := SetConfigValue(cfg, update.key, update.val); err != nil {
+			t.Fatalf("SetConfigValue(%q, %q) error: %v", update.key, update.val, err)
+		}
+	}
+
+	found := toMap(ListConfigKeys(cfg))
+	want := map[string]string{
+		"default_agent":             "claude-code",
+		"max_workers":               "8",
+		"sync.enabled":              "true",
+		"ci.github_app_id":          "98765",
+		"ci.github_app_private_key": "private-key-data",
+	}
+
+	for key, value := range want {
+		if found[key] != value {
+			t.Errorf("key %q = %q, want %q", key, found[key], value)
+		}
+	}
+}
+
 func TestSetConfigValueBoolPtr(t *testing.T) {
 	cfg := &Config{}
 	if err := SetConfigValue(cfg, "allow_unsafe_agents", "true"); err != nil {
