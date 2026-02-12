@@ -10,8 +10,114 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/roborev-dev/roborev/internal/config"
+	"github.com/roborev-dev/roborev/internal/git"
 	"github.com/spf13/cobra"
 )
+
+// configScope represents which configuration source to read/write.
+type configScope int
+
+const (
+	scopeMerged configScope = iota
+	scopeGlobal
+	scopeLocal
+)
+
+// determineScope returns the scope based on --global and --local flags.
+func determineScope(globalFlag, localFlag bool) (configScope, error) {
+	if globalFlag && localFlag {
+		return 0, fmt.Errorf("cannot use both --global and --local")
+	}
+	if globalFlag {
+		return scopeGlobal, nil
+	}
+	if localFlag {
+		return scopeLocal, nil
+	}
+	return scopeMerged, nil
+}
+
+// repoRoot returns the git repo root for the current directory.
+// Returns ("", nil) when the repo root is optional and not found.
+func repoRoot() (string, error) {
+	return git.GetRepoRoot(".")
+}
+
+// requireRepoRoot returns the git repo root or a user-facing error.
+func requireRepoRoot() (string, error) {
+	root, err := repoRoot()
+	if err != nil {
+		return "", fmt.Errorf("not in a git repository")
+	}
+	return root, nil
+}
+
+// getValueForScope retrieves a single config key value from the appropriate scope.
+func getValueForScope(key string, scope configScope) (string, error) {
+	switch scope {
+	case scopeGlobal:
+		cfg, err := config.LoadGlobal()
+		if err != nil {
+			return "", fmt.Errorf("load global config: %w", err)
+		}
+		val, err := config.GetConfigValue(cfg, key)
+		if err != nil {
+			return "", err
+		}
+		raw, _ := config.LoadRawGlobal()
+		if raw == nil || !config.IsKeyInTOMLFile(raw, key) {
+			return "", fmt.Errorf("key %q is not set in global config", key)
+		}
+		return val, nil
+
+	case scopeLocal:
+		repoPath, err := requireRepoRoot()
+		if err != nil {
+			return "", err
+		}
+		repoCfg, err := config.LoadRepoConfig(repoPath)
+		if err != nil {
+			return "", fmt.Errorf("load repo config: %w", err)
+		}
+		if repoCfg == nil {
+			return "", fmt.Errorf("no local config (.roborev.toml) found")
+		}
+		val, err := config.GetConfigValue(repoCfg, key)
+		if err != nil {
+			return "", err
+		}
+		raw, _ := config.LoadRawRepo(repoPath)
+		if raw == nil || !config.IsKeyInTOMLFile(raw, key) {
+			return "", fmt.Errorf("key %q is not set in local config", key)
+		}
+		return val, nil
+
+	default: // scopeMerged
+		if !config.IsValidKey(key) {
+			return "", fmt.Errorf("unknown config key: %q", key)
+		}
+		// Try local first, then global
+		if repoPath, err := repoRoot(); err == nil {
+			raw, _ := config.LoadRawRepo(repoPath)
+			if raw != nil && config.IsKeyInTOMLFile(raw, key) {
+				repoCfg, err := config.LoadRepoConfig(repoPath)
+				if err != nil {
+					return "", fmt.Errorf("load repo config: %w", err)
+				}
+				val, err := config.GetConfigValue(repoCfg, key)
+				if err != nil {
+					return "", err
+				}
+				return val, nil
+			}
+		}
+		cfg, err := config.LoadGlobal()
+		if err != nil {
+			return "", fmt.Errorf("load global config: %w", err)
+		}
+		return config.GetConfigValue(cfg, key)
+	}
+}
 
 func configCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -35,85 +141,14 @@ func configGetCmd() *cobra.Command {
 		Short: "Get a configuration value",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			key := args[0]
-
-			if globalFlag && localFlag {
-				return fmt.Errorf("cannot use both --global and --local")
-			}
-
-			if globalFlag {
-				cfg, err := config.LoadGlobal()
-				if err != nil {
-					return fmt.Errorf("load global config: %w", err)
-				}
-				val, err := config.GetConfigValue(cfg, key)
-				if err != nil {
-					return err
-				}
-				// Use raw TOML to detect presence (handles explicit false/0)
-				raw, _ := config.LoadRawGlobal()
-				if raw == nil || !config.IsKeyInTOMLFile(raw, key) {
-					return fmt.Errorf("key %q is not set in global config", key)
-				}
-				fmt.Println(val)
-				return nil
-			}
-
-			if localFlag {
-				repoPath, err := findRepoRoot()
-				if err != nil {
-					return fmt.Errorf("not in a git repository")
-				}
-				repoCfg, err := config.LoadRepoConfig(repoPath)
-				if err != nil {
-					return fmt.Errorf("load repo config: %w", err)
-				}
-				if repoCfg == nil {
-					return fmt.Errorf("no local config (.roborev.toml) found")
-				}
-				val, err := config.GetConfigValue(repoCfg, key)
-				if err != nil {
-					return err
-				}
-				raw, _ := config.LoadRawRepo(repoPath)
-				if raw == nil || !config.IsKeyInTOMLFile(raw, key) {
-					return fmt.Errorf("key %q is not set in local config", key)
-				}
-				fmt.Println(val)
-				return nil
-			}
-
-			// Merged: try local first, then global
-			if !config.IsValidKey(key) {
-				return fmt.Errorf("unknown config key: %q", key)
-			}
-
-			repoPath, _ := findRepoRoot()
-			if repoPath != "" {
-				raw, _ := config.LoadRawRepo(repoPath)
-				if raw != nil && config.IsKeyInTOMLFile(raw, key) {
-					repoCfg, err := config.LoadRepoConfig(repoPath)
-					if err != nil {
-						return fmt.Errorf("load repo config: %w", err)
-					}
-					val, err := config.GetConfigValue(repoCfg, key)
-					if err != nil {
-						return err
-					}
-					fmt.Println(val)
-					return nil
-				}
-			}
-
-			cfg, err := config.LoadGlobal()
-			if err != nil {
-				return fmt.Errorf("load global config: %w", err)
-			}
-			val, err := config.GetConfigValue(cfg, key)
+			scope, err := determineScope(globalFlag, localFlag)
 			if err != nil {
 				return err
 			}
-			// For merged mode, global config includes defaults, so always print
+			val, err := getValueForScope(args[0], scope)
+			if err != nil {
+				return err
+			}
 			fmt.Println(val)
 			return nil
 		},
@@ -135,16 +170,17 @@ func configSetCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			key, value := args[0], args[1]
 
-			if globalFlag && localFlag {
-				return fmt.Errorf("cannot use both --global and --local")
+			scope, err := determineScope(globalFlag, localFlag)
+			if err != nil {
+				return err
 			}
 
-			if globalFlag {
+			if scope == scopeGlobal {
 				return setConfigKey(config.GlobalConfigPath(), key, value, true)
 			}
 
 			// Default (and --local): set in local config
-			repoPath, err := findRepoRoot()
+			repoPath, err := requireRepoRoot()
 			if err != nil {
 				return fmt.Errorf("not in a git repository (use --global for global config)")
 			}
@@ -166,72 +202,19 @@ func configListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List configuration values",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if globalFlag && localFlag {
-				return fmt.Errorf("cannot use both --global and --local")
-			}
-
-			if globalFlag {
-				cfg, err := config.LoadGlobal()
-				if err != nil {
-					return fmt.Errorf("load global config: %w", err)
-				}
-				kvs := config.ListConfigKeys(cfg)
-				printKeyValues(kvs)
-				return nil
-			}
-
-			if localFlag {
-				repoPath, err := findRepoRoot()
-				if err != nil {
-					return fmt.Errorf("not in a git repository")
-				}
-				repoCfg, err := config.LoadRepoConfig(repoPath)
-				if err != nil {
-					return fmt.Errorf("load repo config: %w", err)
-				}
-				if repoCfg == nil {
-					return fmt.Errorf("no local config (.roborev.toml) found")
-				}
-				kvs := config.ListConfigKeys(repoCfg)
-				printKeyValues(kvs)
-				return nil
-			}
-
-			// Merged view
-			cfg, err := config.LoadGlobal()
+			scope, err := determineScope(globalFlag, localFlag)
 			if err != nil {
-				return fmt.Errorf("load global config: %w", err)
-			}
-			rawGlobal, _ := config.LoadRawGlobal()
-
-			var repoCfg *config.RepoConfig
-			var rawRepo map[string]interface{}
-			if repoPath, err := findRepoRoot(); err == nil {
-				repoCfg, _ = config.LoadRepoConfig(repoPath)
-				rawRepo, _ = config.LoadRawRepo(repoPath)
+				return err
 			}
 
-			kvos := config.MergedConfigWithOrigin(cfg, repoCfg, rawGlobal, rawRepo)
-			if showOrigin {
-				w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-				for _, kvo := range kvos {
-					val := kvo.Value
-					if config.IsSensitiveKey(kvo.Key) {
-						val = config.MaskValue(val)
-					}
-					fmt.Fprintf(w, "%s\t%s\t%s\n", kvo.Origin, kvo.Key, val)
-				}
-				return w.Flush()
+			switch scope {
+			case scopeGlobal:
+				return listGlobalConfig()
+			case scopeLocal:
+				return listLocalConfig()
+			default:
+				return listMergedConfig(showOrigin)
 			}
-
-			for _, kvo := range kvos {
-				val := kvo.Value
-				if config.IsSensitiveKey(kvo.Key) {
-					val = config.MaskValue(val)
-				}
-				fmt.Printf("%s=%s\n", kvo.Key, val)
-			}
-			return nil
 		},
 	}
 
@@ -240,6 +223,68 @@ func configListCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&showOrigin, "show-origin", false, "show where each value comes from (global/local/default)")
 
 	return cmd
+}
+
+func listGlobalConfig() error {
+	cfg, err := config.LoadGlobal()
+	if err != nil {
+		return fmt.Errorf("load global config: %w", err)
+	}
+	printKeyValues(config.ListConfigKeys(cfg))
+	return nil
+}
+
+func listLocalConfig() error {
+	repoPath, err := requireRepoRoot()
+	if err != nil {
+		return err
+	}
+	repoCfg, err := config.LoadRepoConfig(repoPath)
+	if err != nil {
+		return fmt.Errorf("load repo config: %w", err)
+	}
+	if repoCfg == nil {
+		return fmt.Errorf("no local config (.roborev.toml) found")
+	}
+	printKeyValues(config.ListConfigKeys(repoCfg))
+	return nil
+}
+
+func listMergedConfig(showOrigin bool) error {
+	cfg, err := config.LoadGlobal()
+	if err != nil {
+		return fmt.Errorf("load global config: %w", err)
+	}
+	rawGlobal, _ := config.LoadRawGlobal()
+
+	var repoCfg *config.RepoConfig
+	var rawRepo map[string]interface{}
+	if repoPath, err := repoRoot(); err == nil {
+		repoCfg, _ = config.LoadRepoConfig(repoPath)
+		rawRepo, _ = config.LoadRawRepo(repoPath)
+	}
+
+	kvos := config.MergedConfigWithOrigin(cfg, repoCfg, rawGlobal, rawRepo)
+	if showOrigin {
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		for _, kvo := range kvos {
+			val := kvo.Value
+			if config.IsSensitiveKey(kvo.Key) {
+				val = config.MaskValue(val)
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\n", kvo.Origin, kvo.Key, val)
+		}
+		return w.Flush()
+	}
+
+	for _, kvo := range kvos {
+		val := kvo.Value
+		if config.IsSensitiveKey(kvo.Key) {
+			val = config.MaskValue(val)
+		}
+		fmt.Printf("%s=%s\n", kvo.Key, val)
+	}
+	return nil
 }
 
 // printKeyValues prints key-value pairs, masking sensitive values
@@ -257,43 +302,62 @@ func printKeyValues(kvs []config.KeyValue) {
 // to avoid writing default values for every field.
 // isGlobal determines which struct (Config vs RepoConfig) validates the key.
 func setConfigKey(path, key, value string, isGlobal bool) error {
-	// Load existing file as raw map
-	raw := make(map[string]interface{})
-	if _, err := os.Stat(path); err == nil {
-		if _, err := toml.DecodeFile(path, &raw); err != nil {
-			return fmt.Errorf("parse %s: %w", path, err)
-		}
+	validationCfg, err := validateKeyForScope(key, value, isGlobal)
+	if err != nil {
+		return err
 	}
 
-	// Validate the key against the correct struct for the target file.
-	var validationCfg interface{}
+	raw, err := loadRawConfig(path)
+	if err != nil {
+		return err
+	}
+
+	setRawMapKey(raw, key, coerceValue(validationCfg, key, value))
+
+	return atomicWriteConfig(path, raw, isGlobal)
+}
+
+// validateKeyForScope validates a key against the appropriate config struct
+// and returns the populated struct for type coercion.
+func validateKeyForScope(key, value string, isGlobal bool) (interface{}, error) {
 	if isGlobal {
 		cfg := config.DefaultConfig()
 		if err := config.SetConfigValue(cfg, key, value); err != nil {
-			// Check if this is a repo-only key to give a better error
 			repoCfg := &config.RepoConfig{}
 			if config.SetConfigValue(repoCfg, key, value) == nil {
-				return fmt.Errorf("key %q is a per-repo setting (use without --global, or set in .roborev.toml)", key)
+				return nil, fmt.Errorf("key %q is a per-repo setting (use without --global, or set in .roborev.toml)", key)
 			}
-			return err
+			return nil, err
 		}
-		validationCfg = cfg
-	} else {
-		repoCfg := &config.RepoConfig{}
-		if err := config.SetConfigValue(repoCfg, key, value); err != nil {
-			// Check if this is a global-only key to give a better error
-			cfg := config.DefaultConfig()
-			if config.SetConfigValue(cfg, key, value) == nil {
-				return fmt.Errorf("key %q is a global setting (use --global to set in %s)", key, config.GlobalConfigPath())
-			}
-			return err
-		}
-		validationCfg = repoCfg
+		return cfg, nil
 	}
 
-	// Set in raw map, handling dot notation for nested keys
-	setRawMapKey(raw, key, coerceValue(validationCfg, key, value))
+	repoCfg := &config.RepoConfig{}
+	if err := config.SetConfigValue(repoCfg, key, value); err != nil {
+		cfg := config.DefaultConfig()
+		if config.SetConfigValue(cfg, key, value) == nil {
+			return nil, fmt.Errorf("key %q is a global setting (use --global to set in %s)", key, config.GlobalConfigPath())
+		}
+		return nil, err
+	}
+	return repoCfg, nil
+}
 
+// loadRawConfig loads an existing TOML file as a raw map, or returns
+// an empty map if the file doesn't exist.
+func loadRawConfig(path string) (map[string]interface{}, error) {
+	raw := make(map[string]interface{})
+	if _, err := os.Stat(path); err == nil {
+		if _, err := toml.DecodeFile(path, &raw); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", path, err)
+		}
+	}
+	return raw, nil
+}
+
+// atomicWriteConfig writes a config map to a TOML file atomically using
+// a temp file and rename. It creates parent directories as needed.
+func atomicWriteConfig(path string, raw map[string]interface{}, isGlobal bool) error {
 	// Ensure directory exists. Use restrictive perms for the global config dir
 	// since it may contain secrets (API keys, DB credentials).
 	dirMode := os.FileMode(0755)
@@ -314,13 +378,12 @@ func setConfigKey(path, key, value string, isGlobal bool) error {
 		mode = info.Mode()
 	}
 
-	// Write to temp file and rename for atomicity
 	f, err := os.CreateTemp(filepath.Dir(path), ".roborev-config-*.toml")
 	if err != nil {
 		return err
 	}
 	tmpPath := f.Name()
-	defer os.Remove(tmpPath) // clean up on any failure; no-op after successful rename
+	defer os.Remove(tmpPath)
 
 	if err := toml.NewEncoder(f).Encode(raw); err != nil {
 		f.Close()
@@ -409,24 +472,5 @@ func coerceValue(validationCfg interface{}, key, rawVal string) interface{} {
 		return rawVal
 	default:
 		return rawVal
-	}
-}
-
-// findRepoRoot walks up from the current directory to find a git repo root
-func findRepoRoot() (string, error) {
-	dir, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-
-	for {
-		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
-			return dir, nil
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return "", fmt.Errorf("not a git repository")
-		}
-		dir = parent
 	}
 }
