@@ -671,6 +671,40 @@ func TestListExplicitKeysIncludesZeroValues(t *testing.T) {
 	}
 }
 
+func TestListExplicitKeysIncludesEmptyValues(t *testing.T) {
+	cfg := &Config{
+		DefaultModel: "", // explicit empty string
+		CI: CIConfig{
+			Repos: []string{}, // explicit empty slice
+		},
+		Sync: SyncConfig{
+			RepoNames: map[string]string{}, // explicit empty map
+		},
+	}
+	raw := map[string]interface{}{
+		"default_model": "",
+		"ci": map[string]interface{}{
+			"repos": []interface{}{},
+		},
+		"sync": map[string]interface{}{
+			"repo_names": map[string]interface{}{},
+		},
+	}
+
+	kvs := ListExplicitKeys(cfg, raw)
+	found := toMap(kvs)
+
+	if _, ok := found["default_model"]; !ok {
+		t.Error("expected default_model to be listed (explicit empty string in TOML)")
+	}
+	if _, ok := found["ci.repos"]; !ok {
+		t.Error("expected ci.repos to be listed (explicit empty slice in TOML)")
+	}
+	if _, ok := found["sync.repo_names"]; !ok {
+		t.Error("expected sync.repo_names to be listed (explicit empty map in TOML)")
+	}
+}
+
 func TestListExplicitKeysNilRaw(t *testing.T) {
 	cfg := DefaultConfig()
 	kvs := ListExplicitKeys(cfg, nil)

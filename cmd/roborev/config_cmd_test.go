@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -475,6 +476,122 @@ func TestListMergedConfigMalformedLocalConfig(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "load repo config") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestListGlobalConfigExplicitKeys(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("ROBOREV_DATA_DIR", dataDir)
+
+	// Write a global config with:
+	// - explicit default-valued key (max_workers = 4, which matches DefaultConfig)
+	// - explicit zero key (review_context_count = 0)
+	// - explicit false key (sync.enabled = false)
+	globalPath := filepath.Join(dataDir, "config.toml")
+	if err := os.WriteFile(globalPath, []byte(strings.Join([]string{
+		`max_workers = 4`,
+		`review_context_count = 0`,
+		``,
+		`[sync]`,
+		`enabled = false`,
+	}, "\n")+"\n"), 0644); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+
+	// Capture stdout
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := listGlobalConfig()
+
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("listGlobalConfig error: %v", err)
+	}
+
+	outBytes, err2 := io.ReadAll(r)
+	if err2 != nil {
+		t.Fatalf("read output: %v", err2)
+	}
+	output := string(outBytes)
+
+	// Explicit default-valued key should be shown
+	if !strings.Contains(output, "max_workers=4") {
+		t.Errorf("output should include explicit default-valued key max_workers=4, got:\n%s", output)
+	}
+
+	// Explicit zero key should be shown
+	if !strings.Contains(output, "review_context_count=0") {
+		t.Errorf("output should include explicit zero key review_context_count=0, got:\n%s", output)
+	}
+
+	// Explicit false key should be shown
+	if !strings.Contains(output, "sync.enabled=false") {
+		t.Errorf("output should include explicit false key sync.enabled=false, got:\n%s", output)
+	}
+
+	// Non-explicit default key (default_agent) should NOT be shown
+	if strings.Contains(output, "default_agent=") {
+		t.Errorf("output should NOT include non-explicit default_agent, got:\n%s", output)
+	}
+}
+
+func TestListLocalConfigExplicitKeys(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("ROBOREV_DATA_DIR", dataDir)
+
+	repoDir := createFakeGitRepo(t)
+
+	// Write a local config with:
+	// - explicit key with value
+	// - explicit zero key (review_context_count = 0)
+	// - explicit false in nested struct not applicable for RepoConfig, so use zero int
+	if err := os.WriteFile(filepath.Join(repoDir, ".roborev.toml"), []byte(strings.Join([]string{
+		`agent = "claude-code"`,
+		`review_context_count = 0`,
+	}, "\n")+"\n"), 0644); err != nil {
+		t.Fatalf("write local config: %v", err)
+	}
+
+	env := newStubRepoEnv(t)
+	env.SetGitRoot(repoDir)
+
+	// Capture stdout
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := listLocalConfig()
+
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("listLocalConfig error: %v", err)
+	}
+
+	outBytes, err2 := io.ReadAll(r)
+	if err2 != nil {
+		t.Fatalf("read output: %v", err2)
+	}
+	output := string(outBytes)
+
+	// Explicit key should be shown
+	if !strings.Contains(output, "agent=claude-code") {
+		t.Errorf("output should include explicit agent=claude-code, got:\n%s", output)
+	}
+
+	// Explicit zero key should be shown
+	if !strings.Contains(output, "review_context_count=0") {
+		t.Errorf("output should include explicit zero review_context_count=0, got:\n%s", output)
+	}
+
+	// Non-explicit keys should NOT be shown (review_guidelines was not set)
+	if strings.Contains(output, "review_guidelines=") {
+		t.Errorf("output should NOT include non-explicit review_guidelines, got:\n%s", output)
 	}
 }
 
