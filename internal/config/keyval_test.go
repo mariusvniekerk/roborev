@@ -411,6 +411,80 @@ func TestMergedConfigWithOriginShowsAllOrigins(t *testing.T) {
 	}
 }
 
+func TestMergedConfigWithOriginIncludesComplexFields(t *testing.T) {
+	global := DefaultConfig()
+	global.Sync.RepoNames = map[string]string{
+		"org/repo": "my-project",
+	}
+	global.CI.GitHubAppInstallations = map[string]int64{
+		"org": 1234,
+	}
+
+	rawGlobal := map[string]interface{}{
+		"sync": map[string]interface{}{
+			"repo_names": map[string]interface{}{
+				"org/repo": "my-project",
+			},
+		},
+		"ci": map[string]interface{}{
+			"github_app_installations": map[string]interface{}{
+				"org": int64(1234),
+			},
+		},
+	}
+
+	kvos := MergedConfigWithOrigin(global, nil, rawGlobal, nil)
+	found := toOriginMap(kvos)
+
+	if kvo, ok := found["sync.repo_names"]; !ok {
+		t.Error("missing sync.repo_names in merged output")
+	} else if !strings.Contains(kvo.Value, "org/repo:my-project") {
+		t.Errorf("sync.repo_names value = %q, want to contain org/repo:my-project", kvo.Value)
+	} else if kvo.Origin != "global" {
+		t.Errorf("sync.repo_names origin = %q, want global", kvo.Origin)
+	}
+
+	if kvo, ok := found["ci.github_app_installations"]; !ok {
+		t.Error("missing ci.github_app_installations in merged output")
+	} else if !strings.Contains(kvo.Value, "org:1234") {
+		t.Errorf("ci.github_app_installations value = %q, want to contain org:1234", kvo.Value)
+	} else if kvo.Origin != "global" {
+		t.Errorf("ci.github_app_installations origin = %q, want global", kvo.Origin)
+	}
+}
+
+func TestFormatMapDeterministic(t *testing.T) {
+	cfg := &Config{
+		Sync: SyncConfig{
+			RepoNames: map[string]string{
+				"b/repo": "bravo",
+				"a/repo": "alpha",
+				"c/repo": "charlie",
+			},
+		},
+	}
+
+	// Run multiple times to verify determinism
+	var prev string
+	for i := 0; i < 10; i++ {
+		kvs := ListConfigKeys(cfg)
+		found := toMap(kvs)
+		got := found["sync.repo_names"]
+		if prev != "" && got != prev {
+			t.Fatalf("non-deterministic map output: %q vs %q", prev, got)
+		}
+		prev = got
+	}
+
+	// Verify sorted order
+	kvs := ListConfigKeys(cfg)
+	found := toMap(kvs)
+	want := "a/repo:alpha,b/repo:bravo,c/repo:charlie"
+	if found["sync.repo_names"] != want {
+		t.Errorf("sync.repo_names = %q, want %q", found["sync.repo_names"], want)
+	}
+}
+
 func TestIsValidKey(t *testing.T) {
 	tests := []struct {
 		key  string

@@ -417,6 +417,8 @@ func formatValue(v reflect.Value) string {
 			return strings.Join(strs, ",")
 		}
 		return fmt.Sprintf("%v", v.Interface())
+	case reflect.Map:
+		return formatMap(v)
 	case reflect.Ptr:
 		if v.IsNil() {
 			return ""
@@ -425,6 +427,23 @@ func formatValue(v reflect.Value) string {
 	default:
 		return fmt.Sprintf("%v", v.Interface())
 	}
+}
+
+// formatMap returns a deterministic string representation of a map by sorting keys.
+func formatMap(v reflect.Value) string {
+	keys := make([]string, 0, v.Len())
+	keyToVal := make(map[string]string, v.Len())
+	for _, k := range v.MapKeys() {
+		ks := fmt.Sprintf("%v", k.Interface())
+		keys = append(keys, ks)
+		keyToVal[ks] = fmt.Sprintf("%v", v.MapIndex(k).Interface())
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+":"+keyToVal[k])
+	}
+	return strings.Join(parts, ",")
 }
 
 // setFieldValue sets a reflect.Value from a string, handling type conversion
@@ -473,19 +492,18 @@ func setFieldValue(field reflect.Value, value string) error {
 
 // listFields returns key-value pairs for all non-zero fields in a struct.
 func listFields(v reflect.Value, prefix string) []KeyValue {
-	return flattenStruct(v, prefix, false, false)
+	return flattenStruct(v, prefix, false)
 }
 
 // listAllFields returns key-value pairs for ALL fields (including zero) in a struct.
 // Used for merged config comparison.
 func listAllFields(v reflect.Value, prefix string) []KeyValue {
-	return flattenStruct(v, prefix, true, true)
+	return flattenStruct(v, prefix, true)
 }
 
 // flattenStruct walks a struct's fields recursively, building dot-separated keys
 // from TOML tags. When includeZero is false, zero-valued leaf fields are skipped.
-// When skipComplex is true, map and []struct fields are omitted.
-func flattenStruct(v reflect.Value, prefix string, includeZero bool, skipComplex bool) []KeyValue {
+func flattenStruct(v reflect.Value, prefix string, includeZero bool) []KeyValue {
 	var result []KeyValue
 	t := v.Type()
 
@@ -503,7 +521,7 @@ func flattenStruct(v reflect.Value, prefix string, includeZero bool, skipComplex
 					fieldVal = fieldVal.Elem()
 				}
 				if fieldVal.Kind() == reflect.Struct {
-					result = append(result, flattenStruct(fieldVal, prefix, includeZero, skipComplex)...)
+					result = append(result, flattenStruct(fieldVal, prefix, includeZero)...)
 				}
 			}
 			continue
@@ -516,22 +534,12 @@ func flattenStruct(v reflect.Value, prefix string, includeZero bool, skipComplex
 
 		// Recurse into nested structs
 		if fieldVal.Kind() == reflect.Ptr && !fieldVal.IsNil() && fieldVal.Elem().Kind() == reflect.Struct {
-			result = append(result, flattenStruct(fieldVal.Elem(), fullKey, includeZero, skipComplex)...)
+			result = append(result, flattenStruct(fieldVal.Elem(), fullKey, includeZero)...)
 			continue
 		}
 		if fieldVal.Kind() == reflect.Struct {
-			result = append(result, flattenStruct(fieldVal, fullKey, includeZero, skipComplex)...)
+			result = append(result, flattenStruct(fieldVal, fullKey, includeZero)...)
 			continue
-		}
-
-		if skipComplex {
-			// Skip map and slice-of-struct types that don't have simple representations
-			if fieldVal.Kind() == reflect.Map {
-				continue
-			}
-			if fieldVal.Kind() == reflect.Slice && fieldVal.Type().Elem().Kind() == reflect.Struct {
-				continue
-			}
 		}
 
 		if !includeZero && fieldVal.IsZero() {
