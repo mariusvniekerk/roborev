@@ -456,15 +456,121 @@ func formatMap(v reflect.Value) string {
 		if entries[i].str != entries[j].str {
 			return entries[i].str < entries[j].str
 		}
-		// Tie-breaker: use detailed key representation for deterministic ordering
-		// when different keys produce the same String() output.
-		return fmt.Sprintf("%#v", entries[i].key.Interface()) < fmt.Sprintf("%#v", entries[j].key.Interface())
+		return compareKeys(entries[i].key, entries[j].key) < 0
 	})
 	parts := make([]string, 0, len(entries))
 	for _, e := range entries {
 		parts = append(parts, e.str+":"+fmt.Sprintf("%v", v.MapIndex(e.key).Interface()))
 	}
 	return strings.Join(parts, ",")
+}
+
+// compareKeys returns -1, 0, or 1 comparing two reflect.Values structurally.
+// It handles all valid map-key kinds without relying on formatted strings,
+// guaranteeing deterministic ordering even for types with colliding String()
+// or GoString() output.
+func compareKeys(a, b reflect.Value) int {
+	// Dereference interfaces to their underlying values.
+	if a.Kind() == reflect.Interface {
+		a = a.Elem()
+	}
+	if b.Kind() == reflect.Interface {
+		b = b.Elem()
+	}
+
+	// Different concrete types: order by type string.
+	if a.Type() != b.Type() {
+		ta, tb := a.Type().String(), b.Type().String()
+		if ta < tb {
+			return -1
+		}
+		return 1
+	}
+
+	switch a.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		ai, bi := a.Int(), b.Int()
+		if ai < bi {
+			return -1
+		}
+		if ai > bi {
+			return 1
+		}
+		return 0
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		au, bu := a.Uint(), b.Uint()
+		if au < bu {
+			return -1
+		}
+		if au > bu {
+			return 1
+		}
+		return 0
+	case reflect.Float32, reflect.Float64:
+		af, bf := a.Float(), b.Float()
+		if af < bf {
+			return -1
+		}
+		if af > bf {
+			return 1
+		}
+		// NaN handling: treat NaN as equal (sort is still deterministic
+		// because equal elements keep relative order via stable-sort below
+		// or because there's truly no distinguishable difference).
+		return 0
+	case reflect.String:
+		as, bs := a.String(), b.String()
+		if as < bs {
+			return -1
+		}
+		if as > bs {
+			return 1
+		}
+		return 0
+	case reflect.Bool:
+		ab, bb := a.Bool(), b.Bool()
+		if ab == bb {
+			return 0
+		}
+		if !ab {
+			return -1
+		}
+		return 1
+	case reflect.Pointer:
+		ap, bp := a.Pointer(), b.Pointer()
+		if ap < bp {
+			return -1
+		}
+		if ap > bp {
+			return 1
+		}
+		return 0
+	case reflect.Array:
+		for i := 0; i < a.Len(); i++ {
+			if c := compareKeys(a.Index(i), b.Index(i)); c != 0 {
+				return c
+			}
+		}
+		return 0
+	case reflect.Struct:
+		for i := 0; i < a.NumField(); i++ {
+			if c := compareKeys(a.Field(i), b.Field(i)); c != 0 {
+				return c
+			}
+		}
+		return 0
+	default:
+		// Fallback for exotic key types: use %#v formatting.
+		fa := fmt.Sprintf("%#v", a.Interface())
+		fb := fmt.Sprintf("%#v", b.Interface())
+		if fa < fb {
+			return -1
+		}
+		if fa > fb {
+			return 1
+		}
+		return 0
+	}
 }
 
 // setFieldValue sets a reflect.Value from a string, handling type conversion

@@ -533,6 +533,37 @@ func TestFormatMapCollidingKeys(t *testing.T) {
 	}
 }
 
+// fullyCollidingKey has both String() and GoString() returning constants,
+// so %v and %#v both collide. Only structural comparison can distinguish keys.
+type fullyCollidingKey int
+
+func (k fullyCollidingKey) String() string   { return "same" }
+func (k fullyCollidingKey) GoString() string { return "same" }
+
+func TestFormatMapFullyCollidingKeys(t *testing.T) {
+	m := map[fullyCollidingKey]string{
+		fullyCollidingKey(10): "x",
+		fullyCollidingKey(20): "y",
+		fullyCollidingKey(30): "z",
+	}
+
+	// Run multiple times to verify determinism despite colliding %v and %#v
+	var prev string
+	for i := 0; i < 20; i++ {
+		got := formatMap(reflect.ValueOf(m))
+		if prev != "" && got != prev {
+			t.Fatalf("non-deterministic output on iteration %d: %q vs %q", i, prev, got)
+		}
+		prev = got
+	}
+
+	// Structural comparison orders by underlying int: 10 < 20 < 30
+	want := "same:x,same:y,same:z"
+	if prev != want {
+		t.Errorf("formatMap = %q, want %q", prev, want)
+	}
+}
+
 func TestIsValidKey(t *testing.T) {
 	tests := []struct {
 		key  string
