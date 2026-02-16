@@ -34,6 +34,20 @@ func createMockExecutable(t *testing.T, dir, name string, exitCode int) string {
 	return path
 }
 
+// installGitHook writes a shell script as the named git hook
+// (e.g. "pre-commit", "post-checkout") and makes it executable.
+func installGitHook(t *testing.T, repoDir, name, script string) {
+	t.Helper()
+	hooksDir := filepath.Join(repoDir, ".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	hookPath := filepath.Join(hooksDir, name)
+	if err := os.WriteFile(hookPath, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // gitCommitFile writes a file, stages it, commits, and returns the new HEAD SHA.
 func gitCommitFile(t *testing.T, repoDir string, runGit func(...string) string, filename, content, msg string) string {
 	t.Helper()
@@ -1077,6 +1091,208 @@ func TestWorktreeCleanupBetweenIterations(t *testing.T) {
 	// Verify the last worktree was also cleaned up
 	if _, err := os.Stat(prevPath); !os.IsNotExist(err) {
 		t.Fatalf("last worktree %s still exists after cleanup", prevPath)
+	}
+}
+
+func TestCreateTempWorktreeIgnoresHooks(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repoDir, _, runGit := setupTestGitRepo(t)
+
+	installGitHook(t, repoDir, "post-checkout", "#!/bin/sh\nexit 1\n")
+
+	// Verify the hook is active (a normal worktree add would fail)
+	failDir := t.TempDir()
+	cmd := exec.Command("git", "-C", repoDir, "worktree", "add", "--detach", failDir, "HEAD")
+	if out, err := cmd.CombinedOutput(); err == nil {
+		// Clean up the worktree before failing
+		exec.Command("git", "-C", repoDir, "worktree", "remove", "--force", failDir).Run()
+		// Some git versions don't fail on post-checkout hook errors.
+		// In that case, verify our approach still succeeds.
+		_ = out
+	}
+
+	// createTempWorktree should succeed because it suppresses hooks
+	worktreePath, cleanup, err := createTempWorktree(repoDir)
+	if err != nil {
+		t.Fatalf("createTempWorktree should succeed with failing hook: %v", err)
+	}
+	defer cleanup()
+
+	// Verify the worktree directory exists and has the file from the repo
+	if _, err := os.Stat(worktreePath); err != nil {
+		t.Fatalf("worktree directory should exist: %v", err)
+	}
+
+	baseFile := filepath.Join(worktreePath, "base.txt")
+	content, err := os.ReadFile(baseFile)
+	if err != nil {
+		t.Fatalf("expected base.txt in worktree: %v", err)
+	}
+	if string(content) != "base" {
+		t.Errorf("expected content 'base', got %q", string(content))
+	}
+
+	_ = runGit // used by setupTestGitRepo
+}
+
+func TestCommitWithHookRetrySucceeds(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repoDir, _, runGit := setupTestGitRepo(t)
+
+	// Install a pre-commit hook that fails on the first 2 calls and
+	// succeeds on the 3rd+. The hook runs twice before a retry: once
+	// by git commit, once by the hook probe. A counter file tracks calls.
+	installGitHook(t, repoDir, "pre-commit", `#!/bin/sh
+COUNT_FILE=".git/hook-count"
+COUNT=0
+if [ -f "$COUNT_FILE" ]; then
+    COUNT=$(cat "$COUNT_FILE")
+fi
+COUNT=$((COUNT + 1))
+echo "$COUNT" > "$COUNT_FILE"
+if [ "$COUNT" -le 2 ]; then
+    echo "lint error: trailing whitespace" >&2
+    exit 1
+fi
+exit 0
+`)
+
+	// Make a file change to commit
+	if err := os.WriteFile(filepath.Join(repoDir, "new.txt"), []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	testAgent := agent.NewTestAgent()
+	sha, err := commitWithHookRetry(repoDir, "test commit", testAgent, true)
+	if err != nil {
+		t.Fatalf("commitWithHookRetry should succeed: %v", err)
+	}
+
+	if sha == "" {
+		t.Fatal("expected non-empty SHA")
+	}
+
+	// Verify the commit exists
+	commitSHA := runGit("rev-parse", "HEAD")
+	if commitSHA != sha {
+		t.Errorf("expected HEAD=%s, got %s", sha, commitSHA)
+	}
+}
+
+func TestCommitWithHookRetryExhausted(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repoDir, _, _ := setupTestGitRepo(t)
+
+	installGitHook(t, repoDir, "pre-commit",
+		"#!/bin/sh\necho 'always fails' >&2\nexit 1\n")
+
+	// Make a file change
+	if err := os.WriteFile(filepath.Join(repoDir, "new.txt"), []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	testAgent := agent.NewTestAgent()
+	_, err := commitWithHookRetry(repoDir, "test commit", testAgent, true)
+	if err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+	if !strings.Contains(err.Error(), "after 3 attempts") {
+		t.Errorf("expected error mentioning '3 attempts', got: %v", err)
+	}
+}
+
+func TestCommitWithHookRetrySkipsNonHookError(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repoDir, _, _ := setupTestGitRepo(t)
+
+	// No pre-commit hook installed. Commit with no changes will fail
+	// for a non-hook reason ("nothing to commit").
+	testAgent := agent.NewTestAgent()
+	_, err := commitWithHookRetry(repoDir, "empty commit", testAgent, true)
+	if err == nil {
+		t.Fatal("expected error for empty commit without hook")
+	}
+
+	// Should return the raw git error, not a hook-retry error
+	if strings.Contains(err.Error(), "pre-commit hook failed") {
+		t.Errorf("non-hook error should not be reported as hook failure, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "after 3 attempts") {
+		t.Errorf("non-hook error should not trigger retries, got: %v", err)
+	}
+}
+
+func TestCommitWithHookRetrySkipsAddPhaseError(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repoDir, _, _ := setupTestGitRepo(t)
+
+	installGitHook(t, repoDir, "pre-commit", "#!/bin/sh\nexit 0\n")
+
+	// Make a change so there's something to commit
+	if err := os.WriteFile(filepath.Join(repoDir, "new.txt"), []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create index.lock to make git add fail (non-hook failure)
+	lockFile := filepath.Join(repoDir, ".git", "index.lock")
+	if err := os.WriteFile(lockFile, []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(lockFile)
+
+	testAgent := agent.NewTestAgent()
+	_, err := commitWithHookRetry(repoDir, "test commit", testAgent, true)
+	if err == nil {
+		t.Fatal("expected error with index.lock present")
+	}
+
+	// Should NOT retry despite hook being present (add-phase failure)
+	if strings.Contains(err.Error(), "pre-commit hook failed") {
+		t.Errorf("add-phase error should not be reported as hook failure, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "after 3 attempts") {
+		t.Errorf("add-phase error should not trigger retries, got: %v", err)
+	}
+}
+
+func TestCommitWithHookRetrySkipsCommitPhaseNonHookError(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repoDir, _, _ := setupTestGitRepo(t)
+
+	installGitHook(t, repoDir, "pre-commit", "#!/bin/sh\nexit 0\n")
+
+	// No changes to commit — "nothing to commit" is a commit-phase
+	// failure, but the hook passes, so HookFailed should be false.
+	testAgent := agent.NewTestAgent()
+	_, err := commitWithHookRetry(repoDir, "empty commit", testAgent, true)
+	if err == nil {
+		t.Fatal("expected error for empty commit")
+	}
+
+	// Should NOT retry despite hook being present (hook is passing)
+	if strings.Contains(err.Error(), "pre-commit hook failed") {
+		t.Errorf("non-hook commit error should not be reported as hook failure, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "after 3 attempts") {
+		t.Errorf("non-hook commit error should not trigger retries, got: %v", err)
 	}
 }
 

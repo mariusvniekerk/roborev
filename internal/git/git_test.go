@@ -1,6 +1,7 @@
 package git
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -97,6 +98,20 @@ func (r *TestRepo) AddWorktree(branchName string) *TestRepo {
 		_ = cmd.Run() // best-effort cleanup; not worth failing the test
 	})
 	return &TestRepo{T: r.T, Dir: wtDir}
+}
+
+// InstallHook writes a shell script as the named git hook
+// (e.g. "pre-commit") and makes it executable.
+func (r *TestRepo) InstallHook(name, script string) {
+	r.T.Helper()
+	hooksDir := filepath.Join(r.Dir, ".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+		r.T.Fatal(err)
+	}
+	hookPath := filepath.Join(hooksDir, name)
+	if err := os.WriteFile(hookPath, []byte(script), 0755); err != nil {
+		r.T.Fatal(err)
+	}
 }
 
 func runGit(t *testing.T, dir string, args ...string) string {
@@ -1264,6 +1279,93 @@ func TestGetRangeFilesChanged(t *testing.T) {
 			t.Errorf("expected 0 files for empty range, got %d: %v", len(files), files)
 		}
 	})
+}
+
+func TestCreateCommitPreCommitHookOutput(t *testing.T) {
+	repo := NewTestRepo(t)
+	repo.CommitFile("initial.txt", "initial", "initial commit")
+
+	repo.InstallHook("pre-commit",
+		"#!/bin/sh\necho 'error: trailing whitespace on line 42' >&2\nexit 1\n")
+
+	// Make a change so there's something to commit
+	repo.WriteFile("new.txt", "content")
+	repo.Run("add", "new.txt")
+
+	_, err := CreateCommit(repo.Dir, "should fail")
+	if err == nil {
+		t.Fatal("expected CreateCommit to fail with pre-commit hook")
+	}
+
+	// The error should contain the hook's stderr output
+	if !strings.Contains(err.Error(), "trailing whitespace on line 42") {
+		t.Errorf(
+			"expected error to contain hook output, got: %v", err,
+		)
+	}
+
+	// HookFailed should be true since the hook caused the failure
+	var commitErr *CommitError
+	if !errors.As(err, &commitErr) {
+		t.Fatal("expected CommitError type")
+	}
+	if !commitErr.HookFailed {
+		t.Error("expected HookFailed=true for pre-commit hook rejection")
+	}
+}
+
+func TestCommitErrorHookFailedFalseWhenNothingToCommit(t *testing.T) {
+	repo := NewTestRepo(t)
+	repo.CommitFile("initial.txt", "initial", "initial commit")
+
+	// Install a passing pre-commit hook. The commit should still fail
+	// because there are no staged changes ("nothing to commit").
+	// The dry-run probe (--no-verify --dry-run) also fails for the
+	// same reason, so HookFailed must be false.
+	repo.InstallHook("pre-commit", "#!/bin/sh\nexit 0\n")
+
+	// No staged changes — commit fails for non-hook reason
+	_, err := CreateCommit(repo.Dir, "empty commit")
+	if err == nil {
+		t.Fatal("expected CreateCommit to fail")
+	}
+
+	var commitErr *CommitError
+	if !errors.As(err, &commitErr) {
+		t.Fatal("expected CommitError type")
+	}
+
+	// Dry-run without hooks also fails, so HookFailed must be false
+	if commitErr.HookFailed {
+		t.Error("HookFailed should be false when commit fails for non-hook reasons")
+	}
+}
+
+func TestCommitErrorHookFailedCommitMsgHook(t *testing.T) {
+	repo := NewTestRepo(t)
+	repo.CommitFile("initial.txt", "initial", "initial commit")
+
+	// Install a commit-msg hook that rejects. The dry-run probe
+	// bypasses all hooks (--no-verify), so it should succeed and
+	// HookFailed should be true.
+	repo.InstallHook("commit-msg",
+		"#!/bin/sh\necho 'bad commit message format' >&2\nexit 1\n")
+
+	repo.WriteFile("new.txt", "content")
+	repo.Run("add", "new.txt")
+
+	_, err := CreateCommit(repo.Dir, "should fail")
+	if err == nil {
+		t.Fatal("expected CreateCommit to fail with commit-msg hook")
+	}
+
+	var commitErr *CommitError
+	if !errors.As(err, &commitErr) {
+		t.Fatal("expected CommitError type")
+	}
+	if !commitErr.HookFailed {
+		t.Error("expected HookFailed=true for commit-msg hook rejection")
+	}
 }
 
 func TestIsAncestor(t *testing.T) {

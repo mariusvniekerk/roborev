@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -466,7 +467,7 @@ func runRefine(agentName, modelStr, reasoningStr string, maxIterations int, quie
 		cleanupWorktree()
 
 		commitMsg := fmt.Sprintf("Address review findings (job %d)\n\n%s", currentFailedReview.JobID, summarizeAgentOutput(output))
-		newCommit, err := git.CreateCommit(repoPath, commitMsg)
+		newCommit, err := commitWithHookRetry(repoPath, commitMsg, addressAgent, quiet)
 		if err != nil {
 			return fmt.Errorf("failed to commit changes: %w", err)
 		}
@@ -618,8 +619,9 @@ func createTempWorktree(repoPath string) (string, func(), error) {
 		return "", nil, err
 	}
 
-	// Create the worktree (without --recurse-submodules for compatibility with older git)
-	cmd := exec.Command("git", "-C", repoPath, "worktree", "add", "--detach", worktreeDir, "HEAD")
+	// Create the worktree (without --recurse-submodules for compatibility with older git).
+	// Suppress hooks via core.hooksPath=<null> — user hooks shouldn't run in internal worktrees.
+	cmd := exec.Command("git", "-C", repoPath, "-c", "core.hooksPath="+os.DevNull, "worktree", "add", "--detach", worktreeDir, "HEAD")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		os.RemoveAll(worktreeDir)
 		return "", nil, fmt.Errorf("git worktree add: %w: %s", err, out)
@@ -769,6 +771,125 @@ func applyWorktreeChanges(repoPath, worktreePath string) error {
 		return fmt.Errorf("git apply: %w: %s", err, stderr.String())
 	}
 
+	return nil
+}
+
+// commitWithHookRetry attempts git.CreateCommit and, on failure,
+// runs the agent to fix whatever the hook complained about. Only
+// retries when a hook (pre-commit, commit-msg, etc.) caused the
+// failure — other commit failures (missing identity, empty commit,
+// lockfile) are returned immediately. Retries up to 3 total attempts.
+func commitWithHookRetry(
+	repoPath, commitMsg string,
+	fixAgent agent.Agent,
+	quiet bool,
+) (string, error) {
+	const maxAttempts = 3
+
+	expectedHead, err := git.ResolveSHA(repoPath, "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("cannot determine HEAD: %w", err)
+	}
+	expectedBranch := git.GetCurrentBranch(repoPath)
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		sha, err := git.CreateCommit(repoPath, commitMsg)
+		if err == nil {
+			return sha, nil
+		}
+
+		// Only retry when a hook positively caused the failure.
+		// Add-phase errors, non-hook commit errors, and commit
+		// failures without hooks are returned immediately.
+		var commitErr *git.CommitError
+		if !errors.As(err, &commitErr) || !commitErr.HookFailed {
+			return "", err
+		}
+
+		if attempt == maxAttempts {
+			return "", fmt.Errorf(
+				"hook failed after %d attempts: %w",
+				maxAttempts, err,
+			)
+		}
+
+		hookErr := err.Error()
+		if !quiet {
+			fmt.Printf(
+				"Hook failed (attempt %d/%d), "+
+					"running agent to fix:\n%s\n",
+				attempt, maxAttempts, hookErr,
+			)
+		}
+
+		if err := verifyRepoState(
+			repoPath, expectedHead, expectedBranch,
+		); err != nil {
+			return "", fmt.Errorf(
+				"aborting hook retry: %w", err,
+			)
+		}
+
+		fixPrompt := fmt.Sprintf(
+			"A git hook rejected this commit with the "+
+				"following error output. Fix the issues so "+
+				"the commit can succeed.\n\n%s",
+			hookErr,
+		)
+
+		var agentOutput io.Writer
+		if quiet {
+			agentOutput = io.Discard
+		} else {
+			agentOutput = os.Stdout
+		}
+
+		fixCtx, cancel := context.WithTimeout(
+			context.Background(), 5*time.Minute,
+		)
+		_, agentErr := fixAgent.Review(
+			fixCtx, repoPath, "HEAD", fixPrompt, agentOutput,
+		)
+		cancel()
+
+		if agentErr != nil {
+			return "", fmt.Errorf(
+				"agent failed to fix hook issues: %w", agentErr,
+			)
+		}
+
+		if err := verifyRepoState(
+			repoPath, expectedHead, expectedBranch,
+		); err != nil {
+			return "", fmt.Errorf(
+				"agent changed repo state during hook fix: %w",
+				err,
+			)
+		}
+	}
+
+	// unreachable, but satisfies the compiler
+	return "", fmt.Errorf("commit retry loop exited unexpectedly")
+}
+
+// verifyRepoState checks that HEAD and current branch match expected
+// values. Returns an error describing the drift if they don't.
+func verifyRepoState(
+	repoPath, expectedHead, expectedBranch string,
+) error {
+	currentHead, err := git.ResolveSHA(repoPath, "HEAD")
+	if err != nil {
+		return fmt.Errorf("cannot verify HEAD: %w", err)
+	}
+	currentBranch := git.GetCurrentBranch(repoPath)
+	if currentHead != expectedHead ||
+		currentBranch != expectedBranch {
+		return fmt.Errorf(
+			"HEAD was %s on %s, now %s on %s",
+			shortSHA(expectedHead), expectedBranch,
+			shortSHA(currentHead), currentBranch,
+		)
+	}
 	return nil
 }
 
