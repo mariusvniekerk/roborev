@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 )
@@ -10,7 +11,7 @@ func TestCursorBuildArgs(t *testing.T) {
 	a := NewCursorAgent("agent")
 
 	// Non-agentic mode (review): --mode plan, no --force, default model "auto"
-	args := a.buildArgs(false, "review this")
+	args := a.buildArgs(false)
 	assertContainsArg(t, args, "-p")
 	assertContainsArg(t, args, "--output-format")
 	assertContainsArg(t, args, "stream-json")
@@ -19,26 +20,19 @@ func TestCursorBuildArgs(t *testing.T) {
 	assertContainsArg(t, args, "--mode")
 	assertContainsArg(t, args, "plan")
 	assertNotContainsArg(t, args, "--force")
-	// Prompt should be the last arg
-	if args[len(args)-1] != "review this" {
-		t.Errorf("expected prompt as last arg, got %q", args[len(args)-1])
-	}
 
 	// Agentic mode: --force, no --mode plan
-	args = a.buildArgs(true, "fix this")
+	args = a.buildArgs(true)
 	assertContainsArg(t, args, "--force")
 	assertNotContainsArg(t, args, "--mode")
 	assertNotContainsArg(t, args, "plan")
-	if args[len(args)-1] != "fix this" {
-		t.Errorf("expected prompt as last arg, got %q", args[len(args)-1])
-	}
 }
 
 func TestCursorBuildArgsWithModel(t *testing.T) {
 	a := NewCursorAgent("agent")
 	a = a.WithModel("gpt-5.2-codex-high").(*CursorAgent)
 
-	args := a.buildArgs(false, "test")
+	args := a.buildArgs(false)
 	assertContainsArg(t, args, "--model")
 	assertContainsArg(t, args, "gpt-5.2-codex-high")
 }
@@ -125,6 +119,43 @@ func TestCursorWithChaining(t *testing.T) {
 	}
 	if cursor.Command != "agent" {
 		t.Errorf("expected command 'agent', got %q", cursor.Command)
+	}
+}
+
+func TestCursorReviewPipesPromptViaStdin(t *testing.T) {
+	skipIfWindows(t)
+
+	mock := mockAgentCLI(t, MockCLIOpts{
+		CaptureArgs:  true,
+		CaptureStdin: true,
+		StdoutLines: []string{
+			`{"type":"result","result":"ok"}`,
+		},
+	})
+
+	a := NewCursorAgent(mock.CmdPath)
+	prompt := "Review this commit carefully"
+	_, err := a.Review(
+		context.Background(), t.TempDir(), "HEAD", prompt, nil,
+	)
+	if err != nil {
+		t.Fatalf("Review failed: %v", err)
+	}
+
+	stdin, err := os.ReadFile(mock.StdinFile)
+	if err != nil {
+		t.Fatalf("read stdin capture: %v", err)
+	}
+	if strings.TrimSpace(string(stdin)) != prompt {
+		t.Errorf("stdin = %q, want %q", string(stdin), prompt)
+	}
+
+	args, err := os.ReadFile(mock.ArgsFile)
+	if err != nil {
+		t.Fatalf("read args capture: %v", err)
+	}
+	if strings.Contains(string(args), prompt) {
+		t.Errorf("prompt leaked into argv: %s", string(args))
 	}
 }
 

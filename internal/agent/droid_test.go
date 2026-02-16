@@ -12,31 +12,31 @@ func TestDroidBuildArgsAgenticMode(t *testing.T) {
 	a := NewDroidAgent("droid")
 
 	// Test non-agentic mode (--auto low)
-	args := a.buildArgs("prompt", false)
+	args := a.buildArgs(false)
 	assertContainsArg(t, args, "low")
 	assertNotContainsArg(t, args, "medium")
 
 	// Test agentic mode (--auto medium)
-	args = a.buildArgs("prompt", true)
+	args = a.buildArgs(true)
 	assertContainsArg(t, args, "medium")
 }
 
 func TestDroidBuildArgsReasoningEffort(t *testing.T) {
 	// Test thorough reasoning
 	a := NewDroidAgent("droid").WithReasoning(ReasoningThorough).(*DroidAgent)
-	args := a.buildArgs("prompt", false)
+	args := a.buildArgs(false)
 	assertContainsArg(t, args, "--reasoning-effort")
 	assertContainsArg(t, args, "high")
 
 	// Test fast reasoning
 	a = NewDroidAgent("droid").WithReasoning(ReasoningFast).(*DroidAgent)
-	args = a.buildArgs("prompt", false)
+	args = a.buildArgs(false)
 	assertContainsArg(t, args, "--reasoning-effort")
 	assertContainsArg(t, args, "low")
 
 	// Test standard reasoning (no flag)
 	a = NewDroidAgent("droid").WithReasoning(ReasoningStandard).(*DroidAgent)
-	args = a.buildArgs("prompt", false)
+	args = a.buildArgs(false)
 	assertNotContainsArg(t, args, "--reasoning-effort")
 }
 
@@ -121,18 +121,38 @@ func TestDroidReviewWithProgress(t *testing.T) {
 	}
 }
 
-func TestDroidBuildArgsPromptWithDash(t *testing.T) {
-	a := NewDroidAgent("droid")
+func TestDroidReviewPipesPromptViaStdin(t *testing.T) {
+	skipIfWindows(t)
 
-	prompt := "-o /tmp/malicious --auto high"
-	args := a.buildArgs(prompt, false)
+	mock := mockAgentCLI(t, MockCLIOpts{
+		CaptureArgs:  true,
+		CaptureStdin: true,
+		StdoutLines:  []string{"ok"},
+	})
 
-	// Verify "--" appears before the prompt
-	assertArgsOrder(t, args, "--", prompt)
+	a := NewDroidAgent(mock.CmdPath)
+	prompt := "Review this commit carefully"
+	_, err := a.Review(
+		context.Background(), t.TempDir(), "HEAD", prompt, nil,
+	)
+	if err != nil {
+		t.Fatalf("Review failed: %v", err)
+	}
 
-	// Verify the prompt is passed exactly as last arg
-	if args[len(args)-1] != prompt {
-		t.Fatalf("expected prompt as last arg, got %v", args)
+	stdin, err := os.ReadFile(mock.StdinFile)
+	if err != nil {
+		t.Fatalf("read stdin capture: %v", err)
+	}
+	if strings.TrimSpace(string(stdin)) != prompt {
+		t.Errorf("stdin = %q, want %q", string(stdin), prompt)
+	}
+
+	args, err := os.ReadFile(mock.ArgsFile)
+	if err != nil {
+		t.Fatalf("read args capture: %v", err)
+	}
+	if strings.Contains(string(args), prompt) {
+		t.Errorf("prompt leaked into argv: %s", string(args))
 	}
 }
 
