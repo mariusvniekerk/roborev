@@ -13,6 +13,7 @@ import (
 	"github.com/roborev-dev/roborev/internal/config"
 	"github.com/roborev-dev/roborev/internal/prompt"
 	"github.com/roborev-dev/roborev/internal/storage"
+	"github.com/roborev-dev/roborev/internal/worktree"
 )
 
 // WorkerPool manages a pool of review workers
@@ -373,9 +374,24 @@ func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
 		wp.outputBuffers.CloseJob(job.ID)
 	}()
 
+	// For fix jobs, create an isolated worktree to run the agent in.
+	// The agent modifies files in the worktree; afterwards we capture the diff as a patch.
+	reviewRepoPath := job.RepoPath
+	if job.IsFixJob() {
+		wtDir, wtCleanup, wtErr := worktree.Create(job.RepoPath)
+		if wtErr != nil {
+			log.Printf("[%s] Error creating worktree for fix job %d: %v", workerID, job.ID, wtErr)
+			wp.failOrRetry(workerID, job, agentName, fmt.Sprintf("create worktree: %v", wtErr))
+			return
+		}
+		defer wtCleanup()
+		reviewRepoPath = wtDir
+		log.Printf("[%s] Fix job %d: running agent in worktree %s", workerID, job.ID, wtDir)
+	}
+
 	// Run the review
 	log.Printf("[%s] Running %s review...", workerID, agentName)
-	output, err := a.Review(ctx, job.RepoPath, job.GitRef, reviewPrompt, outputWriter)
+	output, err := a.Review(ctx, reviewRepoPath, job.GitRef, reviewPrompt, outputWriter)
 	if err != nil {
 		// Check if this was a cancellation
 		if ctx.Err() == context.Canceled {
@@ -395,6 +411,22 @@ func (wp *WorkerPool) processJob(workerID string, job *storage.ReviewJob) {
 		log.Printf("[%s] Agent error: %v", workerID, err)
 		wp.failOrRetryAgent(workerID, job, agentName, fmt.Sprintf("agent: %v", err))
 		return
+	}
+
+	// For fix jobs, capture the patch from the worktree and store it.
+	if job.IsFixJob() {
+		patch, patchErr := worktree.CapturePatch(reviewRepoPath)
+		if patchErr != nil {
+			log.Printf("[%s] Warning: failed to capture patch for fix job %d: %v", workerID, job.ID, patchErr)
+		} else if patch != "" {
+			if saveErr := wp.db.SaveJobPatch(job.ID, patch); saveErr != nil {
+				log.Printf("[%s] Warning: failed to save patch for fix job %d: %v", workerID, job.ID, saveErr)
+			} else {
+				log.Printf("[%s] Fix job %d: saved patch (%d bytes)", workerID, job.ID, len(patch))
+			}
+		} else {
+			log.Printf("[%s] Fix job %d: agent produced no file changes", workerID, job.ID)
+		}
 	}
 
 	// For compact jobs, validate raw agent output before storing.
