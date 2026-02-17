@@ -3,9 +3,246 @@ package worktree
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// setupGitRepo creates a minimal git repo with one commit and returns its path.
+func setupGitRepo(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
+	run("init")
+	run("config", "user.email", "test@test.com")
+	run("config", "user.name", "test")
+	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "hello.txt")
+	run("commit", "-m", "initial")
+	return dir
+}
+
+func TestCreateAndClose(t *testing.T) {
+	repo := setupGitRepo(t)
+
+	wt, err := Create(repo)
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	// Worktree dir should exist and contain the file
+	if _, err := os.Stat(filepath.Join(wt.Dir, "hello.txt")); err != nil {
+		t.Fatalf("expected hello.txt in worktree: %v", err)
+	}
+
+	wtDir := wt.Dir
+	wt.Close()
+
+	// After Close, the directory should be removed
+	if _, err := os.Stat(wtDir); !os.IsNotExist(err) {
+		t.Fatalf("worktree dir should be removed after Close, got: %v", err)
+	}
+}
+
+func TestCapturePatchNoChanges(t *testing.T) {
+	repo := setupGitRepo(t)
+
+	wt, err := Create(repo)
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	defer wt.Close()
+
+	patch, err := CapturePatch(wt.Dir)
+	if err != nil {
+		t.Fatalf("CapturePatch failed: %v", err)
+	}
+	if patch != "" {
+		t.Fatalf("expected empty patch for unchanged worktree, got %d bytes", len(patch))
+	}
+}
+
+func TestCapturePatchWithChanges(t *testing.T) {
+	repo := setupGitRepo(t)
+
+	wt, err := Create(repo)
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	defer wt.Close()
+
+	// Modify a file and add a new one
+	if err := os.WriteFile(filepath.Join(wt.Dir, "hello.txt"), []byte("modified"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt.Dir, "new.txt"), []byte("new file"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	patch, err := CapturePatch(wt.Dir)
+	if err != nil {
+		t.Fatalf("CapturePatch failed: %v", err)
+	}
+	if patch == "" {
+		t.Fatal("expected non-empty patch")
+	}
+	if !strings.Contains(patch, "hello.txt") {
+		t.Error("patch should reference hello.txt")
+	}
+	if !strings.Contains(patch, "new.txt") {
+		t.Error("patch should reference new.txt")
+	}
+}
+
+func TestApplyPatchEmpty(t *testing.T) {
+	// Empty patch should be a no-op
+	if err := ApplyPatch("/nonexistent", ""); err != nil {
+		t.Fatalf("ApplyPatch with empty patch should succeed: %v", err)
+	}
+}
+
+func TestApplyPatchRoundTrip(t *testing.T) {
+	repo := setupGitRepo(t)
+
+	wt, err := Create(repo)
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	// Make changes in worktree
+	if err := os.WriteFile(filepath.Join(wt.Dir, "hello.txt"), []byte("changed"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt.Dir, "added.txt"), []byte("added"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	patch, err := CapturePatch(wt.Dir)
+	if err != nil {
+		t.Fatalf("CapturePatch failed: %v", err)
+	}
+	wt.Close()
+
+	// Apply the patch back to the original repo
+	if err := ApplyPatch(repo, patch); err != nil {
+		t.Fatalf("ApplyPatch failed: %v", err)
+	}
+
+	// Verify the changes were applied
+	content, err := os.ReadFile(filepath.Join(repo, "hello.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "changed" {
+		t.Errorf("expected 'changed', got %q", content)
+	}
+	content, err = os.ReadFile(filepath.Join(repo, "added.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "added" {
+		t.Errorf("expected 'added', got %q", content)
+	}
+}
+
+func TestCheckPatchClean(t *testing.T) {
+	repo := setupGitRepo(t)
+
+	wt, err := Create(repo)
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wt.Dir, "hello.txt"), []byte("changed"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	patch, err := CapturePatch(wt.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt.Close()
+
+	// Check should pass on unmodified repo
+	if err := CheckPatch(repo, patch); err != nil {
+		t.Fatalf("CheckPatch should succeed on clean repo: %v", err)
+	}
+}
+
+func TestCheckPatchEmpty(t *testing.T) {
+	if err := CheckPatch("/nonexistent", ""); err != nil {
+		t.Fatalf("CheckPatch with empty patch should succeed: %v", err)
+	}
+}
+
+func TestCheckPatchConflict(t *testing.T) {
+	repo := setupGitRepo(t)
+
+	// Create a patch that modifies hello.txt
+	wt, err := Create(repo)
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wt.Dir, "hello.txt"), []byte("from-worktree"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	patch, err := CapturePatch(wt.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt.Close()
+
+	// Now modify hello.txt in the original repo to create a conflict
+	if err := os.WriteFile(filepath.Join(repo, "hello.txt"), []byte("conflicting-change"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// CheckPatch should fail
+	if err := CheckPatch(repo, patch); err == nil {
+		t.Fatal("CheckPatch should fail when patch conflicts with working tree")
+	}
+}
+
+func TestApplyPatchConflictFails(t *testing.T) {
+	repo := setupGitRepo(t)
+
+	wt, err := Create(repo)
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wt.Dir, "hello.txt"), []byte("from-worktree"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	patch, err := CapturePatch(wt.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt.Close()
+
+	// Create a conflict
+	if err := os.WriteFile(filepath.Join(repo, "hello.txt"), []byte("different"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// ApplyPatch should fail
+	if err := ApplyPatch(repo, patch); err == nil {
+		t.Fatal("ApplyPatch should fail when patch conflicts")
+	}
+}
 
 func TestSubmoduleRequiresFileProtocol(t *testing.T) {
 	tpl := `[submodule "test"]
