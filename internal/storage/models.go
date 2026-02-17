@@ -40,6 +40,7 @@ const (
 	JobTypeDirty   = "dirty"   // Uncommitted changes review
 	JobTypeTask    = "task"    // Run/analyze/design/custom prompt
 	JobTypeCompact = "compact" // Consolidated review verification
+	JobTypeFix     = "fix"     // Background fix using worktree
 )
 
 type ReviewJob struct {
@@ -65,6 +66,8 @@ type ReviewJob struct {
 	ReviewType   string     `json:"review_type,omitempty"`   // Review type (e.g., "security") - changes system prompt
 	PatchID      string     `json:"patch_id,omitempty"`      // Stable patch-id for rebase tracking
 	OutputPrefix string     `json:"output_prefix,omitempty"` // Prefix to prepend to review output
+	ParentJobID  *int64     `json:"parent_job_id,omitempty"` // Job being fixed (for fix jobs)
+	Patch        *string    `json:"patch,omitempty"`         // Generated diff patch (for completed fix jobs)
 	// Sync fields
 	UUID            string     `json:"uuid,omitempty"`              // Globally unique identifier for sync
 	SourceMachineID string     `json:"source_machine_id,omitempty"` // Machine that created this job
@@ -118,7 +121,12 @@ func (j ReviewJob) IsTaskJob() bool {
 // (task or compact). These job types have prompts built by the CLI at
 // enqueue time, not constructed by the worker from git data.
 func (j ReviewJob) IsPromptJob() bool {
-	return j.JobType == JobTypeTask || j.JobType == JobTypeCompact
+	return j.JobType == JobTypeTask || j.JobType == JobTypeCompact || j.JobType == JobTypeFix
+}
+
+// IsFixJob returns true if this is a background fix job.
+func (j ReviewJob) IsFixJob() bool {
+	return j.JobType == JobTypeFix
 }
 
 // JobWithReview pairs a job with its review for batch operations

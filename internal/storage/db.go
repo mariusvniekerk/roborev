@@ -602,6 +602,30 @@ func (db *DB) migrate() error {
 		return fmt.Errorf("create idx_reviews_addressed: %w", err)
 	}
 
+	// Migration: add parent_job_id column to review_jobs if missing
+	err = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('review_jobs') WHERE name = 'parent_job_id'`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("check parent_job_id column: %w", err)
+	}
+	if count == 0 {
+		_, err = db.Exec(`ALTER TABLE review_jobs ADD COLUMN parent_job_id INTEGER`)
+		if err != nil {
+			return fmt.Errorf("add parent_job_id column: %w", err)
+		}
+	}
+
+	// Migration: add patch column to review_jobs if missing
+	err = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('review_jobs') WHERE name = 'patch'`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("check patch column: %w", err)
+	}
+	if count == 0 {
+		_, err = db.Exec(`ALTER TABLE review_jobs ADD COLUMN patch TEXT`)
+		if err != nil {
+			return fmt.Errorf("add patch column: %w", err)
+		}
+	}
+
 	// Run sync-related migrations
 	if err := db.migrateSyncColumns(); err != nil {
 		return err
