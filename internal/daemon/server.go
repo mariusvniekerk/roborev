@@ -89,6 +89,8 @@ func NewServer(db *storage.DB, cfg *config.Config, configPath string) *Server {
 	mux.HandleFunc("/api/remap", s.handleRemap)
 	mux.HandleFunc("/api/sync/now", s.handleSyncNow)
 	mux.HandleFunc("/api/sync/status", s.handleSyncStatus)
+	mux.HandleFunc("/api/job/fix", s.handleFixJob)
+	mux.HandleFunc("/api/job/patch", s.handleGetPatch)
 
 	s.httpServer = &http.Server{
 		Addr:    cfg.ServerAddr,
@@ -1622,6 +1624,132 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, status)
+}
+
+// handleFixJob creates a background fix job for a review.
+// It fetches the parent review, builds a fix prompt, and enqueues a new
+// fix job that will run in an isolated worktree.
+func (s *Server) handleFixJob(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req struct {
+		ParentJobID int64  `json:"parent_job_id"`
+		Prompt      string `json:"prompt,omitempty"` // Optional custom prompt override
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.ParentJobID == 0 {
+		writeError(w, http.StatusBadRequest, "parent_job_id is required")
+		return
+	}
+
+	// Fetch the parent job
+	parentJob, err := s.db.GetJobByID(req.ParentJobID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "parent job not found")
+		return
+	}
+
+	// Build the fix prompt
+	fixPrompt := req.Prompt
+	if fixPrompt == "" {
+		// Fetch the review output for the parent job
+		review, err := s.db.GetReviewByJobID(req.ParentJobID)
+		if err != nil || review == nil {
+			writeError(w, http.StatusBadRequest, "parent job has no review to fix")
+			return
+		}
+		fixPrompt = buildFixPrompt(review.Output)
+	}
+
+	// Resolve agent for fix workflow
+	cfg := s.configWatcher.Config()
+	reasoning := "standard"
+	agentName := config.ResolveAgentForWorkflow("", parentJob.RepoPath, cfg, "fix", reasoning)
+	if resolved, err := agent.GetAvailable(agentName); err != nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("no agent available: %v", err))
+		return
+	} else {
+		agentName = resolved.Name()
+	}
+	model := config.ResolveModelForWorkflow("", parentJob.RepoPath, cfg, "fix", reasoning)
+
+	// Enqueue the fix job
+	job, err := s.db.EnqueueJob(storage.EnqueueOpts{
+		RepoID:      parentJob.RepoID,
+		GitRef:      parentJob.GitRef,
+		Branch:      parentJob.Branch,
+		Agent:       agentName,
+		Model:       model,
+		Reasoning:   reasoning,
+		Prompt:      fixPrompt,
+		Agentic:     true,
+		Label:       fmt.Sprintf("fix #%d", req.ParentJobID),
+		JobType:     storage.JobTypeFix,
+		ParentJobID: req.ParentJobID,
+	})
+	if err != nil {
+		s.writeInternalError(w, fmt.Sprintf("enqueue fix job: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, job)
+}
+
+// handleGetPatch returns the stored patch for a completed fix job.
+func (s *Server) handleGetPatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	jobIDStr := r.URL.Query().Get("job_id")
+	if jobIDStr == "" {
+		writeError(w, http.StatusBadRequest, "job_id parameter required")
+		return
+	}
+
+	var jobID int64
+	if _, err := fmt.Sscanf(jobIDStr, "%d", &jobID); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid job_id")
+		return
+	}
+
+	job, err := s.db.GetJobByID(jobID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "job not found")
+		return
+	}
+
+	if job.Patch == nil {
+		writeError(w, http.StatusNotFound, "no patch available for this job")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(*job.Patch))
+}
+
+// buildFixPrompt constructs a prompt for fixing review findings.
+func buildFixPrompt(reviewOutput string) string {
+	return "# Fix Request\n\n" +
+		"An analysis was performed and produced the following findings:\n\n" +
+		"## Analysis Findings\n\n" +
+		reviewOutput +
+		"\n\n## Instructions\n\n" +
+		"Please apply the suggested changes from the analysis above. " +
+		"Make the necessary edits to address each finding. " +
+		"Focus on the highest priority items first.\n\n" +
+		"After making changes:\n" +
+		"1. Verify the code still compiles/passes linting\n" +
+		"2. Run any relevant tests to ensure nothing is broken\n" +
+		"3. Create a git commit with a descriptive message summarizing the changes\n"
 }
 
 // formatDuration formats a duration in human-readable form (e.g., "2h 15m")
