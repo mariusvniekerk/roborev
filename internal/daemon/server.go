@@ -1699,7 +1699,7 @@ func (s *Server) handleFixJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, job)
+	writeJSONWithStatus(w, http.StatusCreated, job)
 }
 
 // handleGetPatch returns the stored patch for a completed fix job.
