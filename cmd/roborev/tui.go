@@ -3844,17 +3844,16 @@ func patchFiles(patch string) []string {
 		return nil
 	}
 	seen := map[string]bool{}
-	for _, fd := range fileDiffs {
-		name := fd.NewName
-		if name == "" || name == "/dev/null" {
-			name = fd.OrigName
-		}
-		// Strip the a/ or b/ prefix that go-diff preserves
+	addFile := func(name string) {
 		name = strings.TrimPrefix(name, "a/")
 		name = strings.TrimPrefix(name, "b/")
-		if name != "" && name != "/dev/null" && !seen[name] {
+		if name != "" && name != "/dev/null" {
 			seen[name] = true
 		}
+	}
+	for _, fd := range fileDiffs {
+		addFile(fd.OrigName) // old path (stages deletion for renames)
+		addFile(fd.NewName)  // new path (stages addition for renames)
 	}
 	files := make([]string, 0, len(seen))
 	for f := range seen {
