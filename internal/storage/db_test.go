@@ -1222,6 +1222,84 @@ func TestCancelJob(t *testing.T) {
 	})
 }
 
+func TestMarkJobApplied(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	repo, _ := db.GetOrCreateRepo("/tmp/test-repo")
+	commit, _ := db.GetOrCreateCommit(repo.ID, "applied-test", "A", "S", time.Now())
+
+	t.Run("mark done job as applied", func(t *testing.T) {
+		job, _ := db.EnqueueJob(EnqueueOpts{RepoID: repo.ID, CommitID: commit.ID, GitRef: "applied-test", Agent: "codex"})
+		db.ClaimJob("worker-1")
+		db.CompleteJob(job.ID, "codex", "prompt", "output")
+
+		err := db.MarkJobApplied(job.ID)
+		if err != nil {
+			t.Fatalf("MarkJobApplied failed: %v", err)
+		}
+
+		updated, _ := db.GetJobByID(job.ID)
+		if updated.Status != JobStatusApplied {
+			t.Errorf("Expected status 'applied', got '%s'", updated.Status)
+		}
+	})
+
+	t.Run("mark non-done job fails", func(t *testing.T) {
+		job, _ := db.EnqueueJob(EnqueueOpts{RepoID: repo.ID, CommitID: commit.ID, GitRef: "applied-test-q", Agent: "codex"})
+
+		err := db.MarkJobApplied(job.ID)
+		if err == nil {
+			t.Error("MarkJobApplied should fail for queued jobs")
+		}
+	})
+
+	t.Run("mark applied job again fails", func(t *testing.T) {
+		job, _ := db.EnqueueJob(EnqueueOpts{RepoID: repo.ID, CommitID: commit.ID, GitRef: "applied-test-2", Agent: "codex"})
+		db.ClaimJob("worker-1")
+		db.CompleteJob(job.ID, "codex", "prompt", "output")
+		db.MarkJobApplied(job.ID)
+
+		err := db.MarkJobApplied(job.ID)
+		if err == nil {
+			t.Error("MarkJobApplied should fail for already-applied jobs")
+		}
+	})
+}
+
+func TestMarkJobRebased(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+
+	repo, _ := db.GetOrCreateRepo("/tmp/test-repo")
+	commit, _ := db.GetOrCreateCommit(repo.ID, "rebased-test", "A", "S", time.Now())
+
+	t.Run("mark done job as rebased", func(t *testing.T) {
+		job, _ := db.EnqueueJob(EnqueueOpts{RepoID: repo.ID, CommitID: commit.ID, GitRef: "rebased-test", Agent: "codex"})
+		db.ClaimJob("worker-1")
+		db.CompleteJob(job.ID, "codex", "prompt", "output")
+
+		err := db.MarkJobRebased(job.ID)
+		if err != nil {
+			t.Fatalf("MarkJobRebased failed: %v", err)
+		}
+
+		updated, _ := db.GetJobByID(job.ID)
+		if updated.Status != JobStatusRebased {
+			t.Errorf("Expected status 'rebased', got '%s'", updated.Status)
+		}
+	})
+
+	t.Run("mark non-done job fails", func(t *testing.T) {
+		job, _ := db.EnqueueJob(EnqueueOpts{RepoID: repo.ID, CommitID: commit.ID, GitRef: "rebased-test-q", Agent: "codex"})
+
+		err := db.MarkJobRebased(job.ID)
+		if err == nil {
+			t.Error("MarkJobRebased should fail for queued jobs")
+		}
+	})
+}
+
 func TestMigrationFromOldSchema(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "old.db")
@@ -1352,6 +1430,24 @@ func TestMigrationFromOldSchema(t *testing.T) {
 	}
 	if status != "canceled" {
 		t.Errorf("Expected status 'canceled', got '%s'", status)
+	}
+
+	// Verify 'applied' and 'rebased' statuses work after migration
+	_, err = db.Exec(`UPDATE review_jobs SET status = 'done' WHERE id = ?`, jobID)
+	if err != nil {
+		t.Fatalf("Failed to set done status: %v", err)
+	}
+	_, err = db.Exec(`UPDATE review_jobs SET status = 'applied' WHERE id = ?`, jobID)
+	if err != nil {
+		t.Fatalf("Setting applied status failed after migration: %v", err)
+	}
+	_, err = db.Exec(`UPDATE review_jobs SET status = 'done' WHERE id = ?`, jobID)
+	if err != nil {
+		t.Fatalf("Failed to reset to done: %v", err)
+	}
+	_, err = db.Exec(`UPDATE review_jobs SET status = 'rebased' WHERE id = ?`, jobID)
+	if err != nil {
+		t.Fatalf("Setting rebased status failed after migration: %v", err)
 	}
 
 	// Verify constraint still rejects invalid status

@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS review_jobs (
   agent TEXT NOT NULL DEFAULT 'codex',
   model TEXT,
   reasoning TEXT NOT NULL DEFAULT 'thorough',
-  status TEXT NOT NULL CHECK(status IN ('queued','running','done','failed','canceled')) DEFAULT 'queued',
+  status TEXT NOT NULL CHECK(status IN ('queued','running','done','failed','canceled','applied','rebased')) DEFAULT 'queued',
   enqueued_at TEXT NOT NULL DEFAULT (datetime('now')),
   started_at TEXT,
   finished_at TEXT,
@@ -312,7 +312,7 @@ func (db *DB) migrate() error {
 				agent TEXT NOT NULL DEFAULT 'codex',
 				model TEXT,
 				reasoning TEXT NOT NULL DEFAULT 'thorough',
-				status TEXT NOT NULL CHECK(status IN ('queued','running','done','failed','canceled')) DEFAULT 'queued',
+				status TEXT NOT NULL CHECK(status IN ('queued','running','done','failed','canceled','applied','rebased')) DEFAULT 'queued',
 				enqueued_at TEXT NOT NULL DEFAULT (datetime('now')),
 				started_at TEXT,
 				finished_at TEXT,
@@ -428,6 +428,18 @@ func (db *DB) migrate() error {
 	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_review_jobs_branch ON review_jobs(branch)`)
 	if err != nil {
 		return fmt.Errorf("create branch index: %w", err)
+	}
+
+	// Migration: update CHECK constraint to include 'applied' and 'rebased' statuses
+	// Re-read the table SQL since the previous migration may have rebuilt it
+	err = db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='review_jobs'`).Scan(&tableSql)
+	if err != nil {
+		return fmt.Errorf("check review_jobs schema for applied/rebased: %w", err)
+	}
+	if !strings.Contains(tableSql, "'applied'") {
+		if err := db.migrateJobStatusConstraint(); err != nil {
+			return fmt.Errorf("migrate job status constraint: %w", err)
+		}
 	}
 
 	// Migration: make commit_id nullable in responses table (for job-based responses)
@@ -684,6 +696,110 @@ func (db *DB) hasUniqueIndexOnShaOnly() (bool, error) {
 		}
 	}
 	return false, rows.Err()
+}
+
+// migrateJobStatusConstraint rebuilds the review_jobs table to update the
+// CHECK constraint to include 'applied' and 'rebased' statuses.
+func (db *DB) migrateJobStatusConstraint() error {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("get connection: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return fmt.Errorf("disable foreign keys: %w", err)
+	}
+	defer func() { _, _ = conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`) }()
+
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := tx.Rollback(); err != nil && err != sql.ErrTxDone {
+			return
+		}
+	}()
+
+	// Read existing columns dynamically
+	rows, err := tx.Query(`SELECT name FROM pragma_table_info('review_jobs')`)
+	if err != nil {
+		return fmt.Errorf("read columns: %w", err)
+	}
+	var cols []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return err
+		}
+		cols = append(cols, name)
+	}
+	rows.Close()
+
+	// Read the current CREATE TABLE SQL and replace the old constraint
+	var origSQL string
+	if err := tx.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='review_jobs'`).Scan(&origSQL); err != nil {
+		return err
+	}
+
+	// Replace old constraint with new one including applied and rebased
+	newSQL := strings.Replace(origSQL,
+		"CHECK(status IN ('queued','running','done','failed','canceled'))",
+		"CHECK(status IN ('queued','running','done','failed','canceled','applied','rebased'))",
+		1)
+	// Handle the table name for the temp table
+	newSQL = strings.Replace(newSQL, "CREATE TABLE review_jobs", "CREATE TABLE review_jobs_new", 1)
+
+	if _, err := tx.Exec(newSQL); err != nil {
+		return fmt.Errorf("create new table: %w", err)
+	}
+
+	colList := strings.Join(cols, ", ")
+	if _, err := tx.Exec(fmt.Sprintf(`INSERT INTO review_jobs_new (%s) SELECT %s FROM review_jobs`, colList, colList)); err != nil {
+		return fmt.Errorf("copy data: %w", err)
+	}
+
+	if _, err := tx.Exec(`DROP TABLE review_jobs`); err != nil {
+		return fmt.Errorf("drop old table: %w", err)
+	}
+
+	if _, err := tx.Exec(`ALTER TABLE review_jobs_new RENAME TO review_jobs`); err != nil {
+		return fmt.Errorf("rename table: %w", err)
+	}
+
+	// Recreate indexes
+	for _, idx := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_review_jobs_status ON review_jobs(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_review_jobs_repo ON review_jobs(repo_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_review_jobs_git_ref ON review_jobs(git_ref)`,
+		`CREATE INDEX IF NOT EXISTS idx_review_jobs_branch ON review_jobs(branch)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_review_jobs_uuid ON review_jobs(uuid)`,
+	} {
+		if _, err := tx.Exec(idx); err != nil {
+			return fmt.Errorf("recreate index: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+		return fmt.Errorf("re-enable foreign keys: %w", err)
+	}
+
+	checkRows, err := conn.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return fmt.Errorf("foreign key check: %w", err)
+	}
+	defer checkRows.Close()
+	if checkRows.Next() {
+		return fmt.Errorf("foreign key violations after migration")
+	}
+	return checkRows.Err()
 }
 
 // migrateSyncColumns adds columns needed for PostgreSQL sync functionality.

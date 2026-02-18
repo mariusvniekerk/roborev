@@ -659,7 +659,7 @@ func createLegacyCommonTables(t *testing.T, db *sql.DB) {
 			git_ref TEXT NOT NULL,
 			agent TEXT NOT NULL DEFAULT 'codex',
 			reasoning TEXT NOT NULL DEFAULT 'thorough',
-			status TEXT NOT NULL CHECK(status IN ('queued','running','done','failed','canceled')) DEFAULT 'queued',
+			status TEXT NOT NULL CHECK(status IN ('queued','running','done','failed','canceled','applied','rebased')) DEFAULT 'queued',
 			enqueued_at TEXT NOT NULL DEFAULT (datetime('now')),
 			started_at TEXT,
 			finished_at TEXT,
@@ -822,6 +822,7 @@ func TestDuplicateRepoIdentity_MigrationSuccess(t *testing.T) {
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			UNIQUE(repo_id, sha)
 		);
+
 		CREATE INDEX idx_commits_sha ON commits(sha);
 	`)
 	if err != nil {
@@ -892,6 +893,7 @@ func TestUniqueIndexMigration(t *testing.T) {
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			UNIQUE(repo_id, sha)
 		);
+
 		CREATE INDEX idx_commits_sha ON commits(sha);
 	`)
 	if err != nil {
