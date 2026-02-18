@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -13,6 +14,26 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/roborev-dev/roborev/internal/git"
 )
+
+// ConfigParseError is returned when .roborev.toml exists but
+// contains invalid TOML. Callers can check with errors.As.
+type ConfigParseError struct {
+	Ref string
+	Err error
+}
+
+func (e *ConfigParseError) Error() string {
+	return fmt.Sprintf("parse .roborev.toml at %s: %v", e.Ref, e.Err)
+}
+
+func (e *ConfigParseError) Unwrap() error { return e.Err }
+
+// IsConfigParseError reports whether err (or any error in its chain)
+// is a ConfigParseError.
+func IsConfigParseError(err error) bool {
+	var pe *ConfigParseError
+	return errors.As(err, &pe)
+}
 
 // HookConfig defines a hook that runs on review events
 type HookConfig struct {
@@ -453,6 +474,31 @@ func LoadRepoConfig(repoPath string) (*RepoConfig, error) {
 		return nil, err
 	}
 
+	return &cfg, nil
+}
+
+// LoadRepoConfigFromRef loads per-repo config from .roborev.toml at a
+// specific git ref (e.g., a commit SHA or "origin/main"). Returns
+// (nil, nil) if the file doesn't exist at that ref. Returns an error
+// for unexpected git failures (bad repo, corrupted objects, etc.).
+func LoadRepoConfigFromRef(repoPath, ref string) (*RepoConfig, error) {
+	data, err := git.ReadFile(repoPath, ref, ".roborev.toml")
+	if err != nil {
+		errMsg := err.Error()
+		// git show emits these specific patterns when the path is missing:
+		//   "path '...' does not exist in '...'"
+		//   "path '...' exists on disk, but not in '...'"
+		if strings.Contains(errMsg, "does not exist in") ||
+			strings.Contains(errMsg, "exists on disk, but not in") {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read .roborev.toml at %s: %w", ref, err)
+	}
+
+	var cfg RepoConfig
+	if _, err := toml.Decode(string(data), &cfg); err != nil {
+		return nil, &ConfigParseError{Ref: ref, Err: err}
+	}
 	return &cfg, nil
 }
 

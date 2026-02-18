@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -131,10 +133,10 @@ func TestFormatRawBatchComment(t *testing.T) {
 		{JobID: 2, Agent: "gemini", ReviewType: "review", Status: "failed", Error: "timeout"},
 	}
 
-	comment := formatRawBatchComment(reviews)
+	comment := formatRawBatchComment(reviews, "abc123def456")
 
 	assertContainsAll(t, comment, "comment",
-		"## roborev: Combined Review",
+		"## roborev: Combined Review (`abc123de`)",
 		"Synthesis unavailable",
 		"<details>",
 		"Agent: codex | Type: security | Status: done",
@@ -151,10 +153,10 @@ func TestFormatSynthesizedComment(t *testing.T) {
 	}
 
 	output := "All clean. No critical findings."
-	comment := formatSynthesizedComment(output, reviews)
+	comment := formatSynthesizedComment(output, reviews, "abc123def456")
 
 	assertContainsAll(t, comment, "comment",
-		"## roborev: Combined Review",
+		"## roborev: Combined Review (`abc123de`)",
 		"All clean. No critical findings.",
 		"Synthesized from 2 reviews",
 		"codex",
@@ -170,10 +172,10 @@ func TestFormatAllFailedComment(t *testing.T) {
 		{JobID: 2, Agent: "gemini", ReviewType: "review", Status: "failed", Error: "api error"},
 	}
 
-	comment := formatAllFailedComment(reviews)
+	comment := formatAllFailedComment(reviews, "abc123def456")
 
 	assertContainsAll(t, comment, "comment",
-		"## roborev: Review Failed",
+		"## roborev: Review Failed (`abc123de`)",
 		"All review jobs in this batch failed",
 		"**codex** (security): failed",
 		"**gemini** (review): failed",
@@ -307,7 +309,7 @@ func TestFormatRawBatchComment_Truncation(t *testing.T) {
 		{JobID: 1, Agent: "codex", ReviewType: "security", Output: strings.Repeat("x", 20000), Status: "done"},
 	}
 
-	comment := formatRawBatchComment(reviews)
+	comment := formatRawBatchComment(reviews, "abc123def456")
 	if !strings.Contains(comment, "...(truncated)") {
 		t.Error("expected truncation for large output")
 	}
@@ -766,7 +768,7 @@ func TestCIPollerSynthesizeBatchResults_WithTestAgent(t *testing.T) {
 
 	p := &CIPoller{}
 	out, err := p.synthesizeBatchResults(
-		&storage.CIPRBatch{ID: 1},
+		&storage.CIPRBatch{ID: 1, HeadSHA: "deadbeef12345678"},
 		[]storage.BatchReviewResult{
 			{JobID: 1, Agent: "codex", ReviewType: "security", Output: "No issues found.", Status: "done"},
 			{JobID: 2, Agent: "gemini", ReviewType: "review", Output: "Potential bug in x.go:10", Status: "done"},
@@ -776,8 +778,8 @@ func TestCIPollerSynthesizeBatchResults_WithTestAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("synthesizeBatchResults: %v", err)
 	}
-	if !strings.Contains(out, "## roborev: Combined Review") {
-		t.Fatalf("expected combined review header, got: %q", out)
+	if !strings.Contains(out, "## roborev: Combined Review (`deadbeef`)") {
+		t.Fatalf("expected combined review header with SHA, got: %q", out)
 	}
 }
 
@@ -1251,4 +1253,296 @@ func TestResolveMinSeverity(t *testing.T) {
 			t.Errorf("got %q, want high (normalized)", got)
 		}
 	})
+}
+
+// initGitRepoWithOrigin creates a git repo with an initial commit and
+// origin pointing to itself, so origin/main and GetDefaultBranch work.
+func initGitRepoWithOrigin(t *testing.T) (dir string, runGit func(args ...string) string) {
+	t.Helper()
+	dir = t.TempDir()
+	runGit = func(args ...string) string {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=Test",
+			"GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_COMMITTER_NAME=Test",
+			"GIT_COMMITTER_EMAIL=test@test.com",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	runGit("init", "-b", "main")
+	runGit("config", "user.email", "test@test.com")
+	runGit("config", "user.name", "Test")
+	os.WriteFile(filepath.Join(dir, "README.md"), []byte("init"), 0644)
+	runGit("add", "-A")
+	runGit("commit", "-m", "initial")
+	runGit("remote", "add", "origin", dir)
+	runGit("fetch", "origin")
+	runGit("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+	return dir, runGit
+}
+
+func TestLoadCIRepoConfig_LoadsFromDefaultBranch(t *testing.T) {
+	dir, runGit := initGitRepoWithOrigin(t)
+
+	// Commit .roborev.toml on main with CI agents override
+	os.WriteFile(filepath.Join(dir, ".roborev.toml"),
+		[]byte("[ci]\nagents = [\"claude\"]\n"), 0644)
+	runGit("add", ".roborev.toml")
+	runGit("commit", "-m", "add config")
+	runGit("fetch", "origin")
+
+	cfg, err := loadCIRepoConfig(dir)
+	if err != nil {
+		t.Fatalf("loadCIRepoConfig: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected non-nil config")
+	}
+	if len(cfg.CI.Agents) != 1 || cfg.CI.Agents[0] != "claude" {
+		t.Errorf("agents=%v, want [claude]", cfg.CI.Agents)
+	}
+}
+
+func TestLoadCIRepoConfig_FallsBackWhenNoConfigOnDefaultBranch(t *testing.T) {
+	dir, _ := initGitRepoWithOrigin(t)
+
+	// No .roborev.toml on origin/main, but put one in the working tree
+	os.WriteFile(filepath.Join(dir, ".roborev.toml"),
+		[]byte("[ci]\nagents = [\"codex\"]\n"), 0644)
+
+	cfg, err := loadCIRepoConfig(dir)
+	if err != nil {
+		t.Fatalf("loadCIRepoConfig: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected filesystem fallback config")
+	}
+	if len(cfg.CI.Agents) != 1 || cfg.CI.Agents[0] != "codex" {
+		t.Errorf("agents=%v, want [codex] from filesystem fallback", cfg.CI.Agents)
+	}
+}
+
+func TestLoadCIRepoConfig_PropagatesParseError(t *testing.T) {
+	dir, runGit := initGitRepoWithOrigin(t)
+
+	// Commit invalid TOML on main
+	os.WriteFile(filepath.Join(dir, ".roborev.toml"),
+		[]byte("this is not valid toml [[["), 0644)
+	runGit("add", ".roborev.toml")
+	runGit("commit", "-m", "add bad config")
+	runGit("fetch", "origin")
+
+	// Also put valid config in working tree — should NOT be used
+	os.WriteFile(filepath.Join(dir, ".roborev.toml"),
+		[]byte("[ci]\nagents = [\"codex\"]\n"), 0644)
+
+	cfg, err := loadCIRepoConfig(dir)
+	if err == nil {
+		t.Fatalf("expected parse error, got cfg=%+v", cfg)
+	}
+	if !config.IsConfigParseError(err) {
+		t.Errorf("expected ConfigParseError, got: %v", err)
+	}
+}
+
+func TestCIPollerProcessPR_SetsPendingCommitStatus(t *testing.T) {
+	h := newCIPollerHarness(t, "git@github.com:acme/api.git")
+	h.Cfg.CI.ReviewTypes = []string{"security"}
+	h.Cfg.CI.Agents = []string{"codex"}
+	h.Poller = NewCIPoller(h.DB, NewStaticConfig(h.Cfg), nil)
+	h.stubProcessPRGit()
+	h.Poller.mergeBaseFn = func(_, _, _ string) (string, error) { return "base-sha", nil }
+
+	type statusCall struct {
+		repo, sha, state, desc string
+	}
+	var statusCalls []statusCall
+	h.Poller.setCommitStatusFn = func(repo, sha, state, desc string) error {
+		statusCalls = append(statusCalls, statusCall{repo, sha, state, desc})
+		return nil
+	}
+
+	err := h.Poller.processPR(context.Background(), "acme/api", ghPR{
+		Number: 60, HeadRefOid: "status-test-sha", BaseRefName: "main",
+	}, h.Cfg)
+	if err != nil {
+		t.Fatalf("processPR: %v", err)
+	}
+
+	if len(statusCalls) != 1 {
+		t.Fatalf("expected 1 status call, got %d", len(statusCalls))
+	}
+	sc := statusCalls[0]
+	if sc.repo != "acme/api" {
+		t.Errorf("repo=%q, want acme/api", sc.repo)
+	}
+	if sc.sha != "status-test-sha" {
+		t.Errorf("sha=%q, want status-test-sha", sc.sha)
+	}
+	if sc.state != "pending" {
+		t.Errorf("state=%q, want pending", sc.state)
+	}
+}
+
+func TestCIPollerPostBatchResults_SetsSuccessStatus(t *testing.T) {
+	h := newCIPollerHarness(t, "git@github.com:acme/api.git")
+	batch, job := h.seedBatchJob(t, "acme/api", 61, "success-sha", "a..b", "codex", "security")
+	h.markJobDoneWithReview(t, job.ID, "codex", "No issues found.")
+
+	type statusCall struct {
+		repo, sha, state, desc string
+	}
+	var statusCalls []statusCall
+	h.Poller.setCommitStatusFn = func(repo, sha, state, desc string) error {
+		statusCalls = append(statusCalls, statusCall{repo, sha, state, desc})
+		return nil
+	}
+	h.Poller.postPRCommentFn = func(string, int, string) error { return nil }
+
+	h.Poller.handleBatchJobDone(batch, job.ID, true)
+
+	if len(statusCalls) != 1 {
+		t.Fatalf("expected 1 status call, got %d", len(statusCalls))
+	}
+	sc := statusCalls[0]
+	if sc.state != "success" {
+		t.Errorf("state=%q, want success", sc.state)
+	}
+	if sc.sha != "success-sha" {
+		t.Errorf("sha=%q, want success-sha", sc.sha)
+	}
+}
+
+func TestCIPollerPostBatchResults_SetsErrorStatusOnAllFailed(t *testing.T) {
+	h := newCIPollerHarness(t, "git@github.com:acme/api.git")
+	batch, job := h.seedBatchJob(t, "acme/api", 62, "fail-sha", "a..b", "codex", "security")
+	h.markJobFailed(t, job.ID, "timeout")
+
+	type statusCall struct {
+		repo, sha, state, desc string
+	}
+	var statusCalls []statusCall
+	h.Poller.setCommitStatusFn = func(repo, sha, state, desc string) error {
+		statusCalls = append(statusCalls, statusCall{repo, sha, state, desc})
+		return nil
+	}
+	h.Poller.postPRCommentFn = func(string, int, string) error { return nil }
+
+	h.Poller.handleBatchJobDone(batch, job.ID, false)
+
+	if len(statusCalls) != 1 {
+		t.Fatalf("expected 1 status call, got %d", len(statusCalls))
+	}
+	sc := statusCalls[0]
+	if sc.state != "error" {
+		t.Errorf("state=%q, want error", sc.state)
+	}
+	if sc.desc != "All reviews failed" {
+		t.Errorf("desc=%q, want 'All reviews failed'", sc.desc)
+	}
+}
+
+func TestCIPollerPostBatchResults_SetsFailureStatusOnMixedOutcome(t *testing.T) {
+	h := newCIPollerHarness(t, "git@github.com:acme/api.git")
+
+	// Create a batch with 2 jobs
+	batch, _, err := h.DB.CreateCIBatch("acme/api", 64, "mixed-sha", 2)
+	if err != nil {
+		t.Fatalf("CreateCIBatch: %v", err)
+	}
+
+	// Enqueue two jobs and link them to the batch
+	job1, err := h.DB.EnqueueJob(storage.EnqueueOpts{
+		RepoID: h.Repo.ID, GitRef: "a..b", Agent: "codex", ReviewType: "security",
+	})
+	if err != nil {
+		t.Fatalf("EnqueueJob 1: %v", err)
+	}
+	if err := h.DB.RecordBatchJob(batch.ID, job1.ID); err != nil {
+		t.Fatalf("RecordBatchJob 1: %v", err)
+	}
+
+	job2, err := h.DB.EnqueueJob(storage.EnqueueOpts{
+		RepoID: h.Repo.ID, GitRef: "a..b", Agent: "gemini", ReviewType: "review",
+	})
+	if err != nil {
+		t.Fatalf("EnqueueJob 2: %v", err)
+	}
+	if err := h.DB.RecordBatchJob(batch.ID, job2.ID); err != nil {
+		t.Fatalf("RecordBatchJob 2: %v", err)
+	}
+
+	// Complete job1, fail job2
+	h.markJobDoneWithReview(t, job1.ID, "codex", "No issues found.")
+	h.markJobFailed(t, job2.ID, "timeout")
+
+	type statusCall struct {
+		repo, sha, state, desc string
+	}
+	var statusCalls []statusCall
+	h.Poller.setCommitStatusFn = func(repo, sha, state, desc string) error {
+		statusCalls = append(statusCalls, statusCall{repo, sha, state, desc})
+		return nil
+	}
+	h.Poller.postPRCommentFn = func(string, int, string) error { return nil }
+
+	// First call: job1 succeeded — batch not yet complete
+	h.Poller.handleBatchJobDone(batch, job1.ID, true)
+	if len(statusCalls) != 0 {
+		t.Fatalf("expected no status call after first job, got %d", len(statusCalls))
+	}
+
+	// Second call: job2 failed — batch now complete
+	h.Poller.handleBatchJobDone(batch, job2.ID, false)
+	if len(statusCalls) != 1 {
+		t.Fatalf("expected 1 status call after batch complete, got %d", len(statusCalls))
+	}
+
+	sc := statusCalls[0]
+	if sc.state != "failure" {
+		t.Errorf("state=%q, want failure", sc.state)
+	}
+	if sc.sha != "mixed-sha" {
+		t.Errorf("sha=%q, want mixed-sha", sc.sha)
+	}
+	if !strings.Contains(sc.desc, "1/2 jobs failed") {
+		t.Errorf("desc=%q, should mention 1/2 jobs failed", sc.desc)
+	}
+}
+
+func TestCIPollerPostBatchResults_SetsErrorStatusOnCommentPostFailure(t *testing.T) {
+	h := newCIPollerHarness(t, "git@github.com:acme/api.git")
+	batch, job := h.seedBatchJob(t, "acme/api", 63, "post-fail-sha", "a..b", "codex", "security")
+	h.markJobDoneWithReview(t, job.ID, "codex", "Found issues.")
+
+	type statusCall struct {
+		repo, sha, state, desc string
+	}
+	var statusCalls []statusCall
+	h.Poller.setCommitStatusFn = func(repo, sha, state, desc string) error {
+		statusCalls = append(statusCalls, statusCall{repo, sha, state, desc})
+		return nil
+	}
+	h.Poller.postPRCommentFn = func(string, int, string) error {
+		return context.DeadlineExceeded
+	}
+
+	h.Poller.postBatchResults(batch)
+
+	if len(statusCalls) != 1 {
+		t.Fatalf("expected 1 status call, got %d", len(statusCalls))
+	}
+	sc := statusCalls[0]
+	if sc.state != "error" {
+		t.Errorf("state=%q, want error", sc.state)
+	}
+	if sc.desc != "Review failed to post" {
+		t.Errorf("desc=%q, want 'Review failed to post'", sc.desc)
+	}
 }

@@ -1727,3 +1727,97 @@ func TestIsDefaultReviewType(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadRepoConfigFromRef(t *testing.T) {
+	// Create a real git repo with .roborev.toml at a commit
+	dir := t.TempDir()
+	cmds := [][]string{
+		{"git", "init"},
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test"},
+	}
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("git init: %v", err)
+		}
+	}
+
+	// Write .roborev.toml and commit
+	configContent := `review_guidelines = "Use descriptive variable names."` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, ".roborev.toml"), []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	addCmd := exec.Command("git", "add", ".roborev.toml")
+	addCmd.Dir = dir
+	if err := addCmd.Run(); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+	commitCmd := exec.Command("git", "commit", "-m", "add config")
+	commitCmd.Dir = dir
+	if err := commitCmd.Run(); err != nil {
+		t.Fatalf("git commit: %v", err)
+	}
+
+	// Get the commit SHA
+	shaCmd := exec.Command("git", "rev-parse", "HEAD")
+	shaCmd.Dir = dir
+	shaOut, err := shaCmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse: %v", err)
+	}
+	sha := strings.TrimSpace(string(shaOut))
+
+	t.Run("loads config from ref", func(t *testing.T) {
+		cfg, err := LoadRepoConfigFromRef(dir, sha)
+		if err != nil {
+			t.Fatalf("LoadRepoConfigFromRef: %v", err)
+		}
+		if cfg == nil {
+			t.Fatal("expected non-nil config")
+		}
+		if cfg.ReviewGuidelines != "Use descriptive variable names." {
+			t.Errorf("got %q", cfg.ReviewGuidelines)
+		}
+	})
+
+	t.Run("returns nil for nonexistent ref", func(t *testing.T) {
+		cfg, err := LoadRepoConfigFromRef(dir, "0000000000000000000000000000000000000000")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg != nil {
+			t.Error("expected nil config for nonexistent ref")
+		}
+	})
+
+	t.Run("returns nil when file missing from ref", func(t *testing.T) {
+		// Remove .roborev.toml and commit
+		rmCmd := exec.Command("git", "rm", ".roborev.toml")
+		rmCmd.Dir = dir
+		if err := rmCmd.Run(); err != nil {
+			t.Fatalf("git rm: %v", err)
+		}
+		commitCmd2 := exec.Command("git", "commit", "-m", "remove config")
+		commitCmd2.Dir = dir
+		if err := commitCmd2.Run(); err != nil {
+			t.Fatalf("git commit: %v", err)
+		}
+		headCmd := exec.Command("git", "rev-parse", "HEAD")
+		headCmd.Dir = dir
+		headOut, err := headCmd.Output()
+		if err != nil {
+			t.Fatalf("git rev-parse: %v", err)
+		}
+		headSHA := strings.TrimSpace(string(headOut))
+
+		cfg, err := LoadRepoConfigFromRef(dir, headSHA)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg != nil {
+			t.Error("expected nil config when file removed from ref")
+		}
+	})
+}

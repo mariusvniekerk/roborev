@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -38,14 +39,15 @@ type CIPoller struct {
 
 	// Test seams for mocking side effects (gh/git/LLM) in unit tests.
 	// Nil means use the real implementation.
-	listOpenPRsFn    func(context.Context, string) ([]ghPR, error)
-	gitFetchFn       func(context.Context, string) error
-	gitFetchPRHeadFn func(context.Context, string, int) error
-	mergeBaseFn      func(string, string, string) (string, error)
-	postPRCommentFn  func(string, int, string) error
-	synthesizeFn     func(*storage.CIPRBatch, []storage.BatchReviewResult, *config.Config) (string, error)
-	agentResolverFn  func(name string) (string, error) // returns resolved agent name
-	jobCancelFn      func(jobID int64)                 // kills running worker process (optional)
+	listOpenPRsFn     func(context.Context, string) ([]ghPR, error)
+	gitFetchFn        func(context.Context, string) error
+	gitFetchPRHeadFn  func(context.Context, string, int) error
+	mergeBaseFn       func(string, string, string) (string, error)
+	postPRCommentFn   func(string, int, string) error
+	setCommitStatusFn func(ghRepo, sha, state, description string) error
+	synthesizeFn      func(*storage.CIPRBatch, []storage.BatchReviewResult, *config.Config) (string, error)
+	agentResolverFn   func(name string) (string, error) // returns resolved agent name
+	jobCancelFn       func(jobID int64)                 // kills running worker process (optional)
 
 	subID      int // broadcaster subscription ID for event listening
 	stopCh     chan struct{}
@@ -264,7 +266,7 @@ func (p *CIPoller) processPR(ctx context.Context, ghRepo string, pr ghPR, cfg *c
 	agents := cfg.CI.ResolvedAgents()
 	reasoning := "thorough"
 
-	repoCfg, repoCfgErr := config.LoadRepoConfig(repo.RootPath)
+	repoCfg, repoCfgErr := loadCIRepoConfig(repo.RootPath)
 	if repoCfgErr != nil {
 		log.Printf("CI poller: warning: failed to load repo config for %s: %v", ghRepo, repoCfgErr)
 	}
@@ -458,6 +460,10 @@ func (p *CIPoller) processPR(ctx context.Context, ghRepo string, pr ghPR, cfg *c
 	}
 	log.Printf("CI poller: created batch %d for %s#%d (HEAD=%s, %d jobs)",
 		batch.ID, ghRepo, pr.Number, headShort, totalJobs)
+
+	if err := p.callSetCommitStatus(ghRepo, pr.HeadRefOid, "pending", "Review in progress"); err != nil {
+		log.Printf("CI poller: failed to set pending status for %s@%s: %v", ghRepo, headShort, err)
+	}
 
 	return nil
 }
@@ -822,14 +828,14 @@ func (p *CIPoller) postBatchResults(batch *storage.CIPRBatch) {
 		comment = formatPRComment(review, verdict)
 	} else if successCount == 0 {
 		// All jobs failed — post raw error comment
-		comment = formatAllFailedComment(reviews)
+		comment = formatAllFailedComment(reviews, batch.HeadSHA)
 	} else {
 		// Multiple jobs — try synthesis
 		cfg := p.cfgGetter.Config()
 		synthesized, err := p.callSynthesize(batch, reviews, cfg)
 		if err != nil {
 			log.Printf("CI poller: synthesis failed for batch %d: %v (falling back to raw)", batch.ID, err)
-			comment = formatRawBatchComment(reviews)
+			comment = formatRawBatchComment(reviews, batch.HeadSHA)
 		} else {
 			comment = synthesized
 		}
@@ -838,9 +844,33 @@ func (p *CIPoller) postBatchResults(batch *storage.CIPRBatch) {
 	if err := p.callPostPRComment(batch.GithubRepo, batch.PRNumber, comment); err != nil {
 		log.Printf("CI poller: error posting batch comment for %s#%d: %v",
 			batch.GithubRepo, batch.PRNumber, err)
+		if err := p.callSetCommitStatus(batch.GithubRepo, batch.HeadSHA, "error", "Review failed to post"); err != nil {
+			log.Printf("CI poller: failed to set error status for %s@%s: %v", batch.GithubRepo, batch.HeadSHA, err)
+		}
 		// Release claim so reconciler can retry
 		p.unclaimBatch(batch.ID)
 		return
+	}
+
+	// Set commit status based on job outcomes:
+	//   all succeeded  → success
+	//   mixed          → failure (some reviews did not complete)
+	//   all failed     → error
+	statusState := "success"
+	statusDesc := "Review complete"
+	switch {
+	case batch.CompletedJobs == 0:
+		statusState = "error"
+		statusDesc = "All reviews failed"
+	case batch.FailedJobs > 0:
+		statusState = "failure"
+		statusDesc = fmt.Sprintf(
+			"Review complete (%d/%d jobs failed)",
+			batch.FailedJobs, batch.TotalJobs,
+		)
+	}
+	if err := p.callSetCommitStatus(batch.GithubRepo, batch.HeadSHA, statusState, statusDesc); err != nil {
+		log.Printf("CI poller: failed to set %s status for %s@%s: %v", statusState, batch.GithubRepo, batch.HeadSHA, err)
 	}
 
 	// Clear claimed_at to mark as successfully posted. This prevents
@@ -874,15 +904,41 @@ func (p *CIPoller) resolveRepoForBatch(batch *storage.CIPRBatch) *storage.Repo {
 	return repo
 }
 
+// loadCIRepoConfig loads .roborev.toml from the repo's default branch
+// (e.g., origin/main) rather than the working tree. This ensures the CI
+// poller uses current settings even when the local checkout is stale.
+// Falls back to the filesystem only if the default branch has no config
+// file. Parse errors and other failures are returned, not masked.
+func loadCIRepoConfig(repoPath string) (*config.RepoConfig, error) {
+	defaultBranch, err := gitpkg.GetDefaultBranch(repoPath)
+	if err != nil {
+		// Can't determine default branch (no origin, bare repo, etc.)
+		// — fall back to filesystem.
+		return config.LoadRepoConfig(repoPath)
+	}
+
+	cfg, err := config.LoadRepoConfigFromRef(repoPath, defaultBranch)
+	if err != nil {
+		// Config exists but is invalid — surface the error, don't
+		// silently fall back to a stale working-tree copy.
+		return nil, err
+	}
+	if cfg != nil {
+		return cfg, nil
+	}
+	// No .roborev.toml on the default branch — fall back to filesystem.
+	return config.LoadRepoConfig(repoPath)
+}
+
 // resolveMinSeverity determines the effective min_severity for synthesis.
 // Priority: per-repo .roborev.toml [ci] min_severity > global [ci] min_severity > "" (no filter).
 // Invalid values are logged and skipped.
 func resolveMinSeverity(globalMinSeverity, repoPath, ghRepo string) string {
 	minSeverity := globalMinSeverity
 
-	// Try per-repo override
+	// Try per-repo override (from default branch, not working tree)
 	if repoPath != "" {
-		repoCfg, err := config.LoadRepoConfig(repoPath)
+		repoCfg, err := loadCIRepoConfig(repoPath)
 		if err != nil {
 			log.Printf("CI poller: failed to load repo config from %s: %v (using global min_severity)", repoPath, err)
 		} else if repoCfg != nil {
@@ -935,7 +991,7 @@ func (p *CIPoller) synthesizeBatchResults(batch *storage.CIPRBatch, reviews []st
 		return "", fmt.Errorf("synthesis review: %w", err)
 	}
 
-	return formatSynthesizedComment(output, reviews), nil
+	return formatSynthesizedComment(output, reviews, batch.HeadSHA), nil
 }
 
 func (p *CIPoller) callListOpenPRs(ctx context.Context, ghRepo string) ([]ghPR, error) {
@@ -978,6 +1034,57 @@ func (p *CIPoller) callSynthesize(batch *storage.CIPRBatch, reviews []storage.Ba
 		return p.synthesizeFn(batch, reviews, cfg)
 	}
 	return p.synthesizeBatchResults(batch, reviews, cfg)
+}
+
+func (p *CIPoller) callSetCommitStatus(ghRepo, sha, state, description string) error {
+	if p.setCommitStatusFn != nil {
+		return p.setCommitStatusFn(ghRepo, sha, state, description)
+	}
+	return p.setCommitStatus(ghRepo, sha, state, description)
+}
+
+// setCommitStatus posts a commit status check via the GitHub API.
+// Uses the GitHub App token provider for authentication. If no token
+// provider is configured, the call is silently skipped.
+func (p *CIPoller) setCommitStatus(ghRepo, sha, state, description string) error {
+	if p.tokenProvider == nil {
+		return nil
+	}
+
+	owner, _, _ := strings.Cut(ghRepo, "/")
+	cfg := p.cfgGetter.Config()
+	installationID := cfg.CI.InstallationIDForOwner(owner)
+	if installationID == 0 {
+		return nil
+	}
+
+	path := fmt.Sprintf("/repos/%s/statuses/%s", ghRepo, sha)
+	payload := fmt.Sprintf(
+		`{"state":%q,"description":%q,"context":"roborev"}`,
+		state, description,
+	)
+	body := strings.NewReader(payload)
+
+	resp, err := p.tokenProvider.APIRequest("POST", path, body, installationID)
+	if err != nil {
+		return fmt.Errorf("set commit status: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return fmt.Errorf(
+				"set commit status: HTTP %d (body unreadable: %v)",
+				resp.StatusCode, readErr,
+			)
+		}
+		return fmt.Errorf(
+			"set commit status: HTTP %d: %s",
+			resp.StatusCode, string(respBody),
+		)
+	}
+	return nil
 }
 
 // severityAbove maps a minimum severity to the instruction describing which levels to include.
@@ -1033,9 +1140,9 @@ Rules:
 }
 
 // formatSynthesizedComment wraps synthesized output with header and metadata.
-func formatSynthesizedComment(output string, reviews []storage.BatchReviewResult) string {
+func formatSynthesizedComment(output string, reviews []storage.BatchReviewResult, headSHA string) string {
 	var b strings.Builder
-	b.WriteString("## roborev: Combined Review\n\n")
+	fmt.Fprintf(&b, "## roborev: Combined Review (`%s`)\n\n", shortSHA(headSHA))
 	b.WriteString(output)
 
 	// Build metadata
@@ -1065,9 +1172,9 @@ func formatSynthesizedComment(output string, reviews []storage.BatchReviewResult
 
 // formatRawBatchComment formats all review outputs as separate details blocks.
 // Used as a fallback when synthesis fails.
-func formatRawBatchComment(reviews []storage.BatchReviewResult) string {
+func formatRawBatchComment(reviews []storage.BatchReviewResult, headSHA string) string {
 	var b strings.Builder
-	b.WriteString("## roborev: Combined Review\n\n")
+	fmt.Fprintf(&b, "## roborev: Combined Review (`%s`)\n\n", shortSHA(headSHA))
 	b.WriteString("> Synthesis unavailable. Showing raw review outputs.\n\n")
 
 	for _, r := range reviews {
@@ -1092,9 +1199,9 @@ func formatRawBatchComment(reviews []storage.BatchReviewResult) string {
 }
 
 // formatAllFailedComment formats a comment when every job in a batch failed.
-func formatAllFailedComment(reviews []storage.BatchReviewResult) string {
+func formatAllFailedComment(reviews []storage.BatchReviewResult, headSHA string) string {
 	var b strings.Builder
-	b.WriteString("## roborev: Review Failed\n\n")
+	fmt.Fprintf(&b, "## roborev: Review Failed (`%s`)\n\n", shortSHA(headSHA))
 	b.WriteString("All review jobs in this batch failed.\n\n")
 
 	for _, r := range reviews {
@@ -1104,6 +1211,14 @@ func formatAllFailedComment(reviews []storage.BatchReviewResult) string {
 	b.WriteString("\nCheck daemon logs for error details.")
 
 	return b.String()
+}
+
+// shortSHA returns the first 8 characters of a SHA, or the full string if shorter.
+func shortSHA(sha string) string {
+	if len(sha) > 8 {
+		return sha[:8]
+	}
+	return sha
 }
 
 // formatPRComment formats a review result as a GitHub PR comment in markdown.

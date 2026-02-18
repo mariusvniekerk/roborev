@@ -2,6 +2,7 @@ package prompt
 
 import (
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/roborev-dev/roborev/internal/config"
@@ -214,10 +215,8 @@ func (b *Builder) buildSinglePrompt(repoPath, sha string, repoID int64, contextC
 	sb.WriteString(GetSystemPrompt(agentName, promptType))
 	sb.WriteString("\n")
 
-	// Add project-specific guidelines if configured
-	if repoCfg, err := config.LoadRepoConfig(repoPath); err == nil && repoCfg != nil {
-		b.writeProjectGuidelines(&sb, repoCfg.ReviewGuidelines)
-	}
+	// Add project-specific guidelines from default branch
+	b.writeProjectGuidelines(&sb, loadGuidelines(repoPath))
 
 	// Get previous reviews if requested
 	if contextCount > 0 && b.db != nil {
@@ -298,10 +297,8 @@ func (b *Builder) buildRangePrompt(repoPath, rangeRef string, repoID int64, cont
 	sb.WriteString(GetSystemPrompt(agentName, promptType))
 	sb.WriteString("\n")
 
-	// Add project-specific guidelines if configured
-	if repoCfg, err := config.LoadRepoConfig(repoPath); err == nil && repoCfg != nil {
-		b.writeProjectGuidelines(&sb, repoCfg.ReviewGuidelines)
-	}
+	// Add project-specific guidelines from default branch
+	b.writeProjectGuidelines(&sb, loadGuidelines(repoPath))
 
 	// Get previous reviews from before the range start
 	if contextCount > 0 && b.db != nil {
@@ -412,6 +409,38 @@ func (b *Builder) writeProjectGuidelines(sb *strings.Builder, guidelines string)
 	sb.WriteString("\n")
 	sb.WriteString(strings.TrimSpace(guidelines))
 	sb.WriteString("\n\n")
+}
+
+// loadMergedGuidelines loads review guidelines from the repo's default
+// branch (detected via git) and the given ref, then merges them so
+// branch guidelines can add lines but cannot remove base lines.
+// Falls back to filesystem LoadRepoConfig only when no .roborev.toml
+// exists on the default branch (not when it exists with empty guidelines).
+func loadGuidelines(repoPath string) string {
+	// Load review guidelines from the default branch (origin/main,
+	// origin/master, etc.). Branch-specific guidelines are intentionally
+	// ignored to prevent prompt injection from untrusted PR authors.
+	if defaultBranch, err := git.GetDefaultBranch(repoPath); err == nil {
+		cfg, err := config.LoadRepoConfigFromRef(repoPath, defaultBranch)
+		if err != nil {
+			if config.IsConfigParseError(err) {
+				log.Printf("prompt: invalid .roborev.toml on %s: %v",
+					defaultBranch, err)
+				return ""
+			}
+			log.Printf("prompt: failed to read .roborev.toml from %s: %v"+
+				" (will try filesystem)", defaultBranch, err)
+		} else if cfg != nil {
+			return cfg.ReviewGuidelines
+		}
+	}
+
+	// Fall back to filesystem config when default branch has no config
+	// (e.g., no remote, or .roborev.toml not yet committed).
+	if fsCfg, err := config.LoadRepoConfig(repoPath); err == nil && fsCfg != nil {
+		return fsCfg.ReviewGuidelines
+	}
+	return ""
 }
 
 // writePreviousAttemptsForGitRef writes previous review attempts for the same git ref (commit or range)
