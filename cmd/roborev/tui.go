@@ -1327,10 +1327,12 @@ func (m tuiModel) toggleAddressedForJob(jobID int64, currentState *bool) tea.Cmd
 }
 
 // markParentAddressed marks the parent review job as addressed after a fix is applied.
-// Runs as a fire-and-forget command; errors are silently ignored since the fix already succeeded.
 func (m tuiModel) markParentAddressed(parentJobID int64) tea.Cmd {
 	return func() tea.Msg {
-		_ = m.postAddressed(parentJobID, true, "")
+		err := m.postAddressed(parentJobID, true, "parent review not found")
+		if err != nil {
+			return tuiErrMsg(err)
+		}
 		return nil
 	}
 }
@@ -2116,7 +2118,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.flashExpiresAt = time.Now().Add(5 * time.Second)
 			m.flashView = tuiViewTasks
 			// Mark stale job as rebased and trigger rebase
-			_ = m.postJSON("/api/job/rebased", map[string]any{"job_id": msg.jobID}, nil)
+			if err := m.postJSON("/api/job/rebased", map[string]any{"job_id": msg.jobID}, nil); err != nil {
+				m.flashMessage = fmt.Sprintf("Rebase triggered but failed to mark job #%d as rebased: %v", msg.jobID, err)
+			}
 			return m, tea.Batch(m.triggerRebase(msg.jobID), m.fetchFixJobs())
 		} else if msg.success && msg.err != nil {
 			// Patch applied but commit failed
@@ -3805,7 +3809,10 @@ func (m tuiModel) applyFixPatch(jobID int64) tea.Cmd {
 		}
 
 		// Mark the fix job as applied on the server
-		_ = m.postJSON("/api/job/applied", map[string]any{"job_id": jobID}, nil)
+		if err := m.postJSON("/api/job/applied", map[string]any{"job_id": jobID}, nil); err != nil {
+			return tuiApplyPatchResultMsg{jobID: jobID, parentJobID: parentJobID, success: true,
+				err: fmt.Errorf("patch applied and committed but failed to mark applied: %w", err)}
+		}
 
 		return tuiApplyPatchResultMsg{jobID: jobID, parentJobID: parentJobID, success: true}
 	}
