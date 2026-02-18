@@ -3799,7 +3799,7 @@ func (m tuiModel) applyFixPatch(jobID int64) tea.Cmd {
 			}
 			commitMsg = fmt.Sprintf("fix: apply roborev fix for %s (job #%d)", ref, jobID)
 		}
-		if err := commitPatch(jobDetail.RepoPath, commitMsg); err != nil {
+		if err := commitPatch(jobDetail.RepoPath, patch, commitMsg); err != nil {
 			return tuiApplyPatchResultMsg{jobID: jobID, parentJobID: parentJobID, success: true,
 				err: fmt.Errorf("patch applied but commit failed: %w", err)}
 		}
@@ -3811,9 +3811,14 @@ func (m tuiModel) applyFixPatch(jobID int64) tea.Cmd {
 	}
 }
 
-// commitPatch stages all changes and commits them with the given message.
-func commitPatch(repoPath, message string) error {
-	addCmd := exec.Command("git", "-C", repoPath, "add", "-A")
+// commitPatch stages only the files touched by patch and commits them.
+func commitPatch(repoPath, patch, message string) error {
+	files := patchFiles(patch)
+	if len(files) == 0 {
+		return fmt.Errorf("no files found in patch")
+	}
+	args := append([]string{"-C", repoPath, "add", "--"}, files...)
+	addCmd := exec.Command("git", args...)
 	if out, err := addCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git add: %w: %s", err, out)
 	}
@@ -3822,6 +3827,28 @@ func commitPatch(repoPath, message string) error {
 		return fmt.Errorf("git commit: %w: %s", err, out)
 	}
 	return nil
+}
+
+// patchFiles extracts the list of file paths touched by a unified diff.
+func patchFiles(patch string) []string {
+	seen := map[string]bool{}
+	for _, line := range strings.Split(patch, "\n") {
+		// Match "diff --git a/path b/path" headers
+		if strings.HasPrefix(line, "diff --git ") {
+			parts := strings.SplitN(line, " b/", 2)
+			if len(parts) == 2 {
+				f := parts[1]
+				if f != "" && !seen[f] {
+					seen[f] = true
+				}
+			}
+		}
+	}
+	files := make([]string, 0, len(seen))
+	for f := range seen {
+		files = append(files, f)
+	}
+	return files
 }
 
 // triggerRebase triggers a new fix job that re-applies a stale patch to the current HEAD.
