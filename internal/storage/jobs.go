@@ -790,7 +790,7 @@ func (db *DB) EnqueueJob(opts EnqueueOpts) (*ReviewJob, error) {
 		INSERT INTO review_jobs (repo_id, commit_id, git_ref, branch, agent, model, reasoning,
 			status, job_type, review_type, patch_id, diff_content, prompt, agentic, output_prefix,
 			parent_job_id, uuid, source_machine_id, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		opts.RepoID, commitIDParam, gitRef, nullString(opts.Branch),
 		opts.Agent, nullString(opts.Model), reasoning,
 		jobType, opts.ReviewType, nullString(opts.PatchID),
