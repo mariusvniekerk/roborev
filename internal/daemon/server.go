@@ -92,6 +92,7 @@ func NewServer(db *storage.DB, cfg *config.Config, configPath string) *Server {
 	mux.HandleFunc("/api/job/fix", s.handleFixJob)
 	mux.HandleFunc("/api/job/patch", s.handleGetPatch)
 	mux.HandleFunc("/api/job/applied", s.handleMarkJobApplied)
+	mux.HandleFunc("/api/job/rebased", s.handleMarkJobRebased)
 
 	s.httpServer = &http.Server{
 		Addr:    cfg.ServerAddr,
@@ -1739,7 +1740,7 @@ func (s *Server) handleGetPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if (job.Status != storage.JobStatusDone && job.Status != storage.JobStatusApplied) || job.Patch == nil {
+	if (job.Status != storage.JobStatusDone && job.Status != storage.JobStatusApplied && job.Status != storage.JobStatusRebased) || job.Patch == nil {
 		writeError(w, http.StatusNotFound, "no patch available for this job")
 		return
 	}
@@ -1777,6 +1778,36 @@ func (s *Server) handleMarkJobApplied(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, map[string]string{"status": "applied"})
+}
+
+func (s *Server) handleMarkJobRebased(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req struct {
+		JobID int64 `json:"job_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.JobID == 0 {
+		writeError(w, http.StatusBadRequest, "job_id is required")
+		return
+	}
+
+	if err := s.db.MarkJobRebased(req.JobID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "job not found or not in done state")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("mark rebased: %v", err))
+		return
+	}
+
+	writeJSON(w, map[string]string{"status": "rebased"})
 }
 
 // buildFixPrompt constructs a prompt for fixing review findings.

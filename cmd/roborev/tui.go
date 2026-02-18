@@ -2115,7 +2115,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.flashMessage = fmt.Sprintf("Patch for job #%d doesn't apply cleanly - triggering rebase", msg.jobID)
 			m.flashExpiresAt = time.Now().Add(5 * time.Second)
 			m.flashView = tuiViewTasks
-			return m, m.triggerRebase(msg.jobID)
+			// Mark stale job as rebased and trigger rebase
+			_ = m.postJSON("/api/job/rebased", map[string]any{"job_id": msg.jobID}, nil)
+			return m, tea.Batch(m.triggerRebase(msg.jobID), m.fetchFixJobs())
 		} else if msg.success && msg.err != nil {
 			// Patch applied but commit failed
 			m.flashMessage = fmt.Sprintf("Job #%d: %v", msg.jobID, msg.err)
@@ -3498,6 +3500,9 @@ func (m tuiModel) renderTasksView() string {
 		case storage.JobStatusApplied:
 			statusLabel = "applied"
 			statusStyle = tuiDoneStyle
+		case storage.JobStatusRebased:
+			statusLabel = "rebased"
+			statusStyle = tuiCanceledStyle
 		}
 
 		parentRef := ""

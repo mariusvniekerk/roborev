@@ -871,6 +871,21 @@ func (m tuiModel) handleRerunKey() (tea.Model, tea.Cmd) {
 }
 
 func (m tuiModel) handleTailKey2() (tea.Model, tea.Cmd) {
+	// From prompt view: allow tailing the running job being viewed
+	if m.currentView == tuiViewPrompt && m.currentReview != nil && m.currentReview.Job != nil {
+		job := m.currentReview.Job
+		if job.Status == storage.JobStatusRunning {
+			m.tailJobID = job.ID
+			m.tailLines = nil
+			m.tailScroll = 0
+			m.tailStreaming = true
+			m.tailFollow = true
+			m.tailFromView = m.reviewFromView
+			m.currentView = tuiViewTail
+			return m, tea.Batch(tea.ClearScreen, m.fetchTailOutput(job.ID))
+		}
+	}
+
 	if m.currentView != tuiViewQueue || len(m.jobs) == 0 || m.selectedIdx < 0 || m.selectedIdx >= len(m.jobs) {
 		return m, nil
 	}
@@ -1466,15 +1481,37 @@ func (m tuiModel) handleTasksKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "enter":
-		// Open review output for completed fix jobs
+		// View task: prompt for running, review for done/applied, error for failed
 		if len(m.fixJobs) > 0 && m.fixSelectedIdx < len(m.fixJobs) {
 			job := m.fixJobs[m.fixSelectedIdx]
-			if job.Status == storage.JobStatusDone {
+			switch job.Status {
+			case storage.JobStatusRunning:
+				if job.Prompt != "" {
+					m.currentReview = &storage.Review{
+						Agent:  job.Agent,
+						Prompt: job.Prompt,
+						Job:    &job,
+					}
+					m.reviewFromView = tuiViewTasks
+					m.currentView = tuiViewPrompt
+					m.promptScroll = 0
+					m.promptFromQueue = false
+					return m, nil
+				}
+				// No prompt yet, go straight to tail
+				m.tailJobID = job.ID
+				m.tailLines = nil
+				m.tailScroll = 0
+				m.tailStreaming = true
+				m.tailFollow = true
+				m.tailFromView = tuiViewTasks
+				m.currentView = tuiViewTail
+				return m, tea.Batch(tea.ClearScreen, m.fetchTailOutput(job.ID))
+			case storage.JobStatusDone, storage.JobStatusApplied, storage.JobStatusRebased:
 				m.selectedJobID = job.ID
 				m.reviewFromView = tuiViewTasks
 				return m, m.fetchReview(job.ID)
-			}
-			if job.Status == storage.JobStatusFailed {
+			case storage.JobStatusFailed:
 				errMsg := job.Error
 				if errMsg == "" {
 					errMsg = "unknown error"
@@ -1499,7 +1536,7 @@ func (m tuiModel) handleTasksKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.tailFromView = tuiViewTasks
 				m.currentView = tuiViewTail
 				return m, tea.Batch(tea.ClearScreen, m.fetchTailOutput(job.ID))
-			case storage.JobStatusDone:
+			case storage.JobStatusDone, storage.JobStatusApplied, storage.JobStatusRebased:
 				m.selectedJobID = job.ID
 				m.reviewFromView = tuiViewTasks
 				return m, m.fetchReview(job.ID)
@@ -1550,7 +1587,7 @@ func (m tuiModel) handleTasksKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// View patch for completed fix jobs
 		if len(m.fixJobs) > 0 && m.fixSelectedIdx < len(m.fixJobs) {
 			job := m.fixJobs[m.fixSelectedIdx]
-			if job.Status == storage.JobStatusDone {
+			if job.Status == storage.JobStatusDone || job.Status == storage.JobStatusApplied || job.Status == storage.JobStatusRebased {
 				return m, m.fetchPatch(job.ID)
 			}
 		}

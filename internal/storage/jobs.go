@@ -1162,6 +1162,28 @@ func (db *DB) MarkJobApplied(jobID int64) error {
 	return nil
 }
 
+// MarkJobRebased transitions a done fix job to the "rebased" terminal state.
+// This indicates the patch was stale and a new rebase job was triggered.
+func (db *DB) MarkJobRebased(jobID int64) error {
+	now := time.Now().Format(time.RFC3339)
+	result, err := db.Exec(`
+		UPDATE review_jobs
+		SET status = 'rebased', updated_at = ?
+		WHERE id = ? AND status = 'done'
+	`, now, jobID)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 // ReenqueueJob resets a completed, failed, or canceled job back to queued status.
 // This allows manual re-running of jobs to get a fresh review.
 // For done jobs, the existing review is deleted to avoid unique constraint violations.
