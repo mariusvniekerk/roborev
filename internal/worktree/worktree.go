@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -99,11 +100,15 @@ func (w *Worktree) CapturePatch() (string, error) {
 		// Create a temporary tree object from the index (staged state)
 		treeCmd := exec.Command("git", "-C", w.Dir, "write-tree")
 		treeOut, err := treeCmd.Output()
-		if err == nil {
+		if err != nil {
+			log.Printf("CapturePatch: write-tree failed, falling back to diff --cached: %v", err)
+		} else {
 			tree := strings.TrimSpace(string(treeOut))
 			diffCmd := exec.Command("git", "-C", w.Dir, "diff-tree", "-p", "--binary", w.baseSHA, tree)
 			diff, err := diffCmd.Output()
-			if err == nil && len(diff) > 0 {
+			if err != nil {
+				log.Printf("CapturePatch: diff-tree failed, falling back to diff --cached: %v", err)
+			} else if len(diff) > 0 {
 				return string(diff), nil
 			}
 		}

@@ -259,14 +259,15 @@ type tuiModel struct {
 	reviewFromView tuiView // View to return to when exiting review (queue or tasks)
 
 	// Fix task state
-	fixJobs        []storage.ReviewJob // Fix jobs for tasks view
-	fixSelectedIdx int                 // Selected index in tasks view
-	fixPromptText  string              // Editable fix prompt text
-	fixPromptJobID int64               // Parent job ID for fix prompt modal
-	fixShowHelp    bool                // Show help overlay in tasks view
-	patchText      string              // Current patch text for patch viewer
-	patchScroll    int                 // Scroll offset in patch viewer
-	patchJobID     int64               // Job ID of the patch being viewed
+	fixJobs           []storage.ReviewJob // Fix jobs for tasks view
+	fixSelectedIdx    int                 // Selected index in tasks view
+	fixPromptText     string              // Editable fix prompt text
+	fixPromptJobID    int64               // Parent job ID for fix prompt modal
+	fixPromptFromView tuiView             // View to return to after fix prompt closes
+	fixShowHelp       bool                // Show help overlay in tasks view
+	patchText         string              // Current patch text for patch viewer
+	patchScroll       int                 // Scroll offset in patch viewer
+	patchJobID        int64               // Job ID of the patch being viewed
 }
 
 // pendingState tracks a pending addressed toggle with sequence number
@@ -3821,7 +3822,10 @@ func (m tuiModel) applyFixPatch(jobID int64) tea.Cmd {
 
 // commitPatch stages only the files touched by patch and commits them.
 func commitPatch(repoPath, patch, message string) error {
-	files := patchFiles(patch)
+	files, err := patchFiles(patch)
+	if err != nil {
+		return err
+	}
 	if len(files) == 0 {
 		return fmt.Errorf("no files found in patch")
 	}
@@ -3838,10 +3842,10 @@ func commitPatch(repoPath, patch, message string) error {
 }
 
 // patchFiles extracts the list of file paths touched by a unified diff.
-func patchFiles(patch string) []string {
+func patchFiles(patch string) ([]string, error) {
 	fileDiffs, err := godiff.ParseMultiFileDiff([]byte(patch))
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("parse patch: %w", err)
 	}
 	seen := map[string]bool{}
 	addFile := func(name string) {
@@ -3859,7 +3863,7 @@ func patchFiles(patch string) []string {
 	for f := range seen {
 		files = append(files, f)
 	}
-	return files
+	return files, nil
 }
 
 // triggerRebase triggers a new fix job that re-applies a stale patch to the current HEAD.

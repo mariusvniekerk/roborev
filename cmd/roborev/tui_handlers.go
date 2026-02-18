@@ -1410,6 +1410,7 @@ func (m tuiModel) handleFixKey() (tea.Model, tea.Cmd) {
 	// Open fix prompt modal
 	m.fixPromptJobID = job.ID
 	m.fixPromptText = "" // Empty means use default prompt from server
+	m.fixPromptFromView = m.currentView
 	m.currentView = tuiViewFixPrompt
 	return m, nil
 }
@@ -1433,7 +1434,7 @@ func (m tuiModel) handleFixPromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		return m, tea.Quit
 	case "esc":
-		m.currentView = tuiViewQueue
+		m.currentView = m.fixPromptFromView
 		m.fixPromptText = ""
 		m.fixPromptJobID = 0
 		return m, nil
@@ -1590,6 +1591,9 @@ func (m tuiModel) handleTasksKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if job.HasViewableOutput() {
 				return m, m.fetchPatch(job.ID)
 			}
+			m.flashMessage = "Patch not yet available"
+			m.flashExpiresAt = time.Now().Add(2 * time.Second)
+			m.flashView = m.currentView
 		}
 		return m, nil
 	case "r":
