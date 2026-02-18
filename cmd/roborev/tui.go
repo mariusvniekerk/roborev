@@ -1754,7 +1754,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.loadingMore || m.loadingJobs {
 			return m, tea.Batch(m.tick(), m.fetchStatus())
 		}
-		return m, tea.Batch(m.tick(), m.fetchJobs(), m.fetchStatus())
+		cmds := []tea.Cmd{m.tick(), m.fetchJobs(), m.fetchStatus()}
+		// Refresh fix jobs when viewing tasks or when fix jobs are in progress
+		if m.currentView == tuiViewTasks || m.hasActiveFixJobs() {
+			cmds = append(cmds, m.fetchFixJobs())
+		}
+		return m, tea.Batch(cmds...)
 
 	case tuiTailTickMsg:
 		if m.currentView == tuiViewTail && m.tailStreaming && m.tailJobID > 0 {
@@ -3488,6 +3493,16 @@ func (m tuiModel) fetchJobByID(jobID int64) (*storage.ReviewJob, error) {
 		}
 	}
 	return nil, fmt.Errorf("job %d not found", jobID)
+}
+
+// hasActiveFixJobs returns true if any fix jobs are queued or running.
+func (m tuiModel) hasActiveFixJobs() bool {
+	for _, j := range m.fixJobs {
+		if j.Status == storage.JobStatusQueued || j.Status == storage.JobStatusRunning {
+			return true
+		}
+	}
+	return false
 }
 
 // fetchFixJobs fetches fix jobs from the daemon.
