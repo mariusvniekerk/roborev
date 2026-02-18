@@ -727,6 +727,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("database error: %v", err))
 			return
 		}
+		job.Patch = nil // Patch is only served via /api/job/patch
 		writeJSON(w, map[string]any{
 			"jobs":     []storage.ReviewJob{*job},
 			"has_more": false,
@@ -1635,10 +1636,11 @@ func (s *Server) handleFixJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
+	r.Body = http.MaxBytesReader(w, r.Body, 50<<20) // 50MB limit
 	var req struct {
 		ParentJobID int64  `json:"parent_job_id"`
-		Prompt      string `json:"prompt,omitempty"` // Optional custom prompt override
+		Prompt      string `json:"prompt,omitempty"`    // Optional custom prompt override
+		StaleJobID  int64  `json:"stale_job_id,omitempty"` // Optional: server looks up patch from this job for rebase
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -1658,6 +1660,15 @@ func (s *Server) handleFixJob(w http.ResponseWriter, r *http.Request) {
 
 	// Build the fix prompt
 	fixPrompt := req.Prompt
+	if fixPrompt == "" && req.StaleJobID > 0 {
+		// Server-side rebase: look up stale patch from DB and build rebase prompt
+		staleJob, err := s.db.GetJobByID(req.StaleJobID)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "stale job not found")
+			return
+		}
+		fixPrompt = buildRebasePrompt(staleJob.Patch)
+	}
 	if fixPrompt == "" {
 		// Fetch the review output for the parent job
 		review, err := s.db.GetReviewByJobID(req.ParentJobID)
@@ -1751,6 +1762,23 @@ func buildFixPrompt(reviewOutput string) string {
 		"1. Verify the code still compiles/passes linting\n" +
 		"2. Run any relevant tests to ensure nothing is broken\n" +
 		"3. Stage the changes with git add but do NOT commit — the changes will be captured as a patch\n"
+}
+
+// buildRebasePrompt constructs a prompt for re-applying a stale patch to current HEAD.
+func buildRebasePrompt(stalePatch *string) string {
+	prompt := "# Rebase Fix Request\n\n" +
+		"A previous fix attempt produced a patch that no longer applies cleanly to the current HEAD.\n" +
+		"Your task is to achieve the same changes but adapted to the current state of the code.\n\n"
+	if stalePatch != nil && *stalePatch != "" {
+		prompt += "## Previous Patch (stale)\n\n`````diff\n" + *stalePatch + "\n`````\n\n"
+	}
+	prompt += "## Instructions\n\n" +
+		"1. Review the intent of the previous patch\n" +
+		"2. Apply equivalent changes to the current codebase\n" +
+		"3. Resolve any conflicts with recent changes\n" +
+		"4. Verify the code compiles and tests pass\n" +
+		"5. Stage the changes with git add but do NOT commit\n"
+	return prompt
 }
 
 // formatDuration formats a duration in human-readable form (e.g., "2h 15m")

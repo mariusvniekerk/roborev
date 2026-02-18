@@ -133,7 +133,19 @@ func ApplyPatch(repoPath, patch string) error {
 	return nil
 }
 
+// PatchConflictError indicates the patch does not apply due to merge conflicts.
+// Other errors (malformed patch, permission errors) are returned as plain errors.
+type PatchConflictError struct {
+	Detail string
+}
+
+func (e *PatchConflictError) Error() string {
+	return "patch conflict: " + e.Detail
+}
+
 // CheckPatch does a dry-run apply to check if a patch applies cleanly.
+// Returns a *PatchConflictError when the patch fails due to conflicts,
+// or a plain error for other failures (malformed patch, etc.).
 func CheckPatch(repoPath, patch string) error {
 	if patch == "" {
 		return nil
@@ -143,7 +155,13 @@ func CheckPatch(repoPath, patch string) error {
 	var stderr bytes.Buffer
 	applyCmd.Stderr = &stderr
 	if err := applyCmd.Run(); err != nil {
-		return fmt.Errorf("patch does not apply cleanly: %s", stderr.String())
+		msg := stderr.String()
+		// "error: patch failed" and "does not apply" indicate merge conflicts.
+		// Other messages (e.g. "corrupt patch") are non-conflict errors.
+		if strings.Contains(msg, "patch failed") || strings.Contains(msg, "does not apply") {
+			return &PatchConflictError{Detail: msg}
+		}
+		return fmt.Errorf("patch check failed: %s", msg)
 	}
 	return nil
 }

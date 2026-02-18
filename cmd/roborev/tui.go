@@ -3559,9 +3559,13 @@ func (m tuiModel) applyFixPatch(jobID int64) tea.Cmd {
 			return tuiApplyPatchResultMsg{jobID: jobID, err: jErr}
 		}
 
-		// Dry-run check
+		// Dry-run check — only trigger rebase on actual merge conflicts
 		if err := worktree.CheckPatch(jobDetail.RepoPath, patch); err != nil {
-			return tuiApplyPatchResultMsg{jobID: jobID, rebase: true, err: err}
+			var conflictErr *worktree.PatchConflictError
+			if errors.As(err, &conflictErr) {
+				return tuiApplyPatchResultMsg{jobID: jobID, rebase: true, err: err}
+			}
+			return tuiApplyPatchResultMsg{jobID: jobID, err: err}
 		}
 
 		// Apply the patch
@@ -3574,23 +3578,9 @@ func (m tuiModel) applyFixPatch(jobID int64) tea.Cmd {
 }
 
 // triggerRebase triggers a new fix job that re-applies a stale patch to the current HEAD.
-// It fetches the original patch from the stale job and builds a rebase prompt.
+// The server looks up the stale patch from the DB, avoiding large client-to-server transfers.
 func (m tuiModel) triggerRebase(staleJobID int64) tea.Cmd {
 	return func() tea.Msg {
-		// Fetch the stale patch
-		url := m.serverAddr + fmt.Sprintf("/api/job/patch?job_id=%d", staleJobID)
-		resp, err := m.client.Get(url)
-		if err != nil {
-			return tuiFixTriggerResultMsg{err: fmt.Errorf("fetch stale patch: %w", err)}
-		}
-		defer resp.Body.Close()
-
-		var stalePatch string
-		if resp.StatusCode == http.StatusOK {
-			data, _ := io.ReadAll(resp.Body)
-			stalePatch = string(data)
-		}
-
 		// Find the parent job ID (the original review this fix was for)
 		staleJob, fetchErr := m.fetchJobByID(staleJobID)
 		if fetchErr != nil {
@@ -3603,23 +3593,10 @@ func (m tuiModel) triggerRebase(staleJobID int64) tea.Cmd {
 			parentJobID = *staleJob.ParentJobID
 		}
 
-		// Build a rebase prompt that includes the stale patch
-		rebasePrompt := "# Rebase Fix Request\n\n" +
-			"A previous fix attempt produced a patch that no longer applies cleanly to the current HEAD.\n" +
-			"Your task is to achieve the same changes but adapted to the current state of the code.\n\n"
-		if stalePatch != "" {
-			rebasePrompt += "## Previous Patch (stale)\n\n`````diff\n" + stalePatch + "\n`````\n\n"
-		}
-		rebasePrompt += "## Instructions\n\n" +
-			"1. Review the intent of the previous patch\n" +
-			"2. Apply equivalent changes to the current codebase\n" +
-			"3. Resolve any conflicts with recent changes\n" +
-			"4. Verify the code compiles and tests pass\n" +
-			"5. Stage the changes with git add but do NOT commit\n"
-
+		// Let the server build the rebase prompt from the stale job's patch
 		req := map[string]any{
 			"parent_job_id": parentJobID,
-			"prompt":        rebasePrompt,
+			"stale_job_id":  staleJobID,
 		}
 		var newJob storage.ReviewJob
 		if err := m.postJSON("/api/job/fix", req, &newJob); err != nil {
