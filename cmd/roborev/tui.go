@@ -32,6 +32,7 @@ import (
 	"github.com/roborev-dev/roborev/internal/update"
 	"github.com/roborev-dev/roborev/internal/version"
 	"github.com/roborev-dev/roborev/internal/worktree"
+	godiff "github.com/sourcegraph/go-diff/diff"
 	"github.com/spf13/cobra"
 )
 
@@ -3838,17 +3839,21 @@ func commitPatch(repoPath, patch, message string) error {
 
 // patchFiles extracts the list of file paths touched by a unified diff.
 func patchFiles(patch string) []string {
+	fileDiffs, err := godiff.ParseMultiFileDiff([]byte(patch))
+	if err != nil {
+		return nil
+	}
 	seen := map[string]bool{}
-	for _, line := range strings.Split(patch, "\n") {
-		// Match "diff --git a/path b/path" headers
-		if strings.HasPrefix(line, "diff --git ") {
-			parts := strings.SplitN(line, " b/", 2)
-			if len(parts) == 2 {
-				f := parts[1]
-				if f != "" && !seen[f] {
-					seen[f] = true
-				}
-			}
+	for _, fd := range fileDiffs {
+		name := fd.NewName
+		if name == "" || name == "/dev/null" {
+			name = fd.OrigName
+		}
+		// Strip the a/ or b/ prefix that go-diff preserves
+		name = strings.TrimPrefix(name, "a/")
+		name = strings.TrimPrefix(name, "b/")
+		if name != "" && name != "/dev/null" && !seen[name] {
+			seen[name] = true
 		}
 	}
 	files := make([]string, 0, len(seen))
