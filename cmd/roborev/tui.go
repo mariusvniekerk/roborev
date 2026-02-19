@@ -3860,7 +3860,7 @@ func dirtyPatchFiles(repoPath string, files []string) []string {
 		return nil
 	}
 	dirty := map[string]bool{}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
 		if line != "" {
 			dirty[line] = true
 		}
