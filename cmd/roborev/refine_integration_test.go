@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/roborev-dev/roborev/internal/testutil"
+	"github.com/roborev-dev/roborev/internal/worktree"
 )
 
 func TestValidateRefineContext(t *testing.T) {
@@ -169,9 +170,9 @@ func TestWorktreeCleanupBetweenIterations(t *testing.T) {
 	// before the next iteration. Verify the directory is removed each time.
 	var prevPath string
 	for i := range 3 {
-		worktreePath, cleanup, err := createTempWorktree(repo.Root)
+		wt, err := worktree.Create(repo.Root)
 		if err != nil {
-			t.Fatalf("iteration %d: createTempWorktree failed: %v", i, err)
+			t.Fatalf("iteration %d: worktree.Create failed: %v", i, err)
 		}
 
 		// Verify previous worktree was cleaned up
@@ -182,13 +183,13 @@ func TestWorktreeCleanupBetweenIterations(t *testing.T) {
 		}
 
 		// Verify current worktree exists
-		if _, err := os.Stat(worktreePath); err != nil {
-			t.Fatalf("iteration %d: worktree %s should exist: %v", i, worktreePath, err)
+		if _, err := os.Stat(wt.Dir); err != nil {
+			t.Fatalf("iteration %d: worktree %s should exist: %v", i, wt.Dir, err)
 		}
 
 		// Simulate the explicit cleanup call (as done on error/no-change paths)
-		cleanup()
-		prevPath = worktreePath
+		wt.Close()
+		prevPath = wt.Dir
 	}
 
 	// Verify the last worktree was also cleaned up
@@ -221,19 +222,19 @@ func TestCreateTempWorktreeIgnoresHooks(t *testing.T) {
 		_ = out
 	}
 
-	// createTempWorktree should succeed because it suppresses hooks
-	worktreePath, cleanup, err := createTempWorktree(repo.Root)
+	// worktree.Create should succeed because it suppresses hooks
+	wt, err := worktree.Create(repo.Root)
 	if err != nil {
-		t.Fatalf("createTempWorktree should succeed with failing hook: %v", err)
+		t.Fatalf("worktree.Create should succeed with failing hook: %v", err)
 	}
-	defer cleanup()
+	defer wt.Close()
 
 	// Verify the worktree directory exists and has the file from the repo
-	if _, err := os.Stat(worktreePath); err != nil {
+	if _, err := os.Stat(wt.Dir); err != nil {
 		t.Fatalf("worktree directory should exist: %v", err)
 	}
 
-	baseFile := filepath.Join(worktreePath, "base.txt")
+	baseFile := filepath.Join(wt.Dir, "base.txt")
 	content, err := os.ReadFile(baseFile)
 	if err != nil {
 		t.Fatalf("expected base.txt in worktree: %v", err)
@@ -280,13 +281,13 @@ func TestCreateTempWorktreeInitializesSubmodules(t *testing.T) {
 	runMainGit("-c", "protocol.file.allow=always", "submodule", "add", submoduleRepo, "deps/sub")
 	runMainGit("commit", "-m", "add submodule")
 
-	worktreePath, cleanup, err := createTempWorktree(mainRepo)
+	wt, err := worktree.Create(mainRepo)
 	if err != nil {
-		t.Fatalf("createTempWorktree failed: %v", err)
+		t.Fatalf("worktree.Create failed: %v", err)
 	}
-	defer cleanup()
+	defer wt.Close()
 
-	if _, err := os.Stat(filepath.Join(worktreePath, "deps", "sub", "sub.txt")); err != nil {
+	if _, err := os.Stat(filepath.Join(wt.Dir, "deps", "sub", "sub.txt")); err != nil {
 		t.Fatalf("expected submodule file in worktree: %v", err)
 	}
 }
