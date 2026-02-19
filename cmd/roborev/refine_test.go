@@ -724,18 +724,6 @@ func TestFindPendingJobForBranch_OldestFirst(t *testing.T) {
 	}
 }
 
-func installGitHook(t *testing.T, repoDir, name, script string) {
-	t.Helper()
-	hooksDir := filepath.Join(repoDir, ".git", "hooks")
-	if err := os.MkdirAll(hooksDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	hookPath := filepath.Join(hooksDir, name)
-	if err := os.WriteFile(hookPath, []byte(script), 0755); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func gitCommitFile(t *testing.T, repoDir string, runGit func(...string) string, filename, content, msg string) string {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(repoDir, filename), []byte(content), 0644); err != nil {
