@@ -3536,4 +3536,28 @@ func TestHandleListJobsJobTypeFilter(t *testing.T) {
 			t.Errorf("Expected 2 jobs total, got %d", len(resp.Jobs))
 		}
 	})
+
+	t.Run("exclude_job_type=fix returns only non-fix jobs", func(t *testing.T) {
+		req := httptest.NewRequest(
+			http.MethodGet, "/api/jobs?exclude_job_type=fix", nil,
+		)
+		w := httptest.NewRecorder()
+		server.handleListJobs(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("Expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+
+		var resp struct {
+			Jobs []storage.ReviewJob `json:"jobs"`
+		}
+		testutil.DecodeJSON(t, w, &resp)
+
+		if len(resp.Jobs) != 1 {
+			t.Fatalf("Expected 1 non-fix job, got %d", len(resp.Jobs))
+		}
+		if resp.Jobs[0].JobType == storage.JobTypeFix {
+			t.Error("Expected non-fix job, got fix")
+		}
+	})
 }

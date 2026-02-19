@@ -1316,6 +1316,7 @@ type listJobsOptions struct {
 	branchIncludeEmpty bool
 	addressed          *bool
 	jobType            string
+	excludeJobType     string
 }
 
 // WithGitRef filters jobs by git ref.
@@ -1345,6 +1346,11 @@ func WithAddressed(addressed bool) ListJobsOption {
 // WithJobType filters jobs by job_type (e.g. "fix", "review").
 func WithJobType(jobType string) ListJobsOption {
 	return func(o *listJobsOptions) { o.jobType = jobType }
+}
+
+// WithExcludeJobType excludes jobs of the given type.
+func WithExcludeJobType(jobType string) ListJobsOption {
+	return func(o *listJobsOptions) { o.excludeJobType = jobType }
 }
 
 // ListJobs returns jobs with optional status, repo, branch, and addressed filters.
@@ -1398,6 +1404,10 @@ func (db *DB) ListJobs(statusFilter string, repoFilter string, limit, offset int
 	if o.jobType != "" {
 		conditions = append(conditions, "j.job_type = ?")
 		args = append(args, o.jobType)
+	}
+	if o.excludeJobType != "" {
+		conditions = append(conditions, "j.job_type != ?")
+		args = append(args, o.excludeJobType)
 	}
 
 	if len(conditions) > 0 {

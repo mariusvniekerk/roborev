@@ -792,6 +792,9 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	if jobType := r.URL.Query().Get("job_type"); jobType != "" {
 		listOpts = append(listOpts, storage.WithJobType(jobType))
 	}
+	if exJobType := r.URL.Query().Get("exclude_job_type"); exJobType != "" {
+		listOpts = append(listOpts, storage.WithExcludeJobType(exJobType))
+	}
 
 	jobs, err := s.db.ListJobs(status, repo, fetchLimit, offset, listOpts...)
 	if err != nil {

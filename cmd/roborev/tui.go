@@ -648,6 +648,9 @@ func (m tuiModel) fetchJobs() tea.Cmd {
 			params.Set("addressed", "false")
 		}
 
+		// Exclude fix jobs — they belong in the Tasks view, not the queue
+		params.Set("exclude_job_type", "fix")
+
 		// Set limit: use pagination unless we need client-side filtering (multi-repo)
 		if needsAllJobs {
 			params.Set("limit", "0")
@@ -701,6 +704,7 @@ func (m tuiModel) fetchMoreJobs() tea.Cmd {
 		if m.hideAddressed {
 			params.Set("addressed", "false")
 		}
+		params.Set("exclude_job_type", "fix")
 		url := fmt.Sprintf("%s/api/jobs?%s", m.serverAddr, params.Encode())
 		resp, err := m.client.Get(url)
 		if err != nil {
@@ -3923,18 +3927,19 @@ func (m tuiModel) triggerRebase(staleJobID int64) tea.Cmd {
 			return tuiFixTriggerResultMsg{err: fmt.Errorf("trigger rebase: %w", err)}
 		}
 		// Mark the stale job as rebased now that the new job exists.
-		// Non-fatal: the new job is already enqueued; worst case the
-		// stale job stays "done" and the user can retry R.
+		// Skip if already rebased (e.g. retry via R on a rebased job).
 		var warning string
-		if err := m.postJSON(
-			"/api/job/rebased",
-			map[string]any{"job_id": staleJobID},
-			nil,
-		); err != nil {
-			warning = fmt.Sprintf(
-				"rebase job #%d enqueued but failed to mark #%d as rebased: %v",
-				newJob.ID, staleJobID, err,
-			)
+		if staleJob.Status != storage.JobStatusRebased {
+			if err := m.postJSON(
+				"/api/job/rebased",
+				map[string]any{"job_id": staleJobID},
+				nil,
+			); err != nil {
+				warning = fmt.Sprintf(
+					"rebase job #%d enqueued but failed to mark #%d as rebased: %v",
+					newJob.ID, staleJobID, err,
+				)
+			}
 		}
 		return tuiFixTriggerResultMsg{job: &newJob, warning: warning}
 	}

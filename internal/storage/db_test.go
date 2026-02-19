@@ -3356,4 +3356,30 @@ func TestListJobsWithJobTypeFilter(t *testing.T) {
 			t.Errorf("Expected 0 jobs for nonexistent type, got %d", len(jobs))
 		}
 	})
+
+	t.Run("exclude fix returns only non-fix jobs", func(t *testing.T) {
+		jobs, err := db.ListJobs("", "", 50, 0, WithExcludeJobType("fix"))
+		if err != nil {
+			t.Fatalf("ListJobs failed: %v", err)
+		}
+		if len(jobs) != 1 {
+			t.Fatalf("Expected 1 non-fix job, got %d", len(jobs))
+		}
+		if jobs[0].JobType == JobTypeFix {
+			t.Error("Expected non-fix job, got fix")
+		}
+	})
+
+	t.Run("exclude review returns only non-review jobs", func(t *testing.T) {
+		jobs, err := db.ListJobs("", "", 50, 0, WithExcludeJobType("review"))
+		if err != nil {
+			t.Fatalf("ListJobs failed: %v", err)
+		}
+		if len(jobs) != 1 {
+			t.Fatalf("Expected 1 non-review job, got %d", len(jobs))
+		}
+		if jobs[0].JobType != JobTypeFix {
+			t.Errorf("Expected fix job, got %q", jobs[0].JobType)
+		}
+	})
 }
