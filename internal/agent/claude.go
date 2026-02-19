@@ -210,7 +210,7 @@ type claudeStreamMessage struct {
 // Uses bufio.Reader.ReadString to read lines without buffer size limits.
 // On success, returns (result, nil). On failure, returns (partialOutput, error)
 // where partialOutput contains any assistant messages collected before the error.
-func (a *ClaudeAgent) parseStreamJSON(r io.Reader, output io.Writer) (string, error) {
+func parseStreamJSON(r io.Reader, output io.Writer) (string, error) {
 	br := bufio.NewReader(r)
 
 	var lastResult string

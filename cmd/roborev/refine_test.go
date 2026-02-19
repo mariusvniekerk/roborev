@@ -725,6 +725,28 @@ func TestFindPendingJobForBranch_OldestFirst(t *testing.T) {
 	}
 }
 
+func installGitHook(t *testing.T, repoDir, name, script string) {
+	t.Helper()
+	hooksDir := filepath.Join(repoDir, ".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	hookPath := filepath.Join(hooksDir, name)
+	if err := os.WriteFile(hookPath, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func gitCommitFile(t *testing.T, repoDir string, runGit func(...string) string, filename, content, msg string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(repoDir, filename), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", filename)
+	runGit("commit", "-m", msg)
+	return runGit("rev-parse", "HEAD")
+}
+
 // setupTestGitRepo creates a git repo for testing branch/--since behavior.
 // Returns the repo directory, base commit SHA, and a helper to run git commands.
 func setupTestGitRepo(t *testing.T) (repoDir string, baseSHA string, runGit func(args ...string) string) {
@@ -770,7 +792,7 @@ func TestValidateRefineContext_RefusesMainBranchWithoutSince(t *testing.T) {
 	defer os.Chdir(origDir)
 
 	// Validating without --since on main should fail
-	_, _, _, _, err = validateRefineContext("", "")
+	_, _, _, _, err = validateRefineContext("", "", "")
 	if err == nil {
 		t.Fatal("expected error when validating on main without --since")
 	}
@@ -802,7 +824,7 @@ func TestValidateRefineContext_AllowsMainBranchWithSince(t *testing.T) {
 	defer os.Chdir(origDir)
 
 	// Validating with --since on main should pass
-	repoPath, currentBranch, _, mergeBase, err := validateRefineContext(baseSHA, "")
+	repoPath, currentBranch, _, mergeBase, err := validateRefineContext("", baseSHA, "")
 	if err != nil {
 		t.Fatalf("validation should pass with --since on main, got: %v", err)
 	}
@@ -838,7 +860,7 @@ func TestValidateRefineContext_SinceWorksOnFeatureBranch(t *testing.T) {
 	defer os.Chdir(origDir)
 
 	// --since should work on feature branch
-	repoPath, currentBranch, _, mergeBase, err := validateRefineContext(baseSHA, "")
+	repoPath, currentBranch, _, mergeBase, err := validateRefineContext("", baseSHA, "")
 	if err != nil {
 		t.Fatalf("--since should work on feature branch, got: %v", err)
 	}
@@ -870,7 +892,7 @@ func TestValidateRefineContext_InvalidSinceRef(t *testing.T) {
 	defer os.Chdir(origDir)
 
 	// Invalid --since ref should fail with clear error
-	_, _, _, _, err = validateRefineContext("nonexistent-ref-abc123", "")
+	_, _, _, _, err = validateRefineContext("", "nonexistent-ref-abc123", "")
 	if err == nil {
 		t.Fatal("expected error for invalid --since ref")
 	}
@@ -904,7 +926,7 @@ func TestValidateRefineContext_SinceNotAncestorOfHEAD(t *testing.T) {
 	defer os.Chdir(origDir)
 
 	// Using --since with a commit from a different branch (not ancestor of HEAD) should fail
-	_, _, _, _, err = validateRefineContext(otherBranchSHA, "")
+	_, _, _, _, err = validateRefineContext("", otherBranchSHA, "")
 	if err == nil {
 		t.Fatal("expected error when --since is not an ancestor of HEAD")
 	}
@@ -934,7 +956,7 @@ func TestValidateRefineContext_FeatureBranchWithoutSinceStillWorks(t *testing.T)
 	defer os.Chdir(origDir)
 
 	// Feature branch without --since should pass validation (uses merge-base)
-	repoPath, currentBranch, _, mergeBase, err := validateRefineContext("", "")
+	repoPath, currentBranch, _, mergeBase, err := validateRefineContext("", "", "")
 	if err != nil {
 		t.Fatalf("feature branch without --since should work, got: %v", err)
 	}
