@@ -3296,16 +3296,16 @@ func TestListJobsWithJobTypeFilter(t *testing.T) {
 	commit := createCommit(t, db, repo.ID, "jt-sha")
 
 	// Create a review job (default type)
-	enqueueJob(t, db, repo.ID, commit.ID, "jt-sha")
+	reviewJob := enqueueJob(t, db, repo.ID, commit.ID, "jt-sha")
 
-	// Create a fix job
+	// Create a fix job parented to the review
 	_, err := db.EnqueueJob(EnqueueOpts{
 		RepoID:      repo.ID,
 		CommitID:    commit.ID,
 		GitRef:      "jt-sha",
 		Agent:       "codex",
 		JobType:     JobTypeFix,
-		ParentJobID: 1,
+		ParentJobID: reviewJob.ID,
 	})
 	if err != nil {
 		t.Fatalf("EnqueueJob fix failed: %v", err)

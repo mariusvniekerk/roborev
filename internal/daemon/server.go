@@ -1677,6 +1677,14 @@ func (s *Server) handleFixJob(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "stale job not found")
 			return
 		}
+		if staleJob.JobType != storage.JobTypeFix {
+			writeError(w, http.StatusBadRequest, "stale job is not a fix job")
+			return
+		}
+		if staleJob.RepoID != parentJob.RepoID {
+			writeError(w, http.StatusBadRequest, "stale job belongs to a different repo")
+			return
+		}
 		fixPrompt = buildRebasePrompt(staleJob.Patch)
 	}
 	if fixPrompt == "" {

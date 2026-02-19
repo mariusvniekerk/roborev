@@ -1525,8 +1525,14 @@ func TestPatchFiles(t *testing.T) {
 			for _, f := range tt.want {
 				wantSet[f] = true
 			}
+			if len(got) != len(tt.want) {
+				t.Errorf("expected %d files, got %d: %v", len(tt.want), len(got), got)
+			}
 			gotSet := map[string]bool{}
 			for _, f := range got {
+				if gotSet[f] {
+					t.Errorf("duplicate file in output: %q", f)
+				}
 				gotSet[f] = true
 			}
 			for f := range wantSet {
@@ -1543,31 +1549,71 @@ func TestPatchFiles(t *testing.T) {
 	}
 }
 
-func TestTUIFixTriggerResultMsgWarning(t *testing.T) {
-	m := newTuiModel("http://localhost")
-	m.currentView = tuiViewTasks
-	m.width = 80
-	m.height = 24
+func TestTUIFixTriggerResultMsg(t *testing.T) {
+	t.Run("warning shows flash and triggers refresh", func(t *testing.T) {
+		m := newTuiModel("http://localhost")
+		m.currentView = tuiViewTasks
+		m.width = 80
+		m.height = 24
 
-	job := &storage.ReviewJob{ID: 42}
-	msg := tuiFixTriggerResultMsg{
-		job:     job,
-		warning: "rebase job #42 enqueued but failed to mark #10 as rebased: server error",
-	}
+		msg := tuiFixTriggerResultMsg{
+			job:     &storage.ReviewJob{ID: 42},
+			warning: "rebase job #42 enqueued but failed to mark #10 as rebased: server error",
+		}
 
-	result, cmd := m.Update(msg)
-	updated := result.(tuiModel)
+		result, cmd := m.Update(msg)
+		updated := result.(tuiModel)
 
-	if !strings.Contains(updated.flashMessage, "failed to mark") {
-		t.Errorf(
-			"expected flash to contain warning, got %q",
-			updated.flashMessage,
-		)
-	}
-	if updated.flashView != tuiViewTasks {
-		t.Errorf("expected flash view tasks, got %v", updated.flashView)
-	}
-	if cmd == nil {
-		t.Error("expected fetchFixJobs cmd, got nil")
-	}
+		if !strings.Contains(updated.flashMessage, "failed to mark") {
+			t.Errorf("expected warning in flash, got %q", updated.flashMessage)
+		}
+		if updated.flashView != tuiViewTasks {
+			t.Errorf("expected flash view tasks, got %v", updated.flashView)
+		}
+		if cmd == nil {
+			t.Error("expected refresh cmd, got nil")
+		}
+	})
+
+	t.Run("success shows enqueued flash and triggers refresh", func(t *testing.T) {
+		m := newTuiModel("http://localhost")
+		m.currentView = tuiViewTasks
+		m.width = 80
+		m.height = 24
+
+		msg := tuiFixTriggerResultMsg{
+			job: &storage.ReviewJob{ID: 99},
+		}
+
+		result, cmd := m.Update(msg)
+		updated := result.(tuiModel)
+
+		if !strings.Contains(updated.flashMessage, "#99 enqueued") {
+			t.Errorf("expected enqueued flash, got %q", updated.flashMessage)
+		}
+		if cmd == nil {
+			t.Error("expected refresh cmd, got nil")
+		}
+	})
+
+	t.Run("error shows failure flash with no refresh", func(t *testing.T) {
+		m := newTuiModel("http://localhost")
+		m.currentView = tuiViewTasks
+		m.width = 80
+		m.height = 24
+
+		msg := tuiFixTriggerResultMsg{
+			err: fmt.Errorf("connection refused"),
+		}
+
+		result, cmd := m.Update(msg)
+		updated := result.(tuiModel)
+
+		if !strings.Contains(updated.flashMessage, "Fix failed") {
+			t.Errorf("expected failure flash, got %q", updated.flashMessage)
+		}
+		if cmd != nil {
+			t.Error("expected no cmd on error, got non-nil")
+		}
+	})
 }
