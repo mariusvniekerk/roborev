@@ -245,6 +245,10 @@ func TestDaemonShutdownBySignal(t *testing.T) {
 }
 
 func TestDaemonSignalCleanup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping daemon signal test on Windows due to file locking differences")
+	}
+
 	// Verify that signal.Stop is called when shutdown
 	// is triggered by a signal.
 	var cleanupCalled bool
