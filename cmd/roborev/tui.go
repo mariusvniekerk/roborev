@@ -2119,10 +2119,6 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.flashMessage = fmt.Sprintf("Patch for job #%d doesn't apply cleanly - triggering rebase", msg.jobID)
 			m.flashExpiresAt = time.Now().Add(5 * time.Second)
 			m.flashView = tuiViewTasks
-			// Mark stale job as rebased and trigger rebase
-			if err := m.postJSON("/api/job/rebased", map[string]any{"job_id": msg.jobID}, nil); err != nil {
-				m.flashMessage = fmt.Sprintf("Rebase triggered but failed to mark job #%d as rebased: %v", msg.jobID, err)
-			}
 			return m, tea.Batch(m.triggerRebase(msg.jobID), m.fetchFixJobs())
 		} else if msg.success && msg.err != nil {
 			// Patch applied but commit failed
@@ -3844,7 +3840,11 @@ func commitPatch(repoPath, patch, message string) error {
 	if out, err := addCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git add: %w: %s", err, out)
 	}
-	commitCmd := exec.Command("git", "-C", repoPath, "commit", "-m", message)
+	commitArgs := append(
+		[]string{"-C", repoPath, "commit", "--only", "-m", message, "--"},
+		files...,
+	)
+	commitCmd := exec.Command("git", commitArgs...)
 	if out, err := commitCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git commit: %w: %s", err, out)
 	}
@@ -3924,6 +3924,14 @@ func (m tuiModel) triggerRebase(staleJobID int64) tea.Cmd {
 		if err := m.postJSON("/api/job/fix", req, &newJob); err != nil {
 			return tuiFixTriggerResultMsg{err: fmt.Errorf("trigger rebase: %w", err)}
 		}
+		// Mark the stale job as rebased now that the new job exists.
+		// Non-fatal: the new job is already enqueued; worst case the
+		// stale job stays "done" and the user can retry R.
+		_ = m.postJSON(
+			"/api/job/rebased",
+			map[string]any{"job_id": staleJobID},
+			nil,
+		)
 		return tuiFixTriggerResultMsg{job: &newJob}
 	}
 }

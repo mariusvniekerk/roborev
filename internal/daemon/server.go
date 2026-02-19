@@ -1321,7 +1321,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	queued, running, done, failed, canceled, err := s.db.GetJobCounts()
+	queued, running, done, failed, canceled, applied, rebased, err := s.db.GetJobCounts()
 	if err != nil {
 		s.writeInternalError(w, fmt.Sprintf("get counts: %v", err))
 		return
@@ -1341,6 +1341,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		CompletedJobs:       done,
 		FailedJobs:          failed,
 		CanceledJobs:        canceled,
+		AppliedJobs:         applied,
+		RebasedJobs:         rebased,
 		ActiveWorkers:       s.workerPool.ActiveWorkers(),
 		MaxWorkers:          s.workerPool.MaxWorkers(),
 		MachineID:           s.getMachineID(),
@@ -1728,8 +1730,8 @@ func (s *Server) handleGetPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var jobID int64
-	if _, err := fmt.Sscanf(jobIDStr, "%d", &jobID); err != nil {
+	jobID, err := strconv.ParseInt(jobIDStr, 10, 64)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid job_id")
 		return
 	}

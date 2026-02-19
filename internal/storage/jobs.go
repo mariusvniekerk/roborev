@@ -1626,7 +1626,7 @@ func (db *DB) GetJobByID(id int64) (*ReviewJob, error) {
 }
 
 // GetJobCounts returns counts of jobs by status
-func (db *DB) GetJobCounts() (queued, running, done, failed, canceled int, err error) {
+func (db *DB) GetJobCounts() (queued, running, done, failed, canceled, applied, rebased int, err error) {
 	rows, err := db.Query(`SELECT status, COUNT(*) FROM review_jobs GROUP BY status`)
 	if err != nil {
 		return
@@ -1650,6 +1650,10 @@ func (db *DB) GetJobCounts() (queued, running, done, failed, canceled int, err e
 			failed = count
 		case JobStatusCanceled:
 			canceled = count
+		case JobStatusApplied:
+			applied = count
+		case JobStatusRebased:
+			rebased = count
 		}
 	}
 	err = rows.Err()

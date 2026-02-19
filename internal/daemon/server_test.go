@@ -1737,7 +1737,7 @@ func TestHandleEnqueueExcludedBranch(t *testing.T) {
 		}
 
 		// Verify no job was created
-		queued, _, _, _, _, _ := db.GetJobCounts()
+		queued, _, _, _, _, _, _, _ := db.GetJobCounts()
 		if queued != 0 {
 			t.Errorf("Expected 0 queued jobs, got %d", queued)
 		}
@@ -1762,7 +1762,7 @@ func TestHandleEnqueueExcludedBranch(t *testing.T) {
 		}
 
 		// Verify job was created
-		queued, _, _, _, _, _ := db.GetJobCounts()
+		queued, _, _, _, _, _, _, _ := db.GetJobCounts()
 		if queued != 1 {
 			t.Errorf("Expected 1 queued job, got %d", queued)
 		}

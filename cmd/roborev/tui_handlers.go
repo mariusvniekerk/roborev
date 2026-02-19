@@ -1562,10 +1562,10 @@ func (m tuiModel) handleTasksKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "R":
-		// Manually trigger rebase for a completed fix job
+		// Manually trigger rebase for a completed or rebased fix job
 		if len(m.fixJobs) > 0 && m.fixSelectedIdx < len(m.fixJobs) {
 			job := m.fixJobs[m.fixSelectedIdx]
-			if job.Status == storage.JobStatusDone {
+			if job.Status == storage.JobStatusDone || job.Status == storage.JobStatusRebased {
 				return m, m.triggerRebase(job.ID)
 			}
 		}

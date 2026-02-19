@@ -183,6 +183,8 @@ type DaemonStatus struct {
 	CompletedJobs       int    `json:"completed_jobs"`
 	FailedJobs          int    `json:"failed_jobs"`
 	CanceledJobs        int    `json:"canceled_jobs"`
+	AppliedJobs         int    `json:"applied_jobs"`
+	RebasedJobs         int    `json:"rebased_jobs"`
 	ActiveWorkers       int    `json:"active_workers"`
 	MaxWorkers          int    `json:"max_workers"`
 	MachineID           string `json:"machine_id,omitempty"`            // Local machine ID for remote job detection

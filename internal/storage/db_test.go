@@ -695,7 +695,7 @@ func TestJobCounts(t *testing.T) {
 		db.FailJob(claimed2.ID, "", "err")
 	}
 
-	queued, running, done, failed, _, err := db.GetJobCounts()
+	queued, running, done, failed, _, _, _, err := db.GetJobCounts()
 	if err != nil {
 		t.Fatalf("GetJobCounts failed: %v", err)
 	}
@@ -1212,7 +1212,7 @@ func TestCancelJob(t *testing.T) {
 		_, _, job := createJobChain(t, db, "/tmp/test-repo", "cancel-count")
 		db.CancelJob(job.ID)
 
-		_, _, _, _, canceled, err := db.GetJobCounts()
+		_, _, _, _, canceled, _, _, err := db.GetJobCounts()
 		if err != nil {
 			t.Fatalf("GetJobCounts failed: %v", err)
 		}
