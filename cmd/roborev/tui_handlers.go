@@ -1391,7 +1391,14 @@ func (m tuiModel) handleFixKey() (tea.Model, tea.Cmd) {
 		job = m.jobs[m.selectedIdx]
 	}
 
-	// Only allow fix on completed jobs with a failing verdict
+	// Only allow fix on completed review jobs (not fix jobs —
+	// fix-of-fix chains are not supported).
+	if job.IsFixJob() {
+		m.flashMessage = "Cannot fix a fix job"
+		m.flashExpiresAt = time.Now().Add(2 * time.Second)
+		m.flashView = m.currentView
+		return m, nil
+	}
 	if job.Status != storage.JobStatusDone {
 		m.flashMessage = "Can only fix completed reviews"
 		m.flashExpiresAt = time.Now().Add(2 * time.Second)

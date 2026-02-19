@@ -1661,10 +1661,14 @@ func (s *Server) handleFixJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch the parent job
+	// Fetch the parent job — must be a review (not a fix job)
 	parentJob, err := s.db.GetJobByID(req.ParentJobID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "parent job not found")
+		return
+	}
+	if parentJob.IsFixJob() {
+		writeError(w, http.StatusBadRequest, "parent job must be a review, not a fix job")
 		return
 	}
 

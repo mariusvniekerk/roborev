@@ -3582,6 +3582,36 @@ func TestHandleFixJobStaleValidation(t *testing.T) {
 	db.ClaimJob("w1")
 	db.CompleteJob(reviewJob.ID, "test", "prompt", "FAIL: issues found")
 
+	t.Run("fix job as parent is rejected", func(t *testing.T) {
+		// Create a fix job and try to use it as a parent
+		fixJob, _ := db.EnqueueJob(storage.EnqueueOpts{
+			RepoID:      repo.ID,
+			CommitID:    commit.ID,
+			GitRef:      "fix-val-abc",
+			Agent:       "test",
+			JobType:     storage.JobTypeFix,
+			ParentJobID: reviewJob.ID,
+		})
+		db.ClaimJob("w-fix-parent")
+		db.CompleteJob(fixJob.ID, "test", "prompt", "done")
+
+		body := map[string]any{
+			"parent_job_id": fixJob.ID,
+		}
+		req := testutil.MakeJSONRequest(
+			t, http.MethodPost, "/api/job/fix", body,
+		)
+		w := httptest.NewRecorder()
+		server.handleFixJob(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Errorf(
+				"Expected 400 for fix-job parent, got %d: %s",
+				w.Code, w.Body.String(),
+			)
+		}
+	})
+
 	t.Run("stale job that is not a fix job is rejected", func(t *testing.T) {
 		// reviewJob is a review, not a fix job
 		body := map[string]any{

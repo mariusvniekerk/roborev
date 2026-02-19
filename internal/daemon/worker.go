@@ -67,8 +67,8 @@ func NewWorkerPool(db *storage.DB, cfgGetter ConfigGetter, numWorkers int, broad
 func (wp *WorkerPool) Start() {
 	log.Printf("Starting worker pool with %d workers", wp.numWorkers)
 
+	wp.wg.Add(wp.numWorkers)
 	for i := 0; i < wp.numWorkers; i++ {
-		wp.wg.Add(1)
 		go wp.worker(i)
 	}
 }
