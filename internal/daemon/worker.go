@@ -30,6 +30,9 @@ type WorkerPool struct {
 	numWorkers    int
 	activeWorkers atomic.Int32
 	stopCh        chan struct{}
+	readyCh       chan struct{} // closed after wg.Add in Start
+	startOnce     sync.Once
+	stopOnce      sync.Once
 	wg            sync.WaitGroup
 
 	// Track running jobs for cancellation
@@ -60,6 +63,7 @@ func NewWorkerPool(db *storage.DB, cfgGetter ConfigGetter, numWorkers int, broad
 		activityLog:    activityLog,
 		numWorkers:     numWorkers,
 		stopCh:         make(chan struct{}),
+		readyCh:        make(chan struct{}),
 		runningJobs:    make(map[int64]context.CancelFunc),
 		pendingCancels: make(map[int64]bool),
 		agentCooldowns: make(map[string]time.Time),
@@ -67,22 +71,38 @@ func NewWorkerPool(db *storage.DB, cfgGetter ConfigGetter, numWorkers int, broad
 	}
 }
 
-// Start begins the worker pool
+// Start begins the worker pool. Safe to call multiple times;
+// only the first call spawns workers.
 func (wp *WorkerPool) Start() {
-	log.Printf("Starting worker pool with %d workers", wp.numWorkers)
-
-	wp.wg.Add(wp.numWorkers)
-	for i := 0; i < wp.numWorkers; i++ {
-		go wp.worker(i)
-	}
+	wp.startOnce.Do(func() {
+		log.Printf(
+			"Starting worker pool with %d workers",
+			wp.numWorkers,
+		)
+		wp.wg.Add(wp.numWorkers)
+		close(wp.readyCh)
+		for i := 0; i < wp.numWorkers; i++ {
+			go wp.worker(i)
+		}
+	})
 }
 
-// Stop gracefully shuts down the worker pool
+// Stop gracefully shuts down the worker pool. Safe to call
+// multiple times; only the first call performs shutdown.
 func (wp *WorkerPool) Stop() {
-	log.Println("Stopping worker pool...")
-	close(wp.stopCh)
-	wp.wg.Wait()
-	log.Println("Worker pool stopped")
+	wp.stopOnce.Do(func() {
+		log.Println("Stopping worker pool...")
+		close(wp.stopCh)
+		// Wait for Start to finish wg.Add before calling Wait.
+		// If Start was never called, readyCh stays open but
+		// stopCh is closed, so any late workers exit immediately.
+		select {
+		case <-wp.readyCh:
+			wp.wg.Wait()
+		default:
+		}
+		log.Println("Worker pool stopped")
+	})
 }
 
 // ActiveWorkers returns the number of currently active workers
