@@ -15,6 +15,11 @@ import (
 
 // handleKeyMsg dispatches key events to view-specific handlers.
 func (m tuiModel) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Fix panel captures input when focused in review view
+	if m.currentView == tuiViewReview && m.reviewFixPanelOpen && m.reviewFixPanelFocused {
+		return m.handleReviewFixPanelKey(msg)
+	}
+
 	// Modal views that capture most keys for typing
 	switch m.currentView {
 	case tuiViewComment:
@@ -382,6 +387,8 @@ func (m tuiModel) handleGlobalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleFixKey()
 	case "T":
 		return m.handleToggleTasksKey()
+	case "tab":
+		return m.handleTabKey()
 	}
 	return m, nil
 }
@@ -1127,6 +1134,14 @@ func (m tuiModel) handleEscKey() (tea.Model, tea.Cmd) {
 		m.loadingJobs = true
 		return m, m.fetchJobs()
 	} else if m.currentView == tuiViewReview {
+		// If fix panel is open (unfocused), esc closes it rather than leaving the review
+		if m.reviewFixPanelOpen {
+			m.reviewFixPanelOpen = false
+			m.reviewFixPanelFocused = false
+			m.fixPromptText = ""
+			m.fixPromptJobID = 0
+			return m, nil
+		}
 		returnTo := m.reviewFromView
 		if returnTo == 0 {
 			returnTo = tuiViewQueue
@@ -1492,6 +1507,54 @@ func (m tuiModel) handleFixKey() (tea.Model, tea.Cmd) {
 	m.reviewFromView = tuiViewQueue
 	m.selectedJobID = job.ID
 	return m, m.fetchReview(job.ID)
+}
+
+// handleReviewFixPanelKey handles key input when the inline fix panel is focused.
+func (m tuiModel) handleReviewFixPanelKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		m.reviewFixPanelOpen = false
+		m.reviewFixPanelFocused = false
+		m.fixPromptText = ""
+		m.fixPromptJobID = 0
+		return m, nil
+	case "tab":
+		m.reviewFixPanelFocused = false
+		return m, nil
+	case "enter":
+		jobID := m.fixPromptJobID
+		prompt := m.fixPromptText
+		m.reviewFixPanelOpen = false
+		m.reviewFixPanelFocused = false
+		m.fixPromptText = ""
+		m.fixPromptJobID = 0
+		return m, m.triggerFix(jobID, prompt)
+	case "backspace":
+		if len(m.fixPromptText) > 0 {
+			runes := []rune(m.fixPromptText)
+			m.fixPromptText = string(runes[:len(runes)-1])
+		}
+		return m, nil
+	default:
+		if len(msg.Runes) > 0 {
+			for _, r := range msg.Runes {
+				if unicode.IsPrint(r) {
+					m.fixPromptText += string(r)
+				}
+			}
+		}
+		return m, nil
+	}
+}
+
+// handleTabKey shifts focus to the fix panel when it is open in review view.
+func (m tuiModel) handleTabKey() (tea.Model, tea.Cmd) {
+	if m.currentView == tuiViewReview && m.reviewFixPanelOpen && !m.reviewFixPanelFocused {
+		m.reviewFixPanelFocused = true
+	}
+	return m, nil
 }
 
 // handleToggleTasksKey switches between queue and tasks view.
