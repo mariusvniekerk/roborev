@@ -110,10 +110,8 @@ const (
 	tuiViewCommitMsg
 	tuiViewHelp
 	tuiViewLog
-	tuiViewTasks     // Background fix tasks view
-	tuiViewFixPrompt // Fix prompt confirmation modal
-	tuiViewFixGitRef // Git ref confirmation modal (HEAD fallback for compact jobs)
-	tuiViewPatch     // Patch viewer for fix jobs
+	tuiViewTasks // Background fix tasks view
+	tuiViewPatch // Patch viewer for fix jobs
 )
 
 // queuePrefetchBuffer is the number of extra rows to fetch beyond what's visible,
@@ -267,16 +265,19 @@ type tuiModel struct {
 	reviewFromView tuiView // View to return to when exiting review (queue or tasks)
 
 	// Fix task state
-	fixJobs           []storage.ReviewJob // Fix jobs for tasks view
-	fixSelectedIdx    int                 // Selected index in tasks view
-	fixPromptText     string              // Editable fix prompt text
-	fixPromptJobID    int64               // Parent job ID for fix prompt modal
-	fixPromptFromView tuiView             // View to return to after fix prompt closes
-	fixPromptGitRef   string              // Editable git ref for HEAD-fallback confirmation
-	fixShowHelp       bool                // Show help overlay in tasks view
-	patchText         string              // Current patch text for patch viewer
-	patchScroll       int                 // Scroll offset in patch viewer
-	patchJobID        int64               // Job ID of the patch being viewed
+	fixJobs        []storage.ReviewJob // Fix jobs for tasks view
+	fixSelectedIdx int                 // Selected index in tasks view
+	fixPromptText  string              // Editable fix prompt text
+	fixPromptJobID int64               // Parent job ID for fix prompt modal
+	fixShowHelp    bool                // Show help overlay in tasks view
+	patchText      string              // Current patch text for patch viewer
+	patchScroll    int                 // Scroll offset in patch viewer
+	patchJobID     int64               // Job ID of the patch being viewed
+
+	// Inline fix panel (review view)
+	reviewFixPanelOpen    bool // true when fix panel is visible in review view
+	reviewFixPanelFocused bool // true when keyboard focus is on the fix panel
+	reviewFixPanelPending bool // true when 'F' from queue; panel opens on review load
 }
 
 // pendingState tracks a pending addressed toggle with sequence number
@@ -2001,6 +2002,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.currentBranch = msg.branchName
 		m.currentView = tuiViewReview
 		m.reviewScroll = 0
+		if m.reviewFixPanelPending {
+			m.reviewFixPanelPending = false
+			m.reviewFixPanelOpen = true
+			m.reviewFixPanelFocused = true
+			m.fixPromptJobID = msg.review.JobID
+		}
 
 	case tuiPromptMsg:
 		if msg.jobID != m.selectedJobID {
@@ -2416,12 +2423,7 @@ func (m tuiModel) View() string {
 	if m.currentView == tuiViewTasks {
 		return m.renderTasksView()
 	}
-	if m.currentView == tuiViewFixPrompt {
-		return m.renderFixPromptView()
-	}
-	if m.currentView == tuiViewFixGitRef {
-		return m.renderFixGitRefView()
-	}
+
 	if m.currentView == tuiViewPatch {
 		return m.renderPatchView()
 	}
@@ -3903,54 +3905,6 @@ func (m tuiModel) renderPatchView() string {
 
 	b.WriteString(tuiHelpStyle.Render("j/k/up/down: scroll | esc: back to tasks"))
 	b.WriteString("\x1b[K\x1b[J")
-	return b.String()
-}
-
-// renderFixPromptView renders the fix prompt confirmation modal.
-func (m tuiModel) renderFixPromptView() string {
-	var b strings.Builder
-
-	b.WriteString(tuiTitleStyle.Render(fmt.Sprintf("Fix Review #%d", m.fixPromptJobID)))
-	b.WriteString("\x1b[K\n\n")
-
-	b.WriteString("  A background fix agent will address the review findings.\n")
-	b.WriteString("  Optionally enter custom instructions (or press enter for default):\n\n")
-
-	// Show prompt input
-	promptDisplay := m.fixPromptText
-	if promptDisplay == "" {
-		promptDisplay = "(default: fix all findings from the review)"
-	}
-	fmt.Fprintf(&b, "  > %s_\n", promptDisplay)
-	b.WriteString("\n")
-
-	b.WriteString(tuiHelpStyle.Render("enter: start fix | esc: cancel"))
-	b.WriteString("\x1b[K\x1b[J")
-
-	return b.String()
-}
-
-// renderFixGitRefView renders the git ref confirmation modal shown when a fix job
-// cannot determine the target ref automatically (e.g. compact jobs with no branch).
-func (m tuiModel) renderFixGitRefView() string {
-	var b strings.Builder
-
-	b.WriteString(tuiTitleStyle.Render(fmt.Sprintf("Fix Review #%d", m.fixPromptJobID)))
-	b.WriteString("\x1b[K\n\n")
-
-	b.WriteString("  Could not determine the target branch for this review.\n")
-	b.WriteString("  Enter a branch name or commit SHA to apply the fix against:\n\n")
-
-	refDisplay := m.fixPromptGitRef
-	if refDisplay == "" {
-		refDisplay = "HEAD"
-	}
-	fmt.Fprintf(&b, "  > %s_\n", refDisplay)
-	b.WriteString("\n")
-
-	b.WriteString(tuiHelpStyle.Render("enter: confirm | esc: cancel"))
-	b.WriteString("\x1b[K\x1b[J")
-
 	return b.String()
 }
 
