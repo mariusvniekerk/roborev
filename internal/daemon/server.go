@@ -1952,11 +1952,12 @@ func (s *Server) handleFixJob(w http.ResponseWriter, r *http.Request) {
 	}
 	model := config.ResolveModelForWorkflow("", parentJob.RepoPath, cfg, "fix", reasoning)
 
-	// Resolve the git ref for the fix worktree. Compact jobs have no real
-	// git ref (only a display label), so fall back to branch then "HEAD".
+	// Resolve the git ref for the fix worktree.
+	// Range refs (sha..sha) and empty refs (compact jobs) are not valid for
+	// git worktree add, so fall back to branch then "HEAD".
 	// An explicit git_ref from the request (user-confirmed via TUI) takes precedence.
 	fixGitRef := req.GitRef
-	if fixGitRef == "" {
+	if fixGitRef == "" && !strings.Contains(parentJob.GitRef, "..") {
 		fixGitRef = parentJob.GitRef
 	}
 	if fixGitRef == "" {

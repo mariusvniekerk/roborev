@@ -3804,6 +3804,40 @@ func TestHandleFixJobStaleValidation(t *testing.T) {
 		}
 	})
 
+	t.Run("range parent uses branch instead of range ref for fix worktree", func(t *testing.T) {
+		// Range git refs like "sha1..sha2" are not valid for git worktree add.
+		// Fixing a range review should use the branch instead.
+		rangeJob, _ := db.EnqueueJob(storage.EnqueueOpts{
+			RepoID: repo.ID,
+			GitRef: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa..bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			Branch: "feature/foo",
+			Agent:  "test",
+		})
+		db.Exec(`UPDATE review_jobs SET status = 'running' WHERE id = ?`, rangeJob.ID)
+		db.CompleteJob(rangeJob.ID, "test", "prompt", "FAIL: issues found")
+
+		body := map[string]any{
+			"parent_job_id": rangeJob.ID,
+		}
+		req := testutil.MakeJSONRequest(t, http.MethodPost, "/api/job/fix", body)
+		w := httptest.NewRecorder()
+		server.handleFixJob(w, req)
+
+		if w.Code != http.StatusCreated {
+			t.Fatalf("Expected 201 for range parent fix, got %d: %s", w.Code, w.Body.String())
+		}
+
+		var fixJob storage.ReviewJob
+		testutil.DecodeJSON(t, w, &fixJob)
+
+		if strings.Contains(fixJob.GitRef, "..") {
+			t.Errorf("Fix job git_ref must not be a range, got %q", fixJob.GitRef)
+		}
+		if fixJob.GitRef != "feature/foo" {
+			t.Errorf("Expected fix job git_ref 'feature/foo' (branch fallback), got %q", fixJob.GitRef)
+		}
+	})
+
 	t.Run("stale job from different repo is rejected", func(t *testing.T) {
 		// Create a fix job in a different repo
 		repo2Dir := filepath.Join(tmpDir, "repo-fix-val-2")

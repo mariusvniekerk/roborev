@@ -1486,8 +1486,9 @@ func (m tuiModel) handleFixKey() (tea.Model, tea.Cmd) {
 	m.fixPromptText = ""
 	m.fixPromptFromView = m.currentView
 	m.fixPromptGitRef = ""
-	if job.GitRef == "" && job.Branch == "" {
-		// HEAD fallback — ask the user to confirm or correct the target ref.
+	isRange := strings.Contains(job.GitRef, "..")
+	if (job.GitRef == "" || isRange) && job.Branch == "" {
+		// No usable single ref — ask the user to confirm or correct the target.
 		m.fixPromptGitRef = "HEAD"
 		m.currentView = tuiViewFixGitRef
 	} else {
