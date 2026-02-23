@@ -18,8 +18,9 @@ func (db *DB) GetReviewByJobID(jobID int64) (*Review, error) {
 	var commitID sql.NullInt64
 	var commitSubject sql.NullString
 
+	var verdictBool sql.NullInt64
 	err := db.QueryRow(`
-		SELECT rv.id, rv.job_id, rv.agent, rv.prompt, rv.output, rv.created_at, rv.addressed, rv.uuid,
+		SELECT rv.id, rv.job_id, rv.agent, rv.prompt, rv.output, rv.created_at, rv.addressed, rv.uuid, rv.verdict_bool,
 		       j.id, j.repo_id, j.commit_id, j.git_ref, j.agent, j.reasoning, j.status, j.enqueued_at,
 		       j.started_at, j.finished_at, j.worker_id, j.error, j.model, j.job_type, j.review_type, j.patch_id,
 		       rp.root_path, rp.name, c.subject
@@ -28,7 +29,7 @@ func (db *DB) GetReviewByJobID(jobID int64) (*Review, error) {
 		JOIN repos rp ON rp.id = j.repo_id
 		LEFT JOIN commits c ON c.id = j.commit_id
 		WHERE rv.job_id = ?
-	`, jobID).Scan(&r.ID, &r.JobID, &r.Agent, &r.Prompt, &r.Output, &createdAt, &addressed, &reviewUUID,
+	`, jobID).Scan(&r.ID, &r.JobID, &r.Agent, &r.Prompt, &r.Output, &createdAt, &addressed, &reviewUUID, &verdictBool,
 		&job.ID, &job.RepoID, &commitID, &job.GitRef, &job.Agent, &job.Reasoning, &job.Status, &enqueuedAt,
 		&startedAt, &finishedAt, &workerID, &errMsg, &model, &jobTypeStr, &reviewTypeStr, &patchIDStr,
 		&job.RepoPath, &job.RepoName, &commitSubject)
@@ -75,11 +76,14 @@ func (db *DB) GetReviewByJobID(jobID int64) (*Review, error) {
 		job.Error = errMsg.String
 	}
 
-	// Compute verdict from review output (only if output exists, no error, and not a task job)
-	// Task jobs (run, analyze, custom) don't have PASS/FAIL verdicts
+	// Use stored verdict_bool if available, otherwise fall back to ParseVerdict
 	if r.Output != "" && job.Error == "" && !job.IsTaskJob() {
-		verdict := ParseVerdict(r.Output)
+		verdict := verdictFromBoolOrParse(verdictBool, r.Output)
 		job.Verdict = &verdict
+	}
+	if verdictBool.Valid {
+		v := int(verdictBool.Int64)
+		r.VerdictBool = &v
 	}
 
 	r.Job = &job
@@ -99,8 +103,9 @@ func (db *DB) GetReviewByCommitSHA(sha string) (*Review, error) {
 	var commitSubject sql.NullString
 
 	// Search by git_ref which contains the SHA for single commits
+	var verdictBool sql.NullInt64
 	err := db.QueryRow(`
-		SELECT rv.id, rv.job_id, rv.agent, rv.prompt, rv.output, rv.created_at, rv.addressed, rv.uuid,
+		SELECT rv.id, rv.job_id, rv.agent, rv.prompt, rv.output, rv.created_at, rv.addressed, rv.uuid, rv.verdict_bool,
 		       j.id, j.repo_id, j.commit_id, j.git_ref, j.agent, j.reasoning, j.status, j.enqueued_at,
 		       j.started_at, j.finished_at, j.worker_id, j.error, j.model, j.job_type, j.review_type, j.patch_id,
 		       rp.root_path, rp.name, c.subject
@@ -111,7 +116,7 @@ func (db *DB) GetReviewByCommitSHA(sha string) (*Review, error) {
 		WHERE j.git_ref = ?
 		ORDER BY rv.created_at DESC
 		LIMIT 1
-	`, sha).Scan(&r.ID, &r.JobID, &r.Agent, &r.Prompt, &r.Output, &createdAt, &addressed, &reviewUUID,
+	`, sha).Scan(&r.ID, &r.JobID, &r.Agent, &r.Prompt, &r.Output, &createdAt, &addressed, &reviewUUID, &verdictBool,
 		&job.ID, &job.RepoID, &commitID, &job.GitRef, &job.Agent, &job.Reasoning, &job.Status, &enqueuedAt,
 		&startedAt, &finishedAt, &workerID, &errMsg, &model, &jobTypeStr, &reviewTypeStr, &patchIDStr,
 		&job.RepoPath, &job.RepoName, &commitSubject)
@@ -159,11 +164,14 @@ func (db *DB) GetReviewByCommitSHA(sha string) (*Review, error) {
 		job.Error = errMsg.String
 	}
 
-	// Compute verdict from review output (only if output exists, no error, and not a task job)
-	// Task jobs (run, analyze, custom) don't have PASS/FAIL verdicts
+	// Use stored verdict_bool if available, otherwise fall back to ParseVerdict
 	if r.Output != "" && job.Error == "" && !job.IsTaskJob() {
-		verdict := ParseVerdict(r.Output)
+		verdict := verdictFromBoolOrParse(verdictBool, r.Output)
 		job.Verdict = &verdict
+	}
+	if verdictBool.Valid {
+		v := int(verdictBool.Int64)
+		r.VerdictBool = &v
 	}
 
 	r.Job = &job
@@ -374,7 +382,7 @@ func (db *DB) GetJobsWithReviewsByIDs(jobIDs []int64) (map[int64]JobWithReview, 
 
 	// Fetch reviews for these jobs
 	reviewQuery := fmt.Sprintf(`
-		SELECT rv.id, rv.job_id, rv.agent, rv.prompt, rv.output, rv.created_at, rv.addressed
+		SELECT rv.id, rv.job_id, rv.agent, rv.prompt, rv.output, rv.created_at, rv.addressed, rv.verdict_bool
 		FROM reviews rv
 		WHERE rv.job_id IN (%s)
 	`, inClause)
@@ -389,14 +397,24 @@ func (db *DB) GetJobsWithReviewsByIDs(jobIDs []int64) (map[int64]JobWithReview, 
 		var r Review
 		var createdAt string
 		var addressed int
-		if err := reviewRows.Scan(&r.ID, &r.JobID, &r.Agent, &r.Prompt, &r.Output, &createdAt, &addressed); err != nil {
+		var verdictBool sql.NullInt64
+		if err := reviewRows.Scan(&r.ID, &r.JobID, &r.Agent, &r.Prompt, &r.Output, &createdAt, &addressed, &verdictBool); err != nil {
 			return nil, fmt.Errorf("scan review: %w", err)
 		}
 		r.CreatedAt = parseSQLiteTime(createdAt)
 		r.Addressed = addressed != 0
+		if verdictBool.Valid {
+			v := int(verdictBool.Int64)
+			r.VerdictBool = &v
+		}
 
 		if entry, ok := result[r.JobID]; ok {
 			entry.Review = &r
+			// Populate verdict on the job, matching GetReviewByJobID/GetReviewByCommitSHA
+			if r.Output != "" && entry.Job.Error == "" && !entry.Job.IsTaskJob() {
+				verdict := verdictFromBoolOrParse(verdictBool, r.Output)
+				entry.Job.Verdict = &verdict
+			}
 			result[r.JobID] = entry
 		}
 	}

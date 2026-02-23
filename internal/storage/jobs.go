@@ -10,6 +10,27 @@ import (
 	"time"
 )
 
+// verdictToBool converts a ParseVerdict result ("P"/"F") to an integer
+// for storage in the verdict_bool column (1=pass, 0=fail).
+func verdictToBool(verdict string) int {
+	if verdict == "P" {
+		return 1
+	}
+	return 0
+}
+
+// verdictFromBoolOrParse returns the verdict string from a stored verdict_bool
+// value. If the value is NULL (legacy row), falls back to ParseVerdict(output).
+func verdictFromBoolOrParse(vb sql.NullInt64, output string) string {
+	if vb.Valid {
+		if vb.Int64 == 1 {
+			return "P"
+		}
+		return "F"
+	}
+	return ParseVerdict(output)
+}
+
 // ParseVerdict extracts P (pass) or F (fail) from review output.
 // Returns "P" only if a clear pass indicator appears at the start of a line.
 // Rejects lines containing caveats like "but", "however", "except".
@@ -1003,9 +1024,10 @@ func (db *DB) CompleteFixJob(jobID int64, agent, prompt, output, patch string) e
 		return nil // Job was canceled
 	}
 
+	verdictBool := verdictToBool(ParseVerdict(finalOutput))
 	_, err = conn.ExecContext(ctx,
-		`INSERT INTO reviews (job_id, agent, prompt, output, uuid, updated_by_machine_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		jobID, agent, prompt, finalOutput, reviewUUID, machineID, now)
+		`INSERT INTO reviews (job_id, agent, prompt, output, verdict_bool, uuid, updated_by_machine_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		jobID, agent, prompt, finalOutput, verdictBool, reviewUUID, machineID, now)
 	if err != nil {
 		return err
 	}
@@ -1079,8 +1101,9 @@ func (db *DB) CompleteJob(jobID int64, agent, prompt, output string) error {
 	}
 
 	// Insert review with sync columns
-	_, err = conn.ExecContext(ctx, `INSERT INTO reviews (job_id, agent, prompt, output, uuid, updated_by_machine_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		jobID, agent, prompt, finalOutput, reviewUUID, machineID, now)
+	verdictBool := verdictToBool(ParseVerdict(finalOutput))
+	_, err = conn.ExecContext(ctx, `INSERT INTO reviews (job_id, agent, prompt, output, verdict_bool, uuid, updated_by_machine_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		jobID, agent, prompt, finalOutput, verdictBool, reviewUUID, machineID, now)
 	if err != nil {
 		return err
 	}
