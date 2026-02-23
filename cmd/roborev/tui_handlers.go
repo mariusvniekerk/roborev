@@ -1530,6 +1530,7 @@ func (m tuiModel) handleReviewFixPanelKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.reviewFixPanelFocused = false
 		m.fixPromptText = ""
 		m.fixPromptJobID = 0
+		m.currentView = tuiViewTasks
 		return m, m.triggerFix(jobID, prompt)
 	case "backspace":
 		if len(m.fixPromptText) > 0 {
