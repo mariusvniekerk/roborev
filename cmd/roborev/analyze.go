@@ -45,6 +45,18 @@ func analyzeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "analyze <type> <files...>",
 		Short: "Run built-in analysis on files",
+		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+			if len(args) == 0 {
+				// Complete analysis type names
+				var completions []string
+				for _, t := range analyze.AllTypes {
+					completions = append(completions, t.Name+"\t"+t.Description)
+				}
+				return completions, cobra.ShellCompDirectiveNoFileComp
+			}
+			// After the type, complete file paths
+			return nil, cobra.ShellCompDirectiveDefault
+		},
 		Long: `Run a built-in analysis type on one or more files.
 
 This command provides predefined analysis prompts for common code review
