@@ -2993,7 +2993,11 @@ func (m tuiModel) renderReviewView() string {
 	if hasVerdict || review.Addressed {
 		headerHeight++ // Add 1 for verdict/addressed line
 	}
-	visibleLines := max(m.height-headerHeight, 1)
+	panelReserve := 0
+	if m.reviewFixPanelOpen {
+		panelReserve = 4 // top border + input line + bottom border + help line
+	}
+	visibleLines := max(m.height-headerHeight-panelReserve, 1)
 
 	// Clamp scroll position to valid range
 	maxScroll := max(len(lines)-visibleLines, 0)
@@ -3018,6 +3022,65 @@ func (m tuiModel) renderReviewView() string {
 	for linesWritten < visibleLines {
 		b.WriteString("\x1b[K\n")
 		linesWritten++
+	}
+
+	// Render inline fix panel when open
+	if m.reviewFixPanelOpen {
+		boxWidth := max(m.width-2, 20)
+		dashes := strings.Repeat("─", boxWidth-2)
+
+		if m.reviewFixPanelFocused {
+			// Focused: bright border with title prompt
+			title := "Fix: enter instructions (or leave blank for default)"
+			titleWidth := runewidth.StringWidth(title)
+			if titleWidth > boxWidth-4 {
+				title = runewidth.Truncate(title, boxWidth-4, "")
+				titleWidth = runewidth.StringWidth(title)
+			}
+			extraDashes := max(boxWidth-4-titleWidth, 0)
+			b.WriteString(fmt.Sprintf("┌─ %s %s┐\x1b[K\n", title, strings.Repeat("─", extraDashes)))
+
+			// Input line with cursor — show tail so cursor is always visible
+			inputDisplay := m.fixPromptText
+			maxInputWidth := boxWidth - 6 // "│ > " (4) + "_" (1) + " │" (2) = 7, leaving boxWidth-7 for text... actually: boxWidth-2 inner, minus "> " (2) minus "_" (1) = boxWidth-5
+			if runewidth.StringWidth(inputDisplay) > maxInputWidth {
+				runes := []rune(inputDisplay)
+				for runewidth.StringWidth(string(runes)) > maxInputWidth {
+					runes = runes[1:]
+				}
+				inputDisplay = string(runes)
+			}
+			inputPadding := max(maxInputWidth-runewidth.StringWidth(inputDisplay), 0)
+			b.WriteString(fmt.Sprintf("│ > %s_%s │\x1b[K\n", inputDisplay, strings.Repeat(" ", inputPadding)))
+
+			b.WriteString("└" + dashes + "┘\x1b[K\n")
+			b.WriteString(tuiHelpStyle.Render("tab: scroll review | enter: submit | esc: cancel"))
+			b.WriteString("\x1b[K\n")
+		} else {
+			// Unfocused: dimmed border with hint
+			title := "Fix (Tab to focus)"
+			titleWidth := runewidth.StringWidth(title)
+			extraDashes := max(boxWidth-4-titleWidth, 0)
+			b.WriteString(tuiStatusStyle.Render(fmt.Sprintf("┌─ %s %s┐", title, strings.Repeat("─", extraDashes))))
+			b.WriteString("\x1b[K\n")
+
+			inputDisplay := m.fixPromptText
+			if inputDisplay == "" {
+				inputDisplay = "(blank = default)"
+			}
+			maxContentWidth := boxWidth - 4 // "│  " (3) + "  │" (3) = 6, so inner = boxWidth-6... actually "│  " is 3 chars, "  │" is 3 chars
+			if runewidth.StringWidth(inputDisplay) > maxContentWidth {
+				inputDisplay = runewidth.Truncate(inputDisplay, maxContentWidth, "")
+			}
+			contentPadding := max(maxContentWidth-runewidth.StringWidth(inputDisplay), 0)
+			b.WriteString(tuiStatusStyle.Render(fmt.Sprintf("│  %s%s  │", inputDisplay, strings.Repeat(" ", contentPadding))))
+			b.WriteString("\x1b[K\n")
+
+			b.WriteString(tuiStatusStyle.Render("└" + dashes + "┘"))
+			b.WriteString("\x1b[K\n")
+			b.WriteString(tuiHelpStyle.Render("F: fix | tab: focus fix panel"))
+			b.WriteString("\x1b[K\n")
+		}
 	}
 
 	// Status line: version mismatch (persistent) takes priority, then flash message, then scroll indicator
