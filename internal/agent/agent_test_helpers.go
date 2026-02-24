@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // expectedAgents is the single source of truth for registered agent names.
@@ -72,10 +74,18 @@ func writeTempCommand(t *testing.T, script string) string {
 	if err := f.Close(); err != nil {
 		t.Fatalf("write temp command close: %v", err)
 	}
-	// Brief yield after closing the write FD to let the kernel fully
-	// release the inode write reference. Without this, exec can race
-	// and hit ETXTBSY on Linux under the -race detector.
-	runtime.Gosched()
+	// On Linux (especially under -race), exec can race against the
+	// kernel releasing the inode write reference and hit ETXTBSY.
+	// Verify the script is execable by attempting a no-op exec.
+	// Retry with backoff if we hit the race.
+	for i := range 10 {
+		out, err := exec.Command(path, "--help-probe-etxtbsy").CombinedOutput()
+		_ = out
+		if err == nil || !strings.Contains(err.Error(), "text file busy") {
+			break
+		}
+		time.Sleep(time.Duration(1<<i) * time.Millisecond)
+	}
 	return path
 }
 
