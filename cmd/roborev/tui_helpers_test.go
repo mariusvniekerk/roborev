@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour/styles"
+	"github.com/mattn/go-runewidth"
 	"github.com/roborev-dev/roborev/internal/storage"
 )
 
@@ -554,9 +555,10 @@ func TestRenderHelpTableLinesWithinWidth(t *testing.T) {
 				// No rendered line should exceed the target width.
 				for i, line := range lines {
 					visible := testANSIRegex.ReplaceAllString(line, "")
-					if len(visible) > width {
+					visW := runewidth.StringWidth(visible)
+					if visW > width {
 						t.Errorf("line %d width %d > target %d: %q",
-							i, len(visible), width, visible)
+							i, visW, width, visible)
 					}
 				}
 			})
