@@ -78,10 +78,9 @@ var (
 )
 
 // renderHelpTable renders help items as a lipgloss table with internal vertical
-// borders only. Each row is a list of "key: description" strings. If all items
-// fit in one row within the given width, a single row is used; otherwise items
-// are spread across multiple rows.
-func renderHelpTable(rows [][]string, width int) string {
+// borders only. Each row is a list of "key: description" strings. Columns are
+// auto-sized to fit their content without truncation.
+func renderHelpTable(rows [][]string) string {
 	if len(rows) == 0 {
 		return ""
 	}
@@ -132,10 +131,6 @@ func renderHelpTable(rows [][]string, width int) string {
 		}).
 		Wrap(false).
 		Rows(rows...)
-
-	if width > 0 {
-		t = t.Width(width)
-	}
 
 	return t.Render()
 }
@@ -2732,7 +2727,7 @@ func (m tuiModel) renderQueueView() string {
 	b.WriteString("\x1b[K\n") // Clear to end of line
 
 	// Help
-	b.WriteString(renderHelpTable(queueHelpRows, m.width))
+	b.WriteString(renderHelpTable(queueHelpRows))
 	b.WriteString("\x1b[K") // Clear to end of line (no newline at end)
 	b.WriteString("\x1b[J") // Clear to end of screen to prevent artifacts
 
@@ -3179,7 +3174,7 @@ func (m tuiModel) renderReviewView() string {
 	}
 	b.WriteString("\x1b[K\n") // Clear status line
 
-	b.WriteString(renderHelpTable(reviewHelpRows, m.width))
+	b.WriteString(renderHelpTable(reviewHelpRows))
 	b.WriteString("\x1b[K")
 	b.WriteString("\x1b[J") // Clear to end of screen to prevent artifacts
 
@@ -3261,7 +3256,7 @@ func (m tuiModel) renderPromptView() string {
 
 	b.WriteString(renderHelpTable([][]string{
 		{"↑/↓: scroll", "←/→: prev/next", "p: toggle prompt/review", "?: commands", "esc: back"},
-	}, m.width))
+	}))
 	b.WriteString("\x1b[K") // Clear help line
 	b.WriteString("\x1b[J") // Clear to end of screen to prevent artifacts
 
@@ -3384,7 +3379,7 @@ func (m tuiModel) renderFilterView() string {
 
 	b.WriteString(renderHelpTable([][]string{
 		{"up/down: navigate", "right/left: expand/collapse", "enter: select", "esc: cancel", "type to search"},
-	}, m.width))
+	}))
 	b.WriteString("\x1b[K")
 	b.WriteString("\x1b[J")
 
@@ -3455,7 +3450,7 @@ func (m tuiModel) renderRespondView() string {
 
 	b.WriteString(renderHelpTable([][]string{
 		{"enter: submit", "esc: cancel"},
-	}, m.width))
+	}))
 	b.WriteString("\x1b[K")
 	b.WriteString("\x1b[J") // Clear to end of screen to prevent artifacts
 
@@ -3537,7 +3532,7 @@ func (m tuiModel) renderCommitMsgView() string {
 
 	b.WriteString(renderHelpTable([][]string{
 		{"up/down: scroll", "esc/q: back"},
-	}, m.width))
+	}))
 	b.WriteString("\x1b[K") // Clear help line
 	b.WriteString("\x1b[J") // Clear to end of screen to prevent artifacts
 
@@ -3639,7 +3634,7 @@ func (m tuiModel) renderLogView() string {
 		helpRow = append(helpRow, "x: cancel")
 	}
 	helpRow = append(helpRow, "esc/q: back")
-	b.WriteString(renderHelpTable([][]string{helpRow}, m.width))
+	b.WriteString(renderHelpTable([][]string{helpRow}))
 	b.WriteString("\x1b[K")
 	b.WriteString("\x1b[J") // Clear to end of screen
 
@@ -3801,7 +3796,7 @@ func (m tuiModel) renderHelpView() string {
 
 	b.WriteString(renderHelpTable([][]string{
 		{"↑/↓: scroll", "esc/q/?: close"},
-	}, m.width))
+	}))
 	b.WriteString("\x1b[K")
 	b.WriteString("\x1b[J") // Clear to end of screen
 
@@ -3855,7 +3850,7 @@ func (m tuiModel) renderTasksView() string {
 		b.WriteString("\n")
 		b.WriteString(renderHelpTable([][]string{
 			{"T: back to queue", "F: fix review", "q: quit"},
-		}, m.width))
+		}))
 		b.WriteString("\x1b[K\x1b[J")
 		return b.String()
 	}
@@ -3949,7 +3944,7 @@ func (m tuiModel) renderTasksView() string {
 	// Help
 	b.WriteString(renderHelpTable([][]string{
 		{"enter: view", "p: patch", "A: apply", "l: log", "x: cancel", "r: refresh", "?: help", "T/esc: back"},
-	}, m.width))
+	}))
 	b.WriteString("\x1b[K\x1b[J")
 
 	return b.String()
@@ -4062,7 +4057,7 @@ func (m tuiModel) renderPatchView() string {
 
 	b.WriteString(renderHelpTable([][]string{
 		{"j/k/up/down: scroll", "esc: back to tasks"},
-	}, m.width))
+	}))
 	b.WriteString("\x1b[K\x1b[J")
 	return b.String()
 }
