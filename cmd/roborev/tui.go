@@ -130,6 +130,7 @@ func renderHelpTable(rows [][]string, width int) string {
 				PaddingLeft(1).
 				PaddingRight(1)
 		}).
+		Wrap(false).
 		Rows(rows...)
 
 	if width > 0 {
