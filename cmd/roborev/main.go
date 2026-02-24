@@ -37,7 +37,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-
 var (
 	serverAddr string
 	verbose    bool
