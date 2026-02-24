@@ -686,18 +686,42 @@ func WorktreePathForBranch(repoPath, branch string) (string, bool, error) {
 	//   worktree /path/to/dir
 	//   HEAD <sha>
 	//   branch refs/heads/<name>
+	//   [prunable ...]
 	//   <blank line>
-	var currentPath string
+	//
+	// We collect path+branch pairs, then verify the path exists before
+	// returning it. This avoids returning stale/prunable worktree paths.
+	type wtEntry struct {
+		path, branch string
+	}
+	var entries []wtEntry
+	var currentPath, currentBranch string
 	for line := range strings.SplitSeq(string(out), "\n") {
 		line = strings.TrimSpace(line)
 		if path, ok := strings.CutPrefix(line, "worktree "); ok {
 			currentPath = path
+			currentBranch = ""
 		} else if ref, ok := strings.CutPrefix(line, "branch "); ok {
-			// ref is like "refs/heads/feature-x", branch might be "feature-x"
-			wtBranch := strings.TrimPrefix(ref, "refs/heads/")
-			if wtBranch == branch && currentPath != "" {
-				return currentPath, true, nil
+			currentBranch = strings.TrimPrefix(ref, "refs/heads/")
+		} else if line == "" && currentPath != "" {
+			if currentBranch != "" {
+				entries = append(entries, wtEntry{currentPath, currentBranch})
 			}
+			currentPath = ""
+			currentBranch = ""
+		}
+	}
+	// Handle last block if output doesn't end with a blank line.
+	if currentPath != "" && currentBranch != "" {
+		entries = append(entries, wtEntry{currentPath, currentBranch})
+	}
+
+	for _, e := range entries {
+		if e.branch == branch {
+			if _, err := os.Stat(e.path); err == nil {
+				return e.path, true, nil
+			}
+			// Path doesn't exist (stale/prunable worktree) — skip it.
 		}
 	}
 	return repoPath, false, nil
