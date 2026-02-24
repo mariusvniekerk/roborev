@@ -414,7 +414,7 @@ type tuiApplyPatchResultMsg struct {
 	jobID        int64
 	parentJobID  int64 // Parent review job (to mark addressed on success)
 	success      bool
-	commitFailed bool   // True only when patch applied but git commit failed (working tree is dirty)
+	commitFailed bool // True only when patch applied but git commit failed (working tree is dirty)
 	err          error
 	rebase       bool   // True if patch didn't apply and needs rebase
 	needWorktree bool   // True if branch is not checked out and needs a worktree
@@ -4022,6 +4022,7 @@ func (m tuiModel) renderWorktreeConfirmView() string {
 
 	return b.String()
 }
+
 // fetchJobByID fetches a single job by ID from the daemon API.
 func (m tuiModel) fetchJobByID(jobID int64) (*storage.ReviewJob, error) {
 	var result struct {
@@ -4139,7 +4140,7 @@ func (m tuiModel) applyFixPatchInWorktree(jobID int64) tea.Cmd {
 		result := m.checkApplyCommitPatch(jobID, jobDetail, wtDir, patch)
 
 		// Keep the worktree if patch was applied but commit failed, so the user can recover.
-		if result.success && result.err != nil {
+		if result.commitFailed {
 			result.worktreeDir = wtDir
 		} else {
 			removeWorktree()
@@ -4225,7 +4226,7 @@ func (m tuiModel) checkApplyCommitPatch(jobID int64, jobDetail *storage.ReviewJo
 	}
 	if err := commitPatch(targetDir, patch, commitMsg); err != nil {
 		return tuiApplyPatchResultMsg{jobID: jobID, parentJobID: parentJobID, success: true,
-			err: fmt.Errorf("patch applied but commit failed: %w", err)}
+			commitFailed: true, err: fmt.Errorf("patch applied but commit failed: %w", err)}
 	}
 
 	// Mark the fix job as applied on the server
