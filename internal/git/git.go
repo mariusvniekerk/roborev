@@ -687,12 +687,11 @@ func WorktreePathForBranch(repoPath, branch string) (path string, checkedOut boo
 	//   branch refs/heads/<name>
 	//   <blank line>
 	var currentPath string
-	for _, line := range strings.Split(string(out), "\n") {
+	for line := range strings.SplitSeq(string(out), "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "worktree ") {
-			currentPath = strings.TrimPrefix(line, "worktree ")
-		} else if strings.HasPrefix(line, "branch ") {
-			ref := strings.TrimPrefix(line, "branch ")
+		if path, ok := strings.CutPrefix(line, "worktree "); ok {
+			currentPath = path
+		} else if ref, ok := strings.CutPrefix(line, "branch "); ok {
 			// ref is like "refs/heads/feature-x", branch might be "feature-x"
 			wtBranch := strings.TrimPrefix(ref, "refs/heads/")
 			if wtBranch == branch && currentPath != "" {

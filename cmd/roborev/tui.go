@@ -4126,7 +4126,7 @@ func (m tuiModel) applyFixPatchInWorktree(jobID int64) tea.Cmd {
 		removeWorktree := func() {
 			if err := exec.Command("git", "-C", jobDetail.RepoPath, "worktree", "remove", "--force", wtDir).Run(); err != nil {
 				os.RemoveAll(wtDir)
-				exec.Command("git", "-C", jobDetail.RepoPath, "worktree", "prune").Run()
+				_ = exec.Command("git", "-C", jobDetail.RepoPath, "worktree", "prune").Run()
 			}
 		}
 
