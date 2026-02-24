@@ -4210,14 +4210,41 @@ func (m tuiModel) applyFixPatchInWorktree(jobID int64) tea.Cmd {
 			return tuiApplyPatchResultMsg{jobID: jobID, err: fmt.Errorf("create temp dir: %w", err)}
 		}
 		defer func() {
-			exec.Command("git", "-C", jobDetail.RepoPath, "worktree", "remove", "--force", wtDir).Run()
-			os.RemoveAll(wtDir)
+			if err := exec.Command("git", "-C", jobDetail.RepoPath, "worktree", "remove", "--force", wtDir).Run(); err != nil {
+				os.RemoveAll(wtDir)
+				// Prune stale worktree entries that reference deleted directories
+				exec.Command("git", "-C", jobDetail.RepoPath, "worktree", "prune").Run()
+			}
 		}()
 
 		cmd := exec.Command("git", "-C", jobDetail.RepoPath, "worktree", "add", wtDir, jobDetail.Branch)
 		if out, cmdErr := cmd.CombinedOutput(); cmdErr != nil {
 			return tuiApplyPatchResultMsg{jobID: jobID,
 				err: fmt.Errorf("git worktree add: %w: %s", cmdErr, out)}
+		}
+
+		// Check for uncommitted changes in the worktree (e.g. from a previous interrupted operation)
+		patchedFiles, pfErr := patchFiles(patch)
+		if pfErr != nil {
+			return tuiApplyPatchResultMsg{jobID: jobID, err: pfErr}
+		}
+		dirty, dirtyErr := dirtyPatchFiles(wtDir, patchedFiles)
+		if dirtyErr != nil {
+			return tuiApplyPatchResultMsg{jobID: jobID,
+				err: fmt.Errorf("checking dirty files: %w", dirtyErr)}
+		}
+		if len(dirty) > 0 {
+			return tuiApplyPatchResultMsg{jobID: jobID,
+				err: fmt.Errorf("uncommitted changes in patch files: %s — stash or commit first", strings.Join(dirty, ", "))}
+		}
+
+		// Dry-run check — trigger rebase on conflicts
+		if err := worktree.CheckPatch(wtDir, patch); err != nil {
+			var conflictErr *worktree.PatchConflictError
+			if errors.As(err, &conflictErr) {
+				return tuiApplyPatchResultMsg{jobID: jobID, rebase: true, err: err}
+			}
+			return tuiApplyPatchResultMsg{jobID: jobID, err: err}
 		}
 
 		// Apply and commit in the worktree
