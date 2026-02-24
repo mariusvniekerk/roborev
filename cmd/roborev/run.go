@@ -74,6 +74,8 @@ Examples:
 	cmd.Flags().BoolVar(&agentic, "agentic", false, "enable agentic mode (allow file edits and commands)")
 	cmd.Flags().BoolVar(&agentic, "yolo", false, "alias for --agentic")
 	cmd.Flags().StringVar(&label, "label", "", "custom label to display in TUI (default: run)")
+	registerAgentCompletion(cmd)
+	registerReasoningCompletion(cmd)
 
 	return cmd
 }

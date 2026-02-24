@@ -37,6 +37,20 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// registerAgentCompletion registers shell completion for the --agent flag.
+func registerAgentCompletion(cmd *cobra.Command) {
+	_ = cmd.RegisterFlagCompletionFunc("agent", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+		return agent.Available(), cobra.ShellCompDirectiveNoFileComp
+	})
+}
+
+// registerReasoningCompletion registers shell completion for the --reasoning flag.
+func registerReasoningCompletion(cmd *cobra.Command) {
+	_ = cmd.RegisterFlagCompletionFunc("reasoning", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+		return []string{"fast", "standard", "thorough"}, cobra.ShellCompDirectiveNoFileComp
+	})
+}
+
 var (
 	serverAddr string
 	verbose    bool
@@ -546,6 +560,7 @@ func initCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&agent, "agent", "", "default agent (codex, claude-code, gemini, copilot, opencode, cursor)")
 	cmd.Flags().BoolVar(&noDaemon, "no-daemon", false, "skip auto-starting daemon (useful with systemd/launchd)")
+	registerAgentCompletion(cmd)
 
 	return cmd
 }
@@ -1085,6 +1100,8 @@ Examples:
 	cmd.Flags().StringVar(&since, "since", "", "review commits since this commit (exclusive, like git's .. range)")
 	cmd.Flags().BoolVar(&local, "local", false, "run review locally without daemon (streams output to console)")
 	cmd.Flags().StringVar(&reviewType, "type", "", "review type (security, design) — changes system prompt")
+	registerAgentCompletion(cmd)
+	registerReasoningCompletion(cmd)
 
 	return cmd
 }

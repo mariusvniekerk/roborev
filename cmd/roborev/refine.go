@@ -140,6 +140,8 @@ Use --all-branches to discover and refine all branches with failed reviews.`,
 	cmd.Flags().BoolVar(&opts.allBranches, "all-branches", false, "discover and refine all branches with failed reviews")
 	cmd.Flags().BoolVar(&opts.list, "list", false, "list reviews that would be refined without running")
 	cmd.Flags().BoolVar(&opts.newestFirst, "newest-first", false, "process branches/jobs newest first (requires --all-branches or --list)")
+	registerAgentCompletion(cmd)
+	registerReasoningCompletion(cmd)
 
 	return cmd
 }

@@ -183,6 +183,8 @@ Examples:
 	cmd.Flags().BoolVar(&newestFirst, "newest-first", false, "process jobs newest first instead of oldest first (requires --unaddressed)")
 	cmd.Flags().BoolVar(&batch, "batch", false, "concatenate reviews into a single prompt for the agent")
 	cmd.Flags().BoolVar(&list, "list", false, "list unaddressed jobs without fixing (implies --unaddressed)")
+	registerAgentCompletion(cmd)
+	registerReasoningCompletion(cmd)
 
 	return cmd
 }

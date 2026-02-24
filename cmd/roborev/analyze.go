@@ -169,6 +169,8 @@ To fix an existing analysis job, use: roborev fix <job_id>
 	cmd.Flags().StringVar(&branch, "branch", "", "analyze files changed on branch (default: current branch, or specify name)")
 	cmd.Flags().Lookup("branch").NoOptDefVal = "HEAD"
 	cmd.Flags().StringVar(&baseBranch, "base", "", "base branch for --branch comparison (default: auto-detect)")
+	registerAgentCompletion(cmd)
+	registerReasoningCompletion(cmd)
 
 	return cmd
 }
