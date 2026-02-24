@@ -77,12 +77,15 @@ func writeTempCommand(t *testing.T, script string) string {
 	// On Linux (especially under -race), exec can race against the
 	// kernel releasing the inode write reference and hit ETXTBSY.
 	// Verify the script is execable by attempting a no-op exec.
-	// Retry with backoff if we hit the race.
-	for i := range 10 {
-		out, err := exec.Command(path, "--help-probe-etxtbsy").CombinedOutput()
-		_ = out
+	// Retry with exponential backoff if we hit the race.
+	const maxRetries = 10
+	for i := range maxRetries {
+		_, err = exec.Command(path, "--help-probe-etxtbsy").CombinedOutput()
 		if err == nil || !strings.Contains(err.Error(), "text file busy") {
 			break
+		}
+		if i == maxRetries-1 {
+			t.Fatalf("write temp command: ETXTBSY persisted after %d retries", maxRetries)
 		}
 		time.Sleep(time.Duration(1<<i) * time.Millisecond)
 	}
