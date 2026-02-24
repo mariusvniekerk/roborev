@@ -110,10 +110,8 @@ const (
 	tuiViewCommitMsg
 	tuiViewHelp
 	tuiViewLog
-	tuiViewTasks     // Background fix tasks view
-	tuiViewFixPrompt // Fix prompt confirmation modal
-	tuiViewFixGitRef // Git ref confirmation modal (HEAD fallback for compact jobs)
-	tuiViewPatch     // Patch viewer for fix jobs
+	tuiViewTasks // Background fix tasks view
+	tuiViewPatch // Patch viewer for fix jobs
 )
 
 // queuePrefetchBuffer is the number of extra rows to fetch beyond what's visible,
@@ -267,16 +265,19 @@ type tuiModel struct {
 	reviewFromView tuiView // View to return to when exiting review (queue or tasks)
 
 	// Fix task state
-	fixJobs           []storage.ReviewJob // Fix jobs for tasks view
-	fixSelectedIdx    int                 // Selected index in tasks view
-	fixPromptText     string              // Editable fix prompt text
-	fixPromptJobID    int64               // Parent job ID for fix prompt modal
-	fixPromptFromView tuiView             // View to return to after fix prompt closes
-	fixPromptGitRef   string              // Editable git ref for HEAD-fallback confirmation
-	fixShowHelp       bool                // Show help overlay in tasks view
-	patchText         string              // Current patch text for patch viewer
-	patchScroll       int                 // Scroll offset in patch viewer
-	patchJobID        int64               // Job ID of the patch being viewed
+	fixJobs        []storage.ReviewJob // Fix jobs for tasks view
+	fixSelectedIdx int                 // Selected index in tasks view
+	fixPromptText  string              // Editable fix prompt text
+	fixPromptJobID int64               // Parent job ID for fix prompt modal
+	fixShowHelp    bool                // Show help overlay in tasks view
+	patchText      string              // Current patch text for patch viewer
+	patchScroll    int                 // Scroll offset in patch viewer
+	patchJobID     int64               // Job ID of the patch being viewed
+
+	// Inline fix panel (review view)
+	reviewFixPanelOpen    bool // true when fix panel is visible in review view
+	reviewFixPanelFocused bool // true when keyboard focus is on the fix panel
+	reviewFixPanelPending bool // true when 'F' from queue; panel opens on review load
 }
 
 // pendingState tracks a pending addressed toggle with sequence number
@@ -406,11 +407,12 @@ type tuiFixTriggerResultMsg struct {
 }
 
 type tuiApplyPatchResultMsg struct {
-	jobID       int64
-	parentJobID int64 // Parent review job (to mark addressed on success)
-	success     bool
-	err         error
-	rebase      bool // True if patch didn't apply and needs rebase
+	jobID        int64
+	parentJobID  int64 // Parent review job (to mark addressed on success)
+	success      bool
+	commitFailed bool // True only when patch applied but git commit failed (working tree is dirty)
+	err          error
+	rebase       bool // True if patch didn't apply and needs rebase
 }
 
 type tuiPatchMsg struct {
@@ -1993,6 +1995,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tuiReviewMsg:
 		if msg.jobID != m.selectedJobID {
+			// Stale fetch -- clear pending fix panel if it was
+			// for this (now-discarded) review.
+			if m.reviewFixPanelPending && m.fixPromptJobID == msg.jobID {
+				m.reviewFixPanelPending = false
+				m.fixPromptJobID = 0
+			}
 			return m, nil
 		}
 		m.consecutiveErrors = 0
@@ -2001,6 +2009,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.currentBranch = msg.branchName
 		m.currentView = tuiViewReview
 		m.reviewScroll = 0
+		if m.reviewFixPanelPending && m.fixPromptJobID == msg.review.JobID {
+			m.reviewFixPanelPending = false
+			m.reviewFixPanelOpen = true
+			m.reviewFixPanelFocused = true
+		}
 
 	case tuiPromptMsg:
 		if msg.jobID != m.selectedJobID {
@@ -2372,8 +2385,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.flashExpiresAt = time.Now().Add(5 * time.Second)
 			m.flashView = tuiViewTasks
 			return m, tea.Batch(m.triggerRebase(msg.jobID), m.fetchFixJobs())
-		} else if msg.success && msg.err != nil {
-			// Patch applied but commit failed
+		} else if msg.commitFailed {
+			// Patch applied to working tree but commit failed — working tree is dirty
 			m.flashMessage = fmt.Sprintf("Job #%d: %v", msg.jobID, msg.err)
 			m.flashExpiresAt = time.Now().Add(5 * time.Second)
 			m.flashView = tuiViewTasks
@@ -2416,12 +2429,7 @@ func (m tuiModel) View() string {
 	if m.currentView == tuiViewTasks {
 		return m.renderTasksView()
 	}
-	if m.currentView == tuiViewFixPrompt {
-		return m.renderFixPromptView()
-	}
-	if m.currentView == tuiViewFixGitRef {
-		return m.renderFixGitRefView()
-	}
+
 	if m.currentView == tuiViewPatch {
 		return m.renderPatchView()
 	}
@@ -2967,7 +2975,7 @@ func (m tuiModel) renderReviewView() string {
 	}
 
 	// Help text wraps at narrow terminals
-	const helpLine1 = "p: prompt | c: comment | m: commit msg | a: addressed | y: copy"
+	const helpLine1 = "p: prompt | c: comment | m: commit msg | a: addressed | y: copy | F: fix"
 	const helpLine2 = "↑/↓: scroll | ←/→: prev/next | ?: commands | esc: back"
 	helpLines := 2
 	if m.width > 0 {
@@ -2991,7 +2999,11 @@ func (m tuiModel) renderReviewView() string {
 	if hasVerdict || review.Addressed {
 		headerHeight++ // Add 1 for verdict/addressed line
 	}
-	visibleLines := max(m.height-headerHeight, 1)
+	panelReserve := 0
+	if m.reviewFixPanelOpen {
+		panelReserve = 5 // label + top border + input line + bottom border + help line
+	}
+	visibleLines := max(m.height-headerHeight-panelReserve, 1)
 
 	// Clamp scroll position to valid range
 	maxScroll := max(len(lines)-visibleLines, 0)
@@ -3018,6 +3030,67 @@ func (m tuiModel) renderReviewView() string {
 		linesWritten++
 	}
 
+	// Render inline fix panel when open
+	if m.reviewFixPanelOpen {
+		innerWidth := max(m.width-4, 18) // box inner width; total visual width = innerWidth+2 (borders)
+
+		if m.reviewFixPanelFocused {
+			// Label line
+			label := "Fix: enter instructions (or leave blank for default)"
+			if runewidth.StringWidth(label) > m.width-1 {
+				label = runewidth.Truncate(label, m.width-1, "")
+			}
+			b.WriteString(label)
+			b.WriteString("\x1b[K\n")
+
+			// Input content — show tail so cursor always visible
+			inputDisplay := m.fixPromptText
+			maxInputLen := innerWidth - 3 // " > " (3) + "_" (1) = 4 overhead, but Width handles right padding
+			if runewidth.StringWidth(inputDisplay) > maxInputLen {
+				runes := []rune(inputDisplay)
+				for runewidth.StringWidth(string(runes)) > maxInputLen {
+					runes = runes[1:]
+				}
+				inputDisplay = string(runes)
+			}
+			content := fmt.Sprintf(" > %s_", inputDisplay)
+			boxStyle := lipgloss.NewStyle().
+				Border(lipgloss.NormalBorder()).
+				BorderForeground(lipgloss.AdaptiveColor{Light: "125", Dark: "205"}). // magenta/pink (active)
+				Width(innerWidth)
+			for line := range strings.SplitSeq(strings.TrimRight(boxStyle.Render(content), "\n"), "\n") {
+				b.WriteString(line)
+				b.WriteString("\x1b[K\n")
+			}
+			b.WriteString(tuiHelpStyle.Render("tab: scroll review | enter: submit | esc: cancel"))
+			b.WriteString("\x1b[K\n")
+		} else {
+			// Label line (dimmed)
+			b.WriteString(tuiStatusStyle.Render("Fix (Tab to focus)"))
+			b.WriteString("\x1b[K\n")
+
+			inputDisplay := m.fixPromptText
+			if inputDisplay == "" {
+				inputDisplay = "(blank = default)"
+			}
+			if runewidth.StringWidth(inputDisplay) > innerWidth-2 {
+				inputDisplay = runewidth.Truncate(inputDisplay, innerWidth-2, "")
+			}
+			content := " " + inputDisplay
+			boxStyle := lipgloss.NewStyle().
+				Border(lipgloss.NormalBorder()).
+				BorderForeground(lipgloss.AdaptiveColor{Light: "242", Dark: "246"}). // gray (inactive)
+				Foreground(lipgloss.AdaptiveColor{Light: "242", Dark: "246"}).
+				Width(innerWidth)
+			for line := range strings.SplitSeq(strings.TrimRight(boxStyle.Render(content), "\n"), "\n") {
+				b.WriteString(tuiStatusStyle.Render(line))
+				b.WriteString("\x1b[K\n")
+			}
+			b.WriteString(tuiHelpStyle.Render("F: fix | tab: focus fix panel"))
+			b.WriteString("\x1b[K\n")
+		}
+	}
+
 	// Status line: version mismatch (persistent) takes priority, then flash message, then scroll indicator
 	if m.versionMismatch {
 		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "124", Dark: "196"}).Bold(true) // Red
@@ -3031,9 +3104,15 @@ func (m tuiModel) renderReviewView() string {
 	}
 	b.WriteString("\x1b[K\n") // Clear status line
 
-	b.WriteString(tuiHelpStyle.Render(helpLine1))
-	b.WriteString("\x1b[K\n")
-	b.WriteString(tuiHelpStyle.Render(helpLine2))
+	if m.reviewFixPanelOpen && m.reviewFixPanelFocused {
+		b.WriteString(tuiStatusStyle.Render(helpLine1))
+		b.WriteString("\x1b[K\n")
+		b.WriteString(tuiStatusStyle.Render(helpLine2))
+	} else {
+		b.WriteString(tuiHelpStyle.Render(helpLine1))
+		b.WriteString("\x1b[K\n")
+		b.WriteString(tuiHelpStyle.Render(helpLine2))
+	}
 	b.WriteString("\x1b[K")
 	b.WriteString("\x1b[J") // Clear to end of screen to prevent artifacts
 
@@ -3542,6 +3621,7 @@ func helpLines() []string {
 				{"c", "Add comment"},
 				{"y", "Copy review to clipboard"},
 				{"m", "View commit message"},
+				{"F", "Trigger fix (opens inline panel)"},
 				{"esc/q", "Back to queue"},
 			},
 		},
@@ -3906,54 +3986,6 @@ func (m tuiModel) renderPatchView() string {
 	return b.String()
 }
 
-// renderFixPromptView renders the fix prompt confirmation modal.
-func (m tuiModel) renderFixPromptView() string {
-	var b strings.Builder
-
-	b.WriteString(tuiTitleStyle.Render(fmt.Sprintf("Fix Review #%d", m.fixPromptJobID)))
-	b.WriteString("\x1b[K\n\n")
-
-	b.WriteString("  A background fix agent will address the review findings.\n")
-	b.WriteString("  Optionally enter custom instructions (or press enter for default):\n\n")
-
-	// Show prompt input
-	promptDisplay := m.fixPromptText
-	if promptDisplay == "" {
-		promptDisplay = "(default: fix all findings from the review)"
-	}
-	fmt.Fprintf(&b, "  > %s_\n", promptDisplay)
-	b.WriteString("\n")
-
-	b.WriteString(tuiHelpStyle.Render("enter: start fix | esc: cancel"))
-	b.WriteString("\x1b[K\x1b[J")
-
-	return b.String()
-}
-
-// renderFixGitRefView renders the git ref confirmation modal shown when a fix job
-// cannot determine the target ref automatically (e.g. compact jobs with no branch).
-func (m tuiModel) renderFixGitRefView() string {
-	var b strings.Builder
-
-	b.WriteString(tuiTitleStyle.Render(fmt.Sprintf("Fix Review #%d", m.fixPromptJobID)))
-	b.WriteString("\x1b[K\n\n")
-
-	b.WriteString("  Could not determine the target branch for this review.\n")
-	b.WriteString("  Enter a branch name or commit SHA to apply the fix against:\n\n")
-
-	refDisplay := m.fixPromptGitRef
-	if refDisplay == "" {
-		refDisplay = "HEAD"
-	}
-	fmt.Fprintf(&b, "  > %s_\n", refDisplay)
-	b.WriteString("\n")
-
-	b.WriteString(tuiHelpStyle.Render("enter: confirm | esc: cancel"))
-	b.WriteString("\x1b[K\x1b[J")
-
-	return b.String()
-}
-
 // fetchJobByID fetches a single job by ID from the daemon API.
 func (m tuiModel) fetchJobByID(jobID int64) (*storage.ReviewJob, error) {
 	var result struct {
@@ -4087,7 +4119,7 @@ func (m tuiModel) applyFixPatch(jobID int64) tea.Cmd {
 		}
 		if err := commitPatch(jobDetail.RepoPath, patch, commitMsg); err != nil {
 			return tuiApplyPatchResultMsg{jobID: jobID, parentJobID: parentJobID, success: true,
-				err: fmt.Errorf("patch applied but commit failed: %w", err)}
+				commitFailed: true, err: fmt.Errorf("patch applied but commit failed: %w", err)}
 		}
 
 		// Mark the fix job as applied on the server

@@ -15,6 +15,11 @@ import (
 
 // handleKeyMsg dispatches key events to view-specific handlers.
 func (m tuiModel) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Fix panel captures input when focused in review view
+	if m.currentView == tuiViewReview && m.reviewFixPanelOpen && m.reviewFixPanelFocused {
+		return m.handleReviewFixPanelKey(msg)
+	}
+
 	// Modal views that capture most keys for typing
 	switch m.currentView {
 	case tuiViewComment:
@@ -23,10 +28,6 @@ func (m tuiModel) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleFilterKey(msg)
 	case tuiViewLog:
 		return m.handleLogKey(msg)
-	case tuiViewFixGitRef:
-		return m.handleFixGitRefKey(msg)
-	case tuiViewFixPrompt:
-		return m.handleFixPromptKey(msg)
 	case tuiViewTasks:
 		return m.handleTasksKey(msg)
 	case tuiViewPatch:
@@ -386,6 +387,8 @@ func (m tuiModel) handleGlobalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleFixKey()
 	case "T":
 		return m.handleToggleTasksKey()
+	case "tab":
+		return m.handleTabKey()
 	}
 	return m, nil
 }
@@ -396,6 +399,7 @@ func (m tuiModel) handleQuitKey() (tea.Model, tea.Cmd) {
 		if returnTo == 0 {
 			returnTo = tuiViewQueue
 		}
+		m.closeFixPanel()
 		m.currentView = returnTo
 		m.currentReview = nil
 		m.reviewScroll = 0
@@ -493,6 +497,7 @@ func (m tuiModel) handlePrevKey() (tea.Model, tea.Cmd) {
 	case tuiViewReview:
 		prevIdx := m.findPrevViewableJob()
 		if prevIdx >= 0 {
+			m.closeFixPanel()
 			m.selectedIdx = prevIdx
 			m.updateSelectedJobID()
 			m.reviewScroll = 0
@@ -611,6 +616,7 @@ func (m tuiModel) handleNextKey() (tea.Model, tea.Cmd) {
 	case tuiViewReview:
 		nextIdx := m.findNextViewableJob()
 		if nextIdx >= 0 {
+			m.closeFixPanel()
 			m.selectedIdx = nextIdx
 			m.updateSelectedJobID()
 			m.reviewScroll = 0
@@ -816,6 +822,7 @@ func (m tuiModel) handlePromptKey() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	} else if m.currentView == tuiViewReview && m.currentReview != nil && m.currentReview.Prompt != "" {
+		m.closeFixPanel()
 		m.currentView = tuiViewPrompt
 		m.promptScroll = 0
 		m.promptFromQueue = false
@@ -1131,6 +1138,12 @@ func (m tuiModel) handleEscKey() (tea.Model, tea.Cmd) {
 		m.loadingJobs = true
 		return m, m.fetchJobs()
 	} else if m.currentView == tuiViewReview {
+		// If fix panel is open (unfocused), esc closes it rather than leaving the review
+		if m.reviewFixPanelOpen {
+			m.closeFixPanel()
+			return m, nil
+		}
+		m.closeFixPanel()
 		returnTo := m.reviewFromView
 		if returnTo == 0 {
 			returnTo = tuiViewQueue
@@ -1480,19 +1493,69 @@ func (m tuiModel) handleFixKey() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Open fix prompt modal. For compact/task jobs with no git ref and no branch,
-	// show the git ref confirmation step first so the user can specify a target.
+	if m.currentView == tuiViewReview {
+		// Open inline fix panel within review view
+		m.fixPromptJobID = job.ID
+		m.fixPromptText = ""
+		m.reviewFixPanelOpen = true
+		m.reviewFixPanelFocused = true
+		return m, nil
+	}
+
+	// Fetch the review and open the inline fix panel when it loads
 	m.fixPromptJobID = job.ID
 	m.fixPromptText = ""
-	m.fixPromptFromView = m.currentView
-	m.fixPromptGitRef = ""
-	isRange := strings.Contains(job.GitRef, "..")
-	if (job.GitRef == "" || isRange) && job.Branch == "" {
-		// No usable single ref — ask the user to confirm or correct the target.
-		m.fixPromptGitRef = "HEAD"
-		m.currentView = tuiViewFixGitRef
-	} else {
-		m.currentView = tuiViewFixPrompt
+	m.reviewFixPanelPending = true
+	m.reviewFromView = tuiViewQueue
+	m.selectedJobID = job.ID
+	return m, m.fetchReview(job.ID)
+}
+
+// handleReviewFixPanelKey handles key input when the inline fix panel is focused.
+func (m tuiModel) handleReviewFixPanelKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		m.reviewFixPanelOpen = false
+		m.reviewFixPanelFocused = false
+		m.fixPromptText = ""
+		m.fixPromptJobID = 0
+		return m, nil
+	case "tab":
+		m.reviewFixPanelFocused = false
+		return m, nil
+	case "enter":
+		jobID := m.fixPromptJobID
+		prompt := m.fixPromptText
+		m.reviewFixPanelOpen = false
+		m.reviewFixPanelFocused = false
+		m.fixPromptText = ""
+		m.fixPromptJobID = 0
+		m.currentView = tuiViewTasks
+		return m, m.triggerFix(jobID, prompt, "")
+	case "backspace":
+		if len(m.fixPromptText) > 0 {
+			runes := []rune(m.fixPromptText)
+			m.fixPromptText = string(runes[:len(runes)-1])
+		}
+		return m, nil
+	default:
+		if len(msg.Runes) > 0 {
+			for _, r := range msg.Runes {
+				if unicode.IsPrint(r) {
+					m.fixPromptText += string(r)
+				}
+			}
+		}
+		return m, nil
+	}
+}
+
+// handleTabKey shifts focus to the fix panel when it is open in review view.
+func (m tuiModel) handleTabKey() (tea.Model, tea.Cmd) {
+	if m.currentView == tuiViewReview && m.reviewFixPanelOpen && !m.reviewFixPanelFocused {
+		m.reviewFixPanelFocused = true
 	}
 	return m, nil
 }
@@ -1508,84 +1571,6 @@ func (m tuiModel) handleToggleTasksKey() (tea.Model, tea.Cmd) {
 		return m, m.fetchFixJobs()
 	}
 	return m, nil
-}
-
-// handleFixGitRefKey handles key input in the git ref confirmation modal.
-// This modal is shown when fixing a compact job that has no branch information,
-// so the user can specify (or confirm) the target ref before proceeding.
-func (m tuiModel) handleFixGitRefKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c":
-		return m, tea.Quit
-	case "esc":
-		m.currentView = m.fixPromptFromView
-		m.fixPromptGitRef = ""
-		m.fixPromptJobID = 0
-		return m, nil
-	case "enter":
-		if strings.TrimSpace(m.fixPromptGitRef) == "" {
-			m.flashMessage = "Git ref is required"
-			m.flashExpiresAt = time.Now().Add(2 * time.Second)
-			m.flashView = tuiViewFixGitRef
-			return m, nil
-		}
-		// Move on to the fix instructions prompt with the ref confirmed.
-		m.currentView = tuiViewFixPrompt
-		return m, nil
-	case "backspace":
-		if len(m.fixPromptGitRef) > 0 {
-			runes := []rune(m.fixPromptGitRef)
-			m.fixPromptGitRef = string(runes[:len(runes)-1])
-		}
-		return m, nil
-	default:
-		if len(msg.Runes) > 0 {
-			for _, r := range msg.Runes {
-				if unicode.IsPrint(r) {
-					m.fixPromptGitRef += string(r)
-				}
-			}
-		}
-		return m, nil
-	}
-}
-
-// handleFixPromptKey handles key input in the fix prompt confirmation modal.
-func (m tuiModel) handleFixPromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c":
-		return m, tea.Quit
-	case "esc":
-		m.currentView = m.fixPromptFromView
-		m.fixPromptText = ""
-		m.fixPromptGitRef = ""
-		m.fixPromptJobID = 0
-		return m, nil
-	case "enter":
-		jobID := m.fixPromptJobID
-		prompt := m.fixPromptText
-		gitRef := m.fixPromptGitRef
-		m.currentView = tuiViewTasks
-		m.fixPromptText = ""
-		m.fixPromptGitRef = ""
-		m.fixPromptJobID = 0
-		return m, m.triggerFix(jobID, prompt, gitRef)
-	case "backspace":
-		if len(m.fixPromptText) > 0 {
-			runes := []rune(m.fixPromptText)
-			m.fixPromptText = string(runes[:len(runes)-1])
-		}
-		return m, nil
-	default:
-		if len(msg.Runes) > 0 {
-			for _, r := range msg.Runes {
-				if unicode.IsPrint(r) || r == '\n' || r == '\t' {
-					m.fixPromptText += string(r)
-				}
-			}
-		}
-		return m, nil
-	}
 }
 
 // handleTasksKey handles key input in the tasks view.
@@ -1739,6 +1724,16 @@ func (m tuiModel) handlePatchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// closeFixPanel resets all inline fix panel state. Call this when
+// leaving review view or navigating to a different review.
+func (m *tuiModel) closeFixPanel() {
+	m.reviewFixPanelOpen = false
+	m.reviewFixPanelFocused = false
+	m.reviewFixPanelPending = false
+	m.fixPromptText = ""
+	m.fixPromptJobID = 0
 }
 
 // handleConnectionError tracks consecutive connection errors and triggers reconnection.
