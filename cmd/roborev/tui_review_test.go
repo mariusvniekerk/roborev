@@ -3273,6 +3273,7 @@ func TestReviewFixPanelEscWhenUnfocusedClosesPanel(t *testing.T) {
 func TestReviewFixPanelPendingConsumedOnLoad(t *testing.T) {
 	m := newTuiModel("http://localhost")
 	m.reviewFixPanelPending = true
+	m.fixPromptJobID = 5
 	m.selectedJobID = 5
 
 	review := &storage.Review{ID: 1, JobID: 5}
@@ -3364,5 +3365,139 @@ func TestFixKeyFromQueueFetchesReviewWithPendingFlag(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Error("Expected a fetch command to be returned")
+	}
+}
+
+func TestFixPanelClosedOnReviewNavNext(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewReview
+	done := storage.JobStatusDone
+	job1 := storage.ReviewJob{ID: 1, Status: done}
+	job2 := storage.ReviewJob{ID: 2, Status: done}
+	m.currentReview = &storage.Review{JobID: 1, Job: &job1}
+	m.jobs = []storage.ReviewJob{job1, job2}
+	m.selectedIdx = 0
+	m.selectedJobID = 1
+
+	// Open fix panel for job 1
+	m.reviewFixPanelOpen = true
+	m.reviewFixPanelFocused = false
+	m.fixPromptJobID = 1
+	m.fixPromptText = "some instructions"
+
+	// Navigate to next review (right/j)
+	m2, _ := m.handleKeyMsg(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	got := m2.(tuiModel)
+
+	if got.reviewFixPanelOpen {
+		t.Error("Expected fix panel to be closed after navigating to next review")
+	}
+	if got.fixPromptJobID != 0 {
+		t.Errorf("Expected fixPromptJobID=0, got %d", got.fixPromptJobID)
+	}
+	if got.fixPromptText != "" {
+		t.Errorf("Expected fixPromptText cleared, got %q", got.fixPromptText)
+	}
+}
+
+func TestFixPanelClosedOnReviewNavPrev(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewReview
+	done := storage.JobStatusDone
+	job1 := storage.ReviewJob{ID: 1, Status: done}
+	job2 := storage.ReviewJob{ID: 2, Status: done}
+	m.currentReview = &storage.Review{JobID: 2, Job: &job2}
+	m.jobs = []storage.ReviewJob{job1, job2}
+	m.selectedIdx = 1
+	m.selectedJobID = 2
+
+	// Open fix panel for job 2
+	m.reviewFixPanelOpen = true
+	m.reviewFixPanelFocused = false
+	m.fixPromptJobID = 2
+	m.fixPromptText = "fix it"
+
+	// Navigate to previous review (left/k)
+	m2, _ := m.handleKeyMsg(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	got := m2.(tuiModel)
+
+	if got.reviewFixPanelOpen {
+		t.Error("Expected fix panel to be closed after navigating to prev review")
+	}
+	if got.fixPromptJobID != 0 {
+		t.Errorf("Expected fixPromptJobID=0, got %d", got.fixPromptJobID)
+	}
+}
+
+func TestFixPanelClosedOnQuitFromReview(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewReview
+	done := storage.JobStatusDone
+	job := storage.ReviewJob{ID: 1, Status: done}
+	m.currentReview = &storage.Review{JobID: 1, Job: &job}
+	m.jobs = []storage.ReviewJob{job}
+	m.selectedIdx = 0
+	m.selectedJobID = 1
+
+	m.reviewFixPanelOpen = true
+	m.reviewFixPanelFocused = false
+	m.fixPromptJobID = 1
+	m.fixPromptText = "instructions"
+
+	m2, _ := m.handleKeyMsg(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	got := m2.(tuiModel)
+
+	if got.reviewFixPanelOpen {
+		t.Error("Expected fix panel to be closed after q from review")
+	}
+	if got.fixPromptJobID != 0 {
+		t.Errorf("Expected fixPromptJobID=0, got %d", got.fixPromptJobID)
+	}
+	if got.currentView == tuiViewReview {
+		t.Error("Expected to leave review view")
+	}
+}
+
+func TestFixPanelPendingNotConsumedByWrongReview(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.reviewFixPanelPending = true
+	m.fixPromptJobID = 5
+	m.selectedJobID = 10
+
+	// A review for job 10 loads, but pending was for job 5
+	review := &storage.Review{ID: 2, JobID: 10}
+	msg := tuiReviewMsg{review: review, jobID: 10}
+	m2, _ := m.Update(msg)
+	got := m2.(tuiModel)
+
+	if got.reviewFixPanelOpen {
+		t.Error("Panel should not open for a different job than pending")
+	}
+	// Pending should remain since it wasn't consumed
+	if !got.reviewFixPanelPending {
+		t.Error("Expected reviewFixPanelPending to remain true")
+	}
+}
+
+func TestFixPanelPendingClearedOnStaleFetch(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.reviewFixPanelPending = true
+	m.fixPromptJobID = 5
+	m.selectedJobID = 10 // User navigated away
+
+	// Stale review for job 5 arrives after user moved to job 10
+	review := &storage.Review{ID: 1, JobID: 5}
+	msg := tuiReviewMsg{review: review, jobID: 5}
+	m2, _ := m.Update(msg)
+	got := m2.(tuiModel)
+
+	if got.reviewFixPanelPending {
+		t.Error("Stale fetch should clear pending flag")
+	}
+	if got.fixPromptJobID != 0 {
+		t.Errorf("Expected fixPromptJobID=0 after stale clear, got %d", got.fixPromptJobID)
+	}
+	if got.reviewFixPanelOpen {
+		t.Error("Panel should not open from stale fetch")
 	}
 }

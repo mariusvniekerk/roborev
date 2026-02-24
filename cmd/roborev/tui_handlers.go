@@ -399,6 +399,7 @@ func (m tuiModel) handleQuitKey() (tea.Model, tea.Cmd) {
 		if returnTo == 0 {
 			returnTo = tuiViewQueue
 		}
+		m.closeFixPanel()
 		m.currentView = returnTo
 		m.currentReview = nil
 		m.reviewScroll = 0
@@ -496,6 +497,7 @@ func (m tuiModel) handlePrevKey() (tea.Model, tea.Cmd) {
 	case tuiViewReview:
 		prevIdx := m.findPrevViewableJob()
 		if prevIdx >= 0 {
+			m.closeFixPanel()
 			m.selectedIdx = prevIdx
 			m.updateSelectedJobID()
 			m.reviewScroll = 0
@@ -614,6 +616,7 @@ func (m tuiModel) handleNextKey() (tea.Model, tea.Cmd) {
 	case tuiViewReview:
 		nextIdx := m.findNextViewableJob()
 		if nextIdx >= 0 {
+			m.closeFixPanel()
 			m.selectedIdx = nextIdx
 			m.updateSelectedJobID()
 			m.reviewScroll = 0
@@ -1722,6 +1725,16 @@ func (m tuiModel) handlePatchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// closeFixPanel resets all inline fix panel state. Call this when
+// leaving review view or navigating to a different review.
+func (m *tuiModel) closeFixPanel() {
+	m.reviewFixPanelOpen = false
+	m.reviewFixPanelFocused = false
+	m.reviewFixPanelPending = false
+	m.fixPromptText = ""
+	m.fixPromptJobID = 0
 }
 
 // handleConnectionError tracks consecutive connection errors and triggers reconnection.

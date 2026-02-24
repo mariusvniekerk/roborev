@@ -1995,6 +1995,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tuiReviewMsg:
 		if msg.jobID != m.selectedJobID {
+			// Stale fetch -- clear pending fix panel if it was
+			// for this (now-discarded) review.
+			if m.reviewFixPanelPending && m.fixPromptJobID == msg.jobID {
+				m.reviewFixPanelPending = false
+				m.fixPromptJobID = 0
+			}
 			return m, nil
 		}
 		m.consecutiveErrors = 0
@@ -2003,11 +2009,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.currentBranch = msg.branchName
 		m.currentView = tuiViewReview
 		m.reviewScroll = 0
-		if m.reviewFixPanelPending {
+		if m.reviewFixPanelPending && m.fixPromptJobID == msg.review.JobID {
 			m.reviewFixPanelPending = false
 			m.reviewFixPanelOpen = true
 			m.reviewFixPanelFocused = true
-			m.fixPromptJobID = msg.review.JobID
 		}
 
 	case tuiPromptMsg:
