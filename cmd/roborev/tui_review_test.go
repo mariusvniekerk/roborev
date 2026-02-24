@@ -1185,11 +1185,11 @@ func TestTUIVisibleLinesCalculationNarrowTerminal(t *testing.T) {
 
 	output := m.View()
 
-	// With height=10, no verdict, narrow terminal (each help line wraps to 2):
-	// visibleLines = 10 - 7 = 3
-	// Non-content: title (1) + location (1) + status line (1) + help (4) = 7
+	// With height=10, no verdict, narrow terminal:
+	// visibleLines = 10 - 5 = 5
+	// Non-content: title (1) + location (1) + status line (1) + help (2) = 5
 	// Glamour produces 21 rendered lines.
-	visibleContentLines := 3
+	visibleContentLines := 5
 	totalRenderedLines := 21
 
 	expected := fmt.Sprintf("[1-%d of %d lines]", visibleContentLines, totalRenderedLines)
@@ -1219,11 +1219,11 @@ func TestTUIVisibleLinesCalculationNarrowTerminalWithVerdict(t *testing.T) {
 
 	output := m.View()
 
-	// With height=10, verdict present, narrow terminal (each help line wraps to 2):
-	// visibleLines = 10 - 8 = 2
-	// Non-content: title (1) + location (1) + verdict (1) + status line (1) + help (4) = 8
+	// With height=10, verdict present, narrow terminal:
+	// visibleLines = 10 - 6 = 4
+	// Non-content: title (1) + location (1) + verdict (1) + status line (1) + help (2) = 6
 	// Glamour produces 21 rendered lines.
-	visibleContentLines := 2
+	visibleContentLines := 4
 	totalRenderedLines := 21
 
 	expected := fmt.Sprintf("[1-%d of %d lines]", visibleContentLines, totalRenderedLines)
@@ -1244,9 +1244,9 @@ func TestTUIVisibleLinesCalculationLongTitleWraps(t *testing.T) {
 	// - Location line: "very-long-repository-name-here abc1234567890..de on feature/very-long-branch-name" = 81 chars, ceil(81/50) = 2 lines
 	// - Addressed line: 1 line (since Addressed=true)
 	// - Status line: 1 line
-	// - Help: 2 lines, each wrapping to 2 = 4 lines
-	// Non-content: 2 + 2 + 1 + 1 + 4 = 10
-	// visibleLines = 12 - 10 = 2
+	// - Help: 2 lines (table layout, no wrapping)
+	// Non-content: 2 + 2 + 1 + 1 + 2 = 8
+	// visibleLines = 12 - 8 = 4
 	m := newTuiModel("http://localhost")
 	m.width = 50
 	m.height = 12
@@ -1269,9 +1269,9 @@ func TestTUIVisibleLinesCalculationLongTitleWraps(t *testing.T) {
 
 	output := m.View()
 
-	// visibleLines = 12 - 10 = 2
+	// visibleLines = 12 - 8 = 4
 	// Glamour produces 21 rendered lines.
-	visibleContentLines := 2
+	visibleContentLines := 4
 	totalRenderedLines := 21
 
 	expected := fmt.Sprintf("[1-%d of %d lines]", visibleContentLines, totalRenderedLines)
