@@ -3501,3 +3501,38 @@ func TestFixPanelPendingClearedOnStaleFetch(t *testing.T) {
 		t.Error("Panel should not open from stale fetch")
 	}
 }
+
+func TestFixPanelClosedOnPromptKey(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewReview
+	done := storage.JobStatusDone
+	job := storage.ReviewJob{ID: 1, Status: done}
+	m.currentReview = &storage.Review{
+		JobID:  1,
+		Job:    &job,
+		Prompt: "review prompt text",
+	}
+	m.jobs = []storage.ReviewJob{job}
+	m.selectedIdx = 0
+	m.selectedJobID = 1
+
+	// Open fix panel
+	m.reviewFixPanelOpen = true
+	m.reviewFixPanelFocused = false
+	m.fixPromptJobID = 1
+	m.fixPromptText = "fix instructions"
+
+	// Press 'p' to switch to prompt view
+	m2, _ := m.handleKeyMsg(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	got := m2.(tuiModel)
+
+	if got.currentView != tuiViewPrompt {
+		t.Errorf("Expected tuiViewPrompt, got %v", got.currentView)
+	}
+	if got.reviewFixPanelOpen {
+		t.Error("Expected fix panel to be closed when switching to prompt view")
+	}
+	if got.fixPromptJobID != 0 {
+		t.Errorf("Expected fixPromptJobID=0, got %d", got.fixPromptJobID)
+	}
+}

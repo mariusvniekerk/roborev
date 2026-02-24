@@ -822,6 +822,7 @@ func (m tuiModel) handlePromptKey() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	} else if m.currentView == tuiViewReview && m.currentReview != nil && m.currentReview.Prompt != "" {
+		m.closeFixPanel()
 		m.currentView = tuiViewPrompt
 		m.promptScroll = 0
 		m.promptFromQueue = false
