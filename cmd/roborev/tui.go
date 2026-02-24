@@ -407,11 +407,12 @@ type tuiFixTriggerResultMsg struct {
 }
 
 type tuiApplyPatchResultMsg struct {
-	jobID       int64
-	parentJobID int64 // Parent review job (to mark addressed on success)
-	success     bool
-	err         error
-	rebase      bool // True if patch didn't apply and needs rebase
+	jobID        int64
+	parentJobID  int64 // Parent review job (to mark addressed on success)
+	success      bool
+	commitFailed bool // True only when patch applied but git commit failed (working tree is dirty)
+	err          error
+	rebase       bool // True if patch didn't apply and needs rebase
 }
 
 type tuiPatchMsg struct {
@@ -2379,8 +2380,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.flashExpiresAt = time.Now().Add(5 * time.Second)
 			m.flashView = tuiViewTasks
 			return m, tea.Batch(m.triggerRebase(msg.jobID), m.fetchFixJobs())
-		} else if msg.success && msg.err != nil {
-			// Patch applied but commit failed
+		} else if msg.commitFailed {
+			// Patch applied to working tree but commit failed — working tree is dirty
 			m.flashMessage = fmt.Sprintf("Job #%d: %v", msg.jobID, msg.err)
 			m.flashExpiresAt = time.Now().Add(5 * time.Second)
 			m.flashView = tuiViewTasks
@@ -4113,7 +4114,7 @@ func (m tuiModel) applyFixPatch(jobID int64) tea.Cmd {
 		}
 		if err := commitPatch(jobDetail.RepoPath, patch, commitMsg); err != nil {
 			return tuiApplyPatchResultMsg{jobID: jobID, parentJobID: parentJobID, success: true,
-				err: fmt.Errorf("patch applied but commit failed: %w", err)}
+				commitFailed: true, err: fmt.Errorf("patch applied but commit failed: %w", err)}
 		}
 
 		// Mark the fix job as applied on the server
