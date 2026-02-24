@@ -3883,7 +3883,7 @@ func TestHandleFixJobStaleValidation(t *testing.T) {
 		}
 	})
 
-	t.Run("rejects whitespace-only git_ref", func(t *testing.T) {
+	t.Run("treats whitespace-only git_ref as empty", func(t *testing.T) {
 		body := map[string]any{
 			"parent_job_id": reviewJob.ID,
 			"git_ref":       "   ",
