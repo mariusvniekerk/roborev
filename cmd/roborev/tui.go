@@ -419,6 +419,7 @@ type tuiApplyPatchResultMsg struct {
 	rebase       bool   // True if patch didn't apply and needs rebase
 	needWorktree bool   // True if branch is not checked out and needs a worktree
 	branch       string // Branch name (for worktree creation prompt)
+	worktreeDir  string // Non-empty if a temp worktree was kept for recovery
 }
 
 type tuiPatchMsg struct {
@@ -2399,8 +2400,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.triggerRebase(msg.jobID), m.fetchFixJobs())
 		} else if msg.commitFailed {
 			// Patch applied to working tree but commit failed — working tree is dirty
-			m.flashMessage = fmt.Sprintf("Job #%d: %v", msg.jobID, msg.err)
-			m.flashExpiresAt = time.Now().Add(5 * time.Second)
+			detail := fmt.Sprintf("Job #%d: %v", msg.jobID, msg.err)
+			if msg.worktreeDir != "" {
+				detail += fmt.Sprintf(" (worktree kept at %s)", msg.worktreeDir)
+			}
+			m.flashMessage = detail
+			m.flashExpiresAt = time.Now().Add(8 * time.Second)
 			m.flashView = tuiViewTasks
 		} else if msg.err != nil {
 			m.flashMessage = fmt.Sprintf("Apply failed: %v", msg.err)
@@ -4112,18 +4117,18 @@ func (m tuiModel) applyFixPatchInWorktree(jobID int64) tea.Cmd {
 			return *msg
 		}
 
-		// Create a temporary worktree on the branch
+		// Create a temporary worktree on the branch.
 		wtDir, err := os.MkdirTemp("", "roborev-apply-")
 		if err != nil {
 			return tuiApplyPatchResultMsg{jobID: jobID, err: fmt.Errorf("create temp dir: %w", err)}
 		}
-		defer func() {
+
+		removeWorktree := func() {
 			if err := exec.Command("git", "-C", jobDetail.RepoPath, "worktree", "remove", "--force", wtDir).Run(); err != nil {
 				os.RemoveAll(wtDir)
-				// Prune stale worktree entries that reference deleted directories
 				exec.Command("git", "-C", jobDetail.RepoPath, "worktree", "prune").Run()
 			}
-		}()
+		}
 
 		cmd := exec.Command("git", "-C", jobDetail.RepoPath, "worktree", "add", wtDir, jobDetail.Branch)
 		if out, cmdErr := cmd.CombinedOutput(); cmdErr != nil {
@@ -4131,7 +4136,16 @@ func (m tuiModel) applyFixPatchInWorktree(jobID int64) tea.Cmd {
 				err: fmt.Errorf("git worktree add: %w: %s", cmdErr, out)}
 		}
 
-		return m.checkApplyCommitPatch(jobID, jobDetail, wtDir, patch)
+		result := m.checkApplyCommitPatch(jobID, jobDetail, wtDir, patch)
+
+		// Keep the worktree if patch was applied but commit failed, so the user can recover.
+		if result.success && result.err != nil {
+			result.worktreeDir = wtDir
+		} else {
+			removeWorktree()
+		}
+
+		return result
 	}
 }
 
