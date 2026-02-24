@@ -4133,6 +4133,7 @@ func (m tuiModel) applyFixPatchInWorktree(jobID int64) tea.Cmd {
 
 		cmd := exec.Command("git", "-C", jobDetail.RepoPath, "worktree", "add", wtDir, jobDetail.Branch)
 		if out, cmdErr := cmd.CombinedOutput(); cmdErr != nil {
+			os.RemoveAll(wtDir)
 			return tuiApplyPatchResultMsg{jobID: jobID,
 				err: fmt.Errorf("git worktree add: %w: %s", cmdErr, out)}
 		}
