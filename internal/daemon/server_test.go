@@ -3866,6 +3866,43 @@ func TestHandleFixJobStaleValidation(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects whitespace-padded dash ref", func(t *testing.T) {
+		body := map[string]any{
+			"parent_job_id": reviewJob.ID,
+			"git_ref":       " --option-injection",
+		}
+		req := testutil.MakeJSONRequest(t, http.MethodPost, "/api/job/fix", body)
+		w := httptest.NewRecorder()
+		server.handleFixJob(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf(
+				"Expected 400 for space+dash git_ref, got %d",
+				w.Code,
+			)
+		}
+	})
+
+	t.Run("rejects whitespace-only git_ref", func(t *testing.T) {
+		body := map[string]any{
+			"parent_job_id": reviewJob.ID,
+			"git_ref":       "   ",
+		}
+		req := testutil.MakeJSONRequest(t, http.MethodPost, "/api/job/fix", body)
+		w := httptest.NewRecorder()
+		server.handleFixJob(w, req)
+
+		// Whitespace-only trims to empty, so it's treated as
+		// no user-provided ref — the server falls through to
+		// the parent ref/branch/HEAD resolution chain.
+		if w.Code != http.StatusCreated {
+			t.Fatalf(
+				"Expected 201 for whitespace-only git_ref (treated as empty), got %d: %s",
+				w.Code, w.Body.String(),
+			)
+		}
+	})
+
 	t.Run("accepts valid git_ref from request", func(t *testing.T) {
 		body := map[string]any{
 			"parent_job_id": reviewJob.ID,

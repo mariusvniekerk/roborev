@@ -1952,8 +1952,9 @@ func (s *Server) handleFixJob(w http.ResponseWriter, r *http.Request) {
 	}
 	model := config.ResolveModelForWorkflow("", parentJob.RepoPath, cfg, "fix", reasoning)
 
-	// Validate user-provided git ref to prevent option injection
-	// (e.g. "--something") when passed to git worktree add.
+	// Normalize and validate user-provided git ref to prevent option
+	// injection (e.g. " --something") when passed to git worktree add.
+	req.GitRef = strings.TrimSpace(req.GitRef)
 	if req.GitRef != "" && !isValidGitRef(req.GitRef) {
 		writeError(w, http.StatusBadRequest, "invalid git_ref")
 		return

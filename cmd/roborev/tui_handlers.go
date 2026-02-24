@@ -1523,7 +1523,7 @@ func (m tuiModel) handleFixGitRefKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.fixPromptJobID = 0
 		return m, nil
 	case "enter":
-		if m.fixPromptGitRef == "" {
+		if strings.TrimSpace(m.fixPromptGitRef) == "" {
 			m.flashMessage = "Git ref is required"
 			m.flashExpiresAt = time.Now().Add(2 * time.Second)
 			m.flashView = tuiViewFixGitRef

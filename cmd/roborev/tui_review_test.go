@@ -3173,6 +3173,26 @@ func TestTUIFixGitRefRejectsEmpty(t *testing.T) {
 	}
 }
 
+func TestTUIFixGitRefRejectsWhitespaceOnly(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewFixGitRef
+	m.fixPromptJobID = 1
+	m.fixPromptGitRef = "   "
+	m.fixPromptFromView = tuiViewQueue
+
+	m2, _ := pressSpecial(m, tea.KeyEnter)
+
+	if m2.currentView != tuiViewFixGitRef {
+		t.Errorf(
+			"should stay on git ref view for whitespace-only, got %d",
+			m2.currentView,
+		)
+	}
+	if m2.flashMessage == "" {
+		t.Error("expected flash message for whitespace-only ref")
+	}
+}
+
 func TestTUIFixGitRefAcceptsNonEmpty(t *testing.T) {
 	m := newTuiModel("http://localhost")
 	m.currentView = tuiViewFixGitRef
