@@ -117,10 +117,7 @@ func reflowHelpRows(rows [][]string, width int) [][]string {
 		var candidate [][]string
 		for _, row := range rows {
 			for i := 0; i < len(row); i += ncols {
-				end := i + ncols
-				if end > len(row) {
-					end = len(row)
-				}
+				end := min(i+ncols, len(row))
 				candidate = append(candidate, row[i:end])
 			}
 		}
@@ -188,10 +185,7 @@ func renderHelpTable(rows [][]string, width int) string {
 	colMinW := make([]int, maxCols)
 	for _, row := range rows {
 		for c, item := range row {
-			w := runewidth.StringWidth(item) - 1 // colon removed
-			if w < 0 {
-				w = 0
-			}
+			w := max(runewidth.StringWidth(item)-1, 0) // colon removed
 			if w > colMinW[c] {
 				colMinW[c] = w
 			}
@@ -224,9 +218,7 @@ func renderHelpTable(rows [][]string, width int) string {
 		styled := make([]string, maxCols)
 		empty[ri] = make([]bool, maxCols)
 		for i, item := range row {
-			if idx := strings.Index(item, ": "); idx >= 0 {
-				key := item[:idx]
-				desc := item[idx+2:]
+			if key, desc, ok := strings.Cut(item, ": "); ok {
 				styled[i] = tuiHelpKeyStyle.Render(key) + " " + tuiHelpDescStyle.Render(desc)
 			} else {
 				styled[i] = tuiHelpKeyStyle.Render(item)
