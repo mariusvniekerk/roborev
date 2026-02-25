@@ -990,6 +990,10 @@ func (m tuiModel) handleFilterOpenKey() (tea.Model, tea.Cmd) {
 	if m.currentView != tuiViewQueue {
 		return m, nil
 	}
+	// Block filter modal when both repo and branch are locked via CLI flags
+	if m.lockedRepoFilter && m.lockedBranchFilter {
+		return m, nil
+	}
 	m.filterTree = nil
 	m.filterFlatList = nil
 	m.filterSelectedIdx = 0
@@ -1003,6 +1007,10 @@ func (m tuiModel) handleFilterOpenKey() (tea.Model, tea.Cmd) {
 
 func (m tuiModel) handleBranchFilterOpenKey() (tea.Model, tea.Cmd) {
 	if m.currentView != tuiViewQueue {
+		return m, nil
+	}
+	// Block branch filter when locked via CLI flag
+	if m.lockedBranchFilter {
 		return m, nil
 	}
 	m.filterBranchMode = true

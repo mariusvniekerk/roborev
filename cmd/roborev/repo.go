@@ -65,6 +65,35 @@ func resolvePathToGitRoot(path string) string {
 	return repoRoot
 }
 
+// resolveRepoFlag resolves a --repo flag value to the main repo root.
+// An empty or "." value resolves to the current directory's repo.
+// Used by tui and review commands that accept --repo with NoOptDefVal=".".
+func resolveRepoFlag(path string) (string, error) {
+	if path == "" || path == "." {
+		path = "."
+	}
+	root, err := git.GetMainRepoRoot(path)
+	if err != nil || root == "" {
+		return "", fmt.Errorf("not inside a git repository")
+	}
+	return root, nil
+}
+
+// resolveBranchFlag resolves a --branch flag value to a branch name.
+// "HEAD" (the NoOptDefVal) resolves to the current branch. Any other value
+// is returned as-is. Used by tui and review commands that accept --branch
+// with NoOptDefVal="HEAD".
+func resolveBranchFlag(value, repoPath string) (string, error) {
+	if value == "HEAD" {
+		branch := git.GetCurrentBranch(repoPath)
+		if branch == "" {
+			return "", fmt.Errorf("could not detect current branch")
+		}
+		return branch, nil
+	}
+	return value, nil
+}
+
 func repoCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "repo",

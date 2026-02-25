@@ -264,6 +264,10 @@ type tuiModel struct {
 	updateIsDevBuild bool   // True if running a dev build
 	versionMismatch  bool   // True if daemon version doesn't match TUI version
 
+	// CLI-locked filters: set via --repo/--branch flags, cannot be cleared by the user
+	lockedRepoFilter   bool // true if repo filter was set via --repo flag
+	lockedBranchFilter bool // true if branch filter was set via --branch flag
+
 	// Pagination state
 	hasMore        bool    // true if there are more jobs to load
 	loadingMore    bool    // true if currently loading more jobs (pagination)
@@ -547,7 +551,18 @@ func isConnectionError(err error) bool {
 	return errors.As(err, &netErr)
 }
 
-func newTuiModel(serverAddr string) tuiModel {
+// tuiOptions holds optional overrides for the TUI model, set from CLI flags.
+type tuiOptions struct {
+	repoFilter   string // --repo flag: lock filter to this repo path
+	branchFilter string // --branch flag: lock filter to this branch
+}
+
+func newTuiModel(serverAddr string, opts ...tuiOptions) tuiModel {
+	var opt tuiOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+
 	daemonVersion := "?"
 	hideAddressed := false
 	autoFilterRepo := false
@@ -576,12 +591,25 @@ func newTuiModel(serverAddr string) tuiModel {
 		}
 	}
 
-	// Auto-filter to current repo if enabled (reuses detection above)
+	// Determine active filters: CLI flags take priority over auto-filter config
 	var activeRepoFilter []string
 	var filterStack []string
-	if autoFilterRepo && cwdRepoRoot != "" {
+	var lockedRepo, lockedBranch bool
+
+	if opt.repoFilter != "" {
+		activeRepoFilter = []string{opt.repoFilter}
+		filterStack = append(filterStack, filterTypeRepo)
+		lockedRepo = true
+	} else if autoFilterRepo && cwdRepoRoot != "" {
 		activeRepoFilter = []string{cwdRepoRoot}
-		filterStack = []string{filterTypeRepo}
+		filterStack = append(filterStack, filterTypeRepo)
+	}
+
+	var activeBranchFilter string
+	if opt.branchFilter != "" {
+		activeBranchFilter = opt.branchFilter
+		filterStack = append(filterStack, filterTypeBranch)
+		lockedBranch = true
 	}
 
 	return tuiModel{
@@ -596,7 +624,10 @@ func newTuiModel(serverAddr string) tuiModel {
 		loadingJobs:            true, // Init() calls fetchJobs, so mark as loading
 		hideAddressed:          hideAddressed,
 		activeRepoFilter:       activeRepoFilter,
+		activeBranchFilter:     activeBranchFilter,
 		filterStack:            filterStack,
+		lockedRepoFilter:       lockedRepo,
+		lockedBranchFilter:     lockedBranch,
 		cwdRepoRoot:            cwdRepoRoot,
 		cwdBranch:              cwdBranch,
 		displayNames:           make(map[string]string),      // Cache display names to avoid disk reads on render
@@ -1913,14 +1944,18 @@ func (m *tuiModel) pushFilter(filterType string) {
 	m.filterStack = append(m.filterStack, filterType)
 }
 
-// popFilter removes the most recent filter from the stack and clears its value
-// Returns the filter type that was popped, or empty string if stack was empty
+// popFilter removes the most recent filter from the stack and clears its value.
+// Locked filters (set via --repo/--branch CLI flags) cannot be popped.
+// Returns the filter type that was popped, or empty string if stack was empty or locked.
 func (m *tuiModel) popFilter() string {
 	if len(m.filterStack) == 0 {
 		return ""
 	}
-	// Pop the last filter
+	// Skip locked filters: walk backwards to find the first poppable filter
 	last := m.filterStack[len(m.filterStack)-1]
+	if (last == filterTypeRepo && m.lockedRepoFilter) || (last == filterTypeBranch && m.lockedBranchFilter) {
+		return ""
+	}
 	m.filterStack = m.filterStack[:len(m.filterStack)-1]
 	// Clear the corresponding filter value
 	switch last {
@@ -1957,22 +1992,33 @@ func (m tuiModel) getVisibleJobs() []storage.ReviewJob {
 	return visible
 }
 
-// Queue help table rows (used by both queueVisibleRows and renderQueueView).
-var queueHelpRows = [][]string{
-	{"x: cancel", "r: rerun", "l: log", "p: prompt", "c: comment", "y: copy", "m: commit msg", "F: fix"},
-	{"↑/↓: navigate", "enter: review", "a: addressed", "f: filter", "h: hide", "T: tasks", "?: help", "q: quit"},
+// queueHelpRows returns queue help table rows, omitting
+// "f: filter" when both repo and branch filters are locked.
+func (m tuiModel) queueHelpRows() [][]string {
+	row1 := []string{
+		"x: cancel", "r: rerun", "l: log", "p: prompt",
+		"c: comment", "y: copy", "m: commit msg", "F: fix",
+	}
+	row2 := []string{
+		"↑/↓: navigate", "enter: review", "a: addressed",
+	}
+	if !m.lockedRepoFilter || !m.lockedBranchFilter {
+		row2 = append(row2, "f: filter")
+	}
+	row2 = append(row2, "h: hide", "T: tasks", "?: help", "q: quit")
+	return [][]string{row1, row2}
 }
 
 // queueHelpLines computes how many terminal lines the queue help
 // footer occupies after reflowing items to fit within width.
-func queueHelpLines(width int) int {
-	return len(reflowHelpRows(queueHelpRows, width))
+func (m tuiModel) queueHelpLines() int {
+	return len(reflowHelpRows(m.queueHelpRows(), m.width))
 }
 
 // queueVisibleRows returns how many queue rows fit in the current terminal.
 func (m tuiModel) queueVisibleRows() int {
 	// title(1) + status(2) + header(2) + scroll(1) + flash(1) + help(dynamic)
-	reserved := 7 + queueHelpLines(m.width)
+	reserved := 7 + m.queueHelpLines()
 	visibleRows := max(m.height-reserved, 3)
 	return visibleRows
 }
@@ -2645,7 +2691,7 @@ func (m tuiModel) renderQueueView() string {
 
 	// Calculate visible job range based on terminal height
 	// title(1) + status(2) + header(2) + scroll(1) + flash(1) + help(dynamic)
-	reservedLines := 7 + queueHelpLines(m.width)
+	reservedLines := 7 + m.queueHelpLines()
 	visibleRows := max(m.height-reservedLines,
 		// Show at least 3 jobs
 		3)
@@ -2771,7 +2817,7 @@ func (m tuiModel) renderQueueView() string {
 	b.WriteString("\x1b[K\n") // Clear to end of line
 
 	// Help
-	b.WriteString(renderHelpTable(queueHelpRows, m.width))
+	b.WriteString(renderHelpTable(m.queueHelpRows(), m.width))
 	b.WriteString("\x1b[K") // Clear to end of line (no newline at end)
 	b.WriteString("\x1b[J") // Clear to end of screen to prevent artifacts
 
@@ -3849,10 +3895,24 @@ func (m tuiModel) renderHelpView() string {
 
 func tuiCmd() *cobra.Command {
 	var addr string
+	var repoFilter string
+	var branchFilter string
 
 	cmd := &cobra.Command{
 		Use:   "tui",
 		Short: "Interactive terminal UI for monitoring reviews",
+		Long: `Interactive terminal UI for monitoring reviews.
+
+Use --repo and --branch flags to launch the TUI pre-filtered, useful for
+side-by-side working when you want to focus on a specific repo or branch.
+When set via flags, the filter is locked and cannot be changed in the TUI.
+
+Without a value, --repo resolves to the current repo and --branch resolves
+to the current branch. You can also provide explicit values:
+  roborev tui --repo              # current repo
+  roborev tui --repo /path/to/repo
+  roborev tui --branch            # current branch
+  roborev tui --repo --branch     # current repo + current branch`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Ensure daemon is running (and restart if version mismatch)
 			if err := ensureDaemon(); err != nil {
@@ -3864,7 +3924,32 @@ func tuiCmd() *cobra.Command {
 			} else if !strings.HasPrefix(addr, "http://") && !strings.HasPrefix(addr, "https://") {
 				addr = "http://" + addr
 			}
-			p := tea.NewProgram(newTuiModel(addr), tea.WithAltScreen())
+
+			// Resolve --repo and --branch flags
+			if cmd.Flags().Changed("repo") {
+				resolved, err := resolveRepoFlag(repoFilter)
+				if err != nil {
+					return fmt.Errorf("--repo: %w", err)
+				}
+				repoFilter = resolved
+			}
+			if cmd.Flags().Changed("branch") {
+				branchRepo := "."
+				if repoFilter != "" {
+					branchRepo = repoFilter
+				}
+				resolved, err := resolveBranchFlag(branchFilter, branchRepo)
+				if err != nil {
+					return fmt.Errorf("--branch: %w", err)
+				}
+				branchFilter = resolved
+			}
+
+			opts := tuiOptions{
+				repoFilter:   repoFilter,
+				branchFilter: branchFilter,
+			}
+			p := tea.NewProgram(newTuiModel(addr, opts), tea.WithAltScreen())
 			if _, err := p.Run(); err != nil {
 				return fmt.Errorf("TUI error: %w", err)
 			}
@@ -3873,6 +3958,12 @@ func tuiCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&addr, "addr", "", "daemon address (default: auto-detect)")
+
+	cmd.Flags().StringVar(&repoFilter, "repo", "", "lock filter to a repo (default: current repo)")
+	cmd.Flag("repo").NoOptDefVal = "."
+
+	cmd.Flags().StringVar(&branchFilter, "branch", "", "lock filter to a branch (default: current branch)")
+	cmd.Flag("branch").NoOptDefVal = "HEAD"
 
 	return cmd
 }
