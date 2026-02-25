@@ -149,6 +149,135 @@ func TestKiloVariantFlag(t *testing.T) {
 	}
 }
 
+func TestIsToolCallJSON(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{
+			"real tool call",
+			`{"name":"read","arguments":{"path":"/foo"}}`,
+			true,
+		},
+		{
+			"tool call with empty args",
+			`{"name":"edit","arguments":{}}`,
+			true,
+		},
+		{
+			"plain text",
+			"Fix the typo on line 5.",
+			false,
+		},
+		{
+			"empty string",
+			"",
+			false,
+		},
+		{
+			"JSON without arguments key",
+			`{"name":"read","path":"/foo"}`,
+			false,
+		},
+		{
+			"JSON without name key",
+			`{"arguments":{"path":"/foo"}}`,
+			false,
+		},
+		{
+			"name is number not string",
+			`{"name":42,"arguments":{}}`,
+			false,
+		},
+		{
+			"arguments is array not object",
+			`{"name":"fn","arguments":["a","b"]}`,
+			false,
+		},
+		{
+			"arguments is string not object",
+			`{"name":"fn","arguments":"hello"}`,
+			false,
+		},
+		{
+			"JSON code example with extra keys",
+			`{"name":"John","arguments":{"x":1},"age":30}`,
+			true, // still matches — extra keys don't disqualify
+		},
+		{
+			"invalid JSON",
+			`{"name":"read","arguments":`,
+			false,
+		},
+		{
+			"JSON array not object",
+			`[{"name":"read"}]`,
+			false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := isToolCallJSON(tt.line)
+			if got != tt.want {
+				t.Errorf("isToolCallJSON(%q) = %v, want %v", tt.line, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFilterToolCallLines(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			"strips tool calls, keeps review text",
+			"**Review:** Fix the bug.\n" +
+				`{"name":"read","arguments":{"path":"/foo"}}` + "\n" +
+				"Done.",
+			"**Review:** Fix the bug.\nDone.",
+		},
+		{
+			"preserves JSON code snippet in review",
+			"Here is an example:\n" +
+				`{"name":"fn","arguments":["a","b"]}` + "\n" +
+				"Note the array arguments.",
+			"Here is an example:\n" +
+				`{"name":"fn","arguments":["a","b"]}` + "\n" +
+				"Note the array arguments.",
+		},
+		{
+			"all tool calls returns empty",
+			`{"name":"read","arguments":{}}`,
+			"",
+		},
+		{
+			"preserves blank lines",
+			"Line 1\n\nLine 3",
+			"Line 1\n\nLine 3",
+		},
+		{
+			"empty input",
+			"",
+			"",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := filterToolCallLines(tt.input)
+			if got != tt.want {
+				t.Errorf("filterToolCallLines() =\n%q\nwant:\n%q", got, tt.want)
+			}
+		})
+	}
+}
+
 func runKiloMockReview(t *testing.T, model, prompt string, stdoutLines []string) (output, args, stdin string) {
 	t.Helper()
 

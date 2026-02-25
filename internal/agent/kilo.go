@@ -146,8 +146,10 @@ func filterToolCallLines(s string) string {
 	return strings.TrimRight(strings.Join(kept, "\n"), "\n")
 }
 
-// isToolCallJSON returns true if line is a JSON object containing
-// both "name" and "arguments" keys (the tool-call signature).
+// isToolCallJSON returns true if line is a JSON object matching
+// the tool-call schema: {"name": <string>, "arguments": <object>}.
+// We validate value types, not just key presence, to avoid
+// false-positives on JSON examples that happen to use those keys.
 func isToolCallJSON(line string) bool {
 	if len(line) == 0 || line[0] != '{' {
 		return false
@@ -156,9 +158,19 @@ func isToolCallJSON(line string) bool {
 	if json.Unmarshal([]byte(line), &obj) != nil {
 		return false
 	}
-	_, hasName := obj["name"]
-	_, hasArgs := obj["arguments"]
-	return hasName && hasArgs
+	nameRaw, hasName := obj["name"]
+	argsRaw, hasArgs := obj["arguments"]
+	if !hasName || !hasArgs {
+		return false
+	}
+	// "name" must be a JSON string
+	var name string
+	if json.Unmarshal(nameRaw, &name) != nil {
+		return false
+	}
+	// "arguments" must be a JSON object (not array, string, etc.)
+	trimmed := bytes.TrimSpace(argsRaw)
+	return len(trimmed) > 0 && trimmed[0] == '{'
 }
 
 func init() {
