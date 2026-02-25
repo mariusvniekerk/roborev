@@ -63,6 +63,27 @@ func assertRequest(t *testing.T, r *http.Request, method, path string) {
 	}
 }
 
+func assertQuery(t *testing.T, r *http.Request, key, expected string) {
+	t.Helper()
+	if got := r.URL.Query().Get(key); got != expected {
+		t.Errorf("expected %s query param %q, got %q", key, expected, got)
+	}
+}
+
+func decodeJSON(t *testing.T, r *http.Request, v any) {
+	t.Helper()
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+}
+
+func writeTestJSON(t *testing.T, w http.ResponseWriter, v any) {
+	t.Helper()
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		t.Fatalf("encode response: %v", err)
+	}
+}
+
 func TestHTTPClientAddComment(t *testing.T) {
 	var received struct {
 		JobID     int    `json:"job_id"`
@@ -72,9 +93,7 @@ func TestHTTPClientAddComment(t *testing.T) {
 
 	client := mockAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		assertRequest(t, r, http.MethodPost, "/api/comment")
-		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
-			t.Fatalf("decode request: %v", err)
-		}
+		decodeJSON(t, r, &received)
 		w.WriteHeader(http.StatusCreated)
 	})
 	if err := client.AddComment(42, "test-agent", "Fixed the issue"); err != nil {
@@ -100,9 +119,7 @@ func TestHTTPClientMarkReviewAddressed(t *testing.T) {
 
 	client := mockAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		assertRequest(t, r, http.MethodPost, "/api/review/address")
-		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
-			t.Fatalf("decode request: %v", err)
-		}
+		decodeJSON(t, r, &received)
 		w.WriteHeader(http.StatusOK)
 	})
 	if err := client.MarkReviewAddressed(99); err != nil {
@@ -123,22 +140,18 @@ func TestHTTPClientWaitForReviewUsesJobID(t *testing.T) {
 	client := mockAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/api/jobs" && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]any{
+			writeTestJSON(t, w, map[string]any{
 				"jobs": []storage.ReviewJob{{ID: 1, Status: storage.JobStatusDone, GitRef: "commit1"}},
 			})
 			return
 		case r.URL.Path == "/api/review" && r.Method == http.MethodGet:
-			if r.URL.Query().Get("job_id") != "1" {
-				t.Errorf("expected job_id query param, got %q", r.URL.RawQuery)
-			}
-			if r.URL.Query().Get("sha") != "" {
-				t.Errorf("did not expect sha query param, got %q", r.URL.RawQuery)
-			}
+			assertQuery(t, r, "job_id", "1")
+			assertQuery(t, r, "sha", "")
 			if atomic.AddInt32(&reviewCalls, 1) == 1 {
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
-			json.NewEncoder(w).Encode(storage.Review{ID: 1, JobID: 1, Output: "Review complete"})
+			writeTestJSON(t, w, storage.Review{ID: 1, JobID: 1, Output: "Review complete"})
 			return
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -158,7 +171,7 @@ func TestHTTPClientWaitForReviewUsesJobID(t *testing.T) {
 	}
 }
 
-func TestFindJobForCommitWorktree(t *testing.T) {
+func TestFindJobForCommit(t *testing.T) {
 	// Skip if git is not available (minimal CI environments)
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
@@ -171,123 +184,139 @@ func TestFindJobForCommitWorktree(t *testing.T) {
 
 	sha := "abc123"
 
-	// Track which repo path the server receives (use mutex to avoid data race)
-	var mu sync.Mutex
-	var receivedRepo string
+	tests := []struct {
+		name           string
+		queryRepo      string
+		setupMock      func(t *testing.T) func(t *testing.T, w http.ResponseWriter, r *http.Request)
+		expectedJobID  int64
+		expectNotFound bool
+	}{
+		{
+			name:      "worktree path normalized to main repo",
+			queryRepo: worktreeDir,
+			setupMock: func(t *testing.T) func(t *testing.T, w http.ResponseWriter, r *http.Request) {
+				return func(t *testing.T, w http.ResponseWriter, r *http.Request) {
+					assertRequest(t, r, http.MethodGet, "/api/jobs")
 
-	client := mockAPI(t, func(w http.ResponseWriter, r *http.Request) {
-		assertRequest(t, r, http.MethodGet, "/api/jobs")
+					repo := r.URL.Query().Get("repo")
+					if repo == "" {
+						t.Error("expected server to receive a repo path, got empty")
+					}
+					if repo == worktreeDir {
+						t.Errorf("expected server to NOT receive worktree path %q", worktreeDir)
+					}
 
-		repo := r.URL.Query().Get("repo")
-		mu.Lock()
-		receivedRepo = repo
-		mu.Unlock()
+					normalizedReceived := repo
+					if resolved, err := filepath.EvalSymlinks(repo); err == nil {
+						normalizedReceived = resolved
+					}
 
-		// Return job if repo matches main repo path (normalize for comparison)
-		normalizedReceived := repo
-		if resolved, err := filepath.EvalSymlinks(repo); err == nil {
-			normalizedReceived = resolved
-		}
-		if normalizedReceived == mainRepo {
-			json.NewEncoder(w).Encode(map[string]any{
-				"jobs": []storage.ReviewJob{
-					{ID: 1, GitRef: sha, RepoPath: mainRepo, Status: storage.JobStatusDone},
-				},
-			})
-			return
-		}
-
-		json.NewEncoder(w).Encode(map[string]any{"jobs": []storage.ReviewJob{}})
-	})
-
-	t.Run("worktree path normalized to main repo", func(t *testing.T) {
-		// Query using worktree path - should be normalized to main repo path
-		job, err := client.FindJobForCommit(worktreeDir, sha)
-		if err != nil {
-			t.Fatalf("FindJobForCommit failed: %v", err)
-		}
-
-		// Verify the server received a path (not worktree path)
-		mu.Lock()
-		gotRepo := receivedRepo
-		mu.Unlock()
-		if gotRepo == "" {
-			t.Error("expected server to receive a repo path, got empty")
-		}
-		if gotRepo == worktreeDir {
-			t.Errorf("expected server to NOT receive worktree path %q", worktreeDir)
-		}
-
-		// Should find the job
-		if job == nil {
-			t.Error("expected to find job, got nil")
-		} else if job.ID != 1 {
-			t.Errorf("expected job ID 1, got %d", job.ID)
-		}
-	})
-
-	t.Run("main repo path works directly", func(t *testing.T) {
-		// Query using main repo path should also work
-		job, err := client.FindJobForCommit(mainRepo, sha)
-		if err != nil {
-			t.Fatalf("FindJobForCommit failed: %v", err)
-		}
-
-		if job == nil {
-			t.Error("expected to find job, got nil")
-		}
-	})
-}
-
-func TestFindJobForCommitFallback(t *testing.T) {
-	// Test fallback behavior when primary query returns no results
-	sha := "abc123"
-	mainRepo := t.TempDir() // Use real temp dir for cross-platform path normalization
-
-	var primaryCalled, fallbackCalled int32
-
-	client := mockAPI(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/jobs" || r.Method != http.MethodGet {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-
-		repo := r.URL.Query().Get("repo")
-
-		if repo != "" {
-			atomic.StoreInt32(&primaryCalled, 1)
-			// Return empty to trigger fallback
-			json.NewEncoder(w).Encode(map[string]any{"jobs": []storage.ReviewJob{}})
-			return
-		}
-
-		// Fallback query (no repo filter)
-		atomic.StoreInt32(&fallbackCalled, 1)
-		json.NewEncoder(w).Encode(map[string]any{
-			"jobs": []storage.ReviewJob{
-				{ID: 1, GitRef: sha, RepoPath: mainRepo, Status: storage.JobStatusDone},
+					if normalizedReceived == mainRepo {
+						writeTestJSON(t, w, map[string]any{
+							"jobs": []storage.ReviewJob{
+								{ID: 1, GitRef: sha, RepoPath: mainRepo, Status: storage.JobStatusDone},
+							},
+						})
+						return
+					}
+					writeTestJSON(t, w, map[string]any{"jobs": []storage.ReviewJob{}})
+				}
 			},
+			expectedJobID: 1,
+		},
+		{
+			name:      "main repo path works directly",
+			queryRepo: mainRepo,
+			setupMock: func(t *testing.T) func(t *testing.T, w http.ResponseWriter, r *http.Request) {
+				return func(t *testing.T, w http.ResponseWriter, r *http.Request) {
+					assertRequest(t, r, http.MethodGet, "/api/jobs")
+
+					repo := r.URL.Query().Get("repo")
+					normalizedReceived := repo
+					if resolved, err := filepath.EvalSymlinks(repo); err == nil {
+						normalizedReceived = resolved
+					}
+
+					if normalizedReceived == mainRepo {
+						writeTestJSON(t, w, map[string]any{
+							"jobs": []storage.ReviewJob{
+								{ID: 1, GitRef: sha, RepoPath: mainRepo, Status: storage.JobStatusDone},
+							},
+						})
+						return
+					}
+					writeTestJSON(t, w, map[string]any{"jobs": []storage.ReviewJob{}})
+				}
+			},
+			expectedJobID: 1,
+		},
+		{
+			name:      "fallback when primary query returns no results",
+			queryRepo: mainRepo,
+			setupMock: func(t *testing.T) func(t *testing.T, w http.ResponseWriter, r *http.Request) {
+				var calls int
+				t.Cleanup(func() {
+					if calls != 2 {
+						t.Errorf("expected 2 calls, got %d", calls)
+					}
+				})
+				return func(t *testing.T, w http.ResponseWriter, r *http.Request) {
+					assertRequest(t, r, http.MethodGet, "/api/jobs")
+					calls++
+
+					repo := r.URL.Query().Get("repo")
+					if calls == 1 {
+						if repo == "" {
+							t.Error("expected first call to have non-empty repo")
+						}
+						// Return empty to trigger fallback
+						writeTestJSON(t, w, map[string]any{"jobs": []storage.ReviewJob{}})
+						return
+					}
+
+					if calls == 2 {
+						if repo != "" {
+							t.Errorf("expected second call to have empty repo, got %q", repo)
+						}
+						// Fallback query (no repo filter)
+						writeTestJSON(t, w, map[string]any{
+							"jobs": []storage.ReviewJob{
+								{ID: 1, GitRef: sha, RepoPath: mainRepo, Status: storage.JobStatusDone},
+							},
+						})
+						return
+					}
+					t.Errorf("unexpected call %d", calls)
+				}
+			},
+			expectedJobID: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := tc.setupMock(t)
+			client := mockAPI(t, func(w http.ResponseWriter, r *http.Request) {
+				handler(t, w, r)
+			})
+			job, err := client.FindJobForCommit(tc.queryRepo, sha)
+			if err != nil {
+				t.Fatalf("FindJobForCommit failed: %v", err)
+			}
+
+			if tc.expectNotFound {
+				if job != nil {
+					t.Errorf("expected no job, got ID %d", job.ID)
+				}
+			} else {
+				if job == nil {
+					t.Fatalf("expected to find job, got nil")
+				}
+				if job.ID != tc.expectedJobID {
+					t.Errorf("expected job ID %d, got %d", tc.expectedJobID, job.ID)
+				}
+			}
 		})
-	})
-
-	// Use the same temp dir so paths match after normalization
-	job, err := client.FindJobForCommit(mainRepo, sha)
-	if err != nil {
-		t.Fatalf("FindJobForCommit failed: %v", err)
-	}
-
-	if atomic.LoadInt32(&primaryCalled) == 0 {
-		t.Error("expected primary query to be called")
-	}
-	if atomic.LoadInt32(&fallbackCalled) == 0 {
-		t.Error("expected fallback query to be called")
-	}
-
-	// Fallback should match because normalized path equals job.RepoPath
-	if job == nil {
-		t.Error("expected to find job via fallback")
-	} else if job.ID != 1 {
-		t.Errorf("expected job ID 1, got %d", job.ID)
 	}
 }
 
@@ -343,13 +372,13 @@ func TestFindPendingJobForRef(t *testing.T) {
 			client := mockAPI(t, func(w http.ResponseWriter, r *http.Request) {
 				assertRequest(t, r, http.MethodGet, "/api/jobs")
 
-				if got := r.URL.Query().Get("git_ref"); got != "abc123..def456" {
-					t.Errorf("expected git_ref=abc123..def456, got %q", got)
+				assertQuery(t, r, "git_ref", "abc123..def456")
+
+				expectedRepo, err := filepath.Abs("/test/repo")
+				if err != nil {
+					t.Fatalf("filepath.Abs failed: %v", err)
 				}
-				expectedRepo, _ := filepath.Abs("/test/repo")
-				if got := r.URL.Query().Get("repo"); got != expectedRepo {
-					t.Errorf("expected repo=%q, got %q", expectedRepo, got)
-				}
+				assertQuery(t, r, "repo", expectedRepo)
 
 				status := r.URL.Query().Get("status")
 				mu.Lock()
@@ -360,7 +389,7 @@ func TestFindPendingJobForRef(t *testing.T) {
 				if !ok {
 					jobs = []storage.ReviewJob{}
 				}
-				json.NewEncoder(w).Encode(map[string]any{"jobs": jobs})
+				writeTestJSON(t, w, map[string]any{"jobs": jobs})
 			})
 
 			job, err := client.FindPendingJobForRef("/test/repo", "abc123..def456")

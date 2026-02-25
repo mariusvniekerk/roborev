@@ -14,6 +14,13 @@ const (
 	testReview = "security"
 )
 
+func assertEq[T comparable](t *testing.T, name string, got, want T) {
+	t.Helper()
+	if got != want {
+		t.Errorf("got %s=%v, want %v", name, got, want)
+	}
+}
+
 // mustCreateCIBatch creates a CI batch, failing the test on error.
 func mustCreateCIBatch(t *testing.T, db *DB, ghRepo string, prNum int, headSHA string, totalJobs int) *CIPRBatch {
 	t.Helper()
@@ -61,26 +68,35 @@ func mustCreateLinkedTerminalJob(t *testing.T, db *DB, repoID int64, ghRepo stri
 	return batch, job.ID
 }
 
-func setBatchCreatedAt(t *testing.T, db *DB, batchID int64, offset time.Duration) {
+func setBatchTimestamp(t *testing.T, db *DB, batchID int64, column string, offset time.Duration) {
 	t.Helper()
 	ts := time.Now().UTC().Add(offset).Format("2006-01-02 15:04:05")
-	if _, err := db.Exec(`UPDATE ci_pr_batches SET created_at = ? WHERE id = ?`, ts, batchID); err != nil {
-		t.Fatalf("setBatchCreatedAt: %v", err)
+	query := `UPDATE ci_pr_batches SET ` + column + ` = ? WHERE id = ?`
+	if _, err := db.Exec(query, ts, batchID); err != nil {
+		t.Fatalf("setBatchTimestamp (%s): %v", column, err)
 	}
 }
 
+func setBatchCreatedAt(t *testing.T, db *DB, batchID int64, offset time.Duration) {
+	setBatchTimestamp(t, db, batchID, "created_at", offset)
+}
+
 func setBatchClaimedAt(t *testing.T, db *DB, batchID int64, offset time.Duration) {
-	t.Helper()
-	ts := time.Now().UTC().Add(offset).Format("2006-01-02 15:04:05")
-	if _, err := db.Exec(`UPDATE ci_pr_batches SET claimed_at = ? WHERE id = ?`, ts, batchID); err != nil {
-		t.Fatalf("setBatchClaimedAt: %v", err)
-	}
+	setBatchTimestamp(t, db, batchID, "claimed_at", offset)
 }
 
 func setJobStatusAndError(t *testing.T, db *DB, jobID int64, status, errorMsg string) {
 	t.Helper()
-	if _, err := db.Exec(`UPDATE review_jobs SET status=?, error=? WHERE id=?`, status, errorMsg, jobID); err != nil {
+	res, err := db.Exec(`UPDATE review_jobs SET status=?, error=? WHERE id=?`, status, errorMsg, jobID)
+	if err != nil {
 		t.Fatalf("setJobStatusAndError: %v", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		t.Fatalf("Failed to get rows affected: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("Expected exactly 1 row updated for jobID %d, got %d", jobID, rows)
 	}
 }
 
@@ -113,55 +129,38 @@ func TestCreateCIBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateCIBatch: %v", err)
 	}
-	if !created {
-		t.Error("expected created=true for new batch")
-	}
+	assertEq(t, "created", created, true)
 	if batch.ID == 0 {
 		t.Error("expected non-zero batch ID")
 	}
-	if batch.GithubRepo != testRepo {
-		t.Errorf("got GithubRepo=%q, want %q", batch.GithubRepo, testRepo)
-	}
-	if batch.PRNumber != 42 {
-		t.Errorf("got PRNumber=%d, want 42", batch.PRNumber)
-	}
-	if batch.HeadSHA != "abc123" {
-		t.Errorf("got HeadSHA=%q, want %q", batch.HeadSHA, "abc123")
-	}
-	if batch.TotalJobs != 4 {
-		t.Errorf("got TotalJobs=%d, want 4", batch.TotalJobs)
-	}
-	if batch.CompletedJobs != 0 || batch.FailedJobs != 0 {
-		t.Errorf("got CompletedJobs=%d, FailedJobs=%d, want 0, 0", batch.CompletedJobs, batch.FailedJobs)
-	}
-	if batch.Synthesized {
-		t.Error("expected Synthesized=false")
-	}
+	assertEq(t, "GithubRepo", batch.GithubRepo, testRepo)
+	assertEq(t, "PRNumber", batch.PRNumber, 42)
+	assertEq(t, "HeadSHA", batch.HeadSHA, "abc123")
+	assertEq(t, "TotalJobs", batch.TotalJobs, 4)
+	assertEq(t, "CompletedJobs", batch.CompletedJobs, 0)
+	assertEq(t, "FailedJobs", batch.FailedJobs, 0)
+	assertEq(t, "Synthesized", batch.Synthesized, false)
 
 	// Duplicate insert should return the same batch but created=false
 	batch2, created2, err := db.CreateCIBatch(testRepo, 42, "abc123", 4)
 	if err != nil {
 		t.Fatalf("CreateCIBatch duplicate: %v", err)
 	}
-	if created2 {
-		t.Error("expected created=false for duplicate batch")
-	}
-	if batch2.ID != batch.ID {
-		t.Errorf("duplicate CreateCIBatch returned different ID: %d vs %d", batch2.ID, batch.ID)
-	}
+	assertEq(t, "created", created2, false)
+	assertEq(t, "ID", batch2.ID, batch.ID)
 }
 
 func TestHasCIBatch(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()
 
-	has, err := db.HasCIBatch(testRepo, 1, testSHA)
-	if err != nil {
-		t.Fatalf("HasCIBatch: %v", err)
-	}
-	if has {
-		t.Error("expected false before creation")
-	}
+	t.Run("BeforeCreation", func(t *testing.T) {
+		has, err := db.HasCIBatch(testRepo, 1, testSHA)
+		if err != nil {
+			t.Fatalf("HasCIBatch: %v", err)
+		}
+		assertEq(t, "has", has, false)
+	})
 
 	repo, err := db.GetOrCreateRepo("/tmp/test-repo-hasbatch")
 	if err != nil {
@@ -169,35 +168,32 @@ func TestHasCIBatch(t *testing.T) {
 	}
 	batch := mustCreateCIBatch(t, db, testRepo, 1, testSHA, 2)
 
-	// Empty batch (no linked jobs) should return false
-	has, err = db.HasCIBatch(testRepo, 1, testSHA)
-	if err != nil {
-		t.Fatalf("HasCIBatch (empty): %v", err)
-	}
-	if has {
-		t.Error("expected false for batch with no linked jobs")
-	}
+	t.Run("EmptyBatch", func(t *testing.T) {
+		has, err := db.HasCIBatch(testRepo, 1, testSHA)
+		if err != nil {
+			t.Fatalf("HasCIBatch (empty): %v", err)
+		}
+		assertEq(t, "has", has, false)
+	})
 
-	// Link a job — now HasCIBatch should return true
-	job := mustEnqueueReviewJob(t, db, repo.ID, "abc..def", "test", testReview)
-	mustRecordBatchJob(t, db, batch.ID, job.ID)
+	t.Run("WithLinkedJob", func(t *testing.T) {
+		job := mustEnqueueReviewJob(t, db, repo.ID, "abc..def", "test", testReview)
+		mustRecordBatchJob(t, db, batch.ID, job.ID)
 
-	has, err = db.HasCIBatch(testRepo, 1, testSHA)
-	if err != nil {
-		t.Fatalf("HasCIBatch: %v", err)
-	}
-	if !has {
-		t.Error("expected true after linking a job")
-	}
+		has, err := db.HasCIBatch(testRepo, 1, testSHA)
+		if err != nil {
+			t.Fatalf("HasCIBatch: %v", err)
+		}
+		assertEq(t, "has", has, true)
+	})
 
-	// Different SHA should be false
-	has, err = db.HasCIBatch(testRepo, 1, "sha2")
-	if err != nil {
-		t.Fatalf("HasCIBatch: %v", err)
-	}
-	if has {
-		t.Error("expected false for different SHA")
-	}
+	t.Run("DifferentSHA", func(t *testing.T) {
+		has, err := db.HasCIBatch(testRepo, 1, "sha2")
+		if err != nil {
+			t.Fatalf("HasCIBatch: %v", err)
+		}
+		assertEq(t, "has", has, false)
+	})
 }
 
 func TestRecordBatchJob(t *testing.T) {
@@ -347,26 +343,16 @@ func TestGetBatchReviews(t *testing.T) {
 	}
 
 	// First review should be job1 (codex/security)
-	if reviews[0].Agent != testAgent || reviews[0].ReviewType != testReview {
-		t.Errorf("review 0: got agent=%s, type=%s", reviews[0].Agent, reviews[0].ReviewType)
-	}
-	if reviews[0].Output != "finding1" {
-		t.Errorf("review 0: got output=%q, want %q", reviews[0].Output, "finding1")
-	}
-	if reviews[0].Status != "done" {
-		t.Errorf("review 0: got status=%q, want %q", reviews[0].Status, "done")
-	}
+	assertEq(t, "review[0].Agent", reviews[0].Agent, testAgent)
+	assertEq(t, "review[0].ReviewType", reviews[0].ReviewType, testReview)
+	assertEq(t, "review[0].Output", reviews[0].Output, "finding1")
+	assertEq(t, "review[0].Status", reviews[0].Status, "done")
 
 	// Second review should be job2 (gemini/review)
-	if reviews[1].Agent != "gemini" || reviews[1].ReviewType != "review" {
-		t.Errorf("review 1: got agent=%s, type=%s", reviews[1].Agent, reviews[1].ReviewType)
-	}
-	if reviews[1].Status != "failed" {
-		t.Errorf("review 1: got status=%q, want %q", reviews[1].Status, "failed")
-	}
-	if reviews[1].Error != "timeout" {
-		t.Errorf("review 1: got error=%q, want %q", reviews[1].Error, "timeout")
-	}
+	assertEq(t, "review[1].Agent", reviews[1].Agent, "gemini")
+	assertEq(t, "review[1].ReviewType", reviews[1].ReviewType, "review")
+	assertEq(t, "review[1].Status", reviews[1].Status, "failed")
+	assertEq(t, "review[1].Error", reviews[1].Error, "timeout")
 }
 
 func TestGetCIBatchByJobID(t *testing.T) {
@@ -563,38 +549,26 @@ func TestDeleteEmptyBatches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeleteEmptyBatches: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("expected 1 deleted, got %d", n)
-	}
+	assertEq(t, "deleted count", n, 1)
 
-	// Old empty batch should be gone
 	has, err := db.HasCIBatch(testRepo, 1, "sha-old")
 	if err != nil {
 		t.Fatalf("HasCIBatch (old empty): %v", err)
 	}
-	if has {
-		t.Error("old empty batch should have been deleted")
-	}
+	assertEq(t, "has", has, false)
 
-	// Recent empty batch should still exist in DB (HasCIBatch requires linked
-	// jobs, so check via direct query)
 	var recentCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM ci_pr_batches WHERE github_repo = ? AND pr_number = ? AND head_sha = ?`,
 		testRepo, 2, "sha-recent").Scan(&recentCount); err != nil {
 		t.Fatalf("count recent batch: %v", err)
 	}
-	if recentCount != 1 {
-		t.Error("recent empty batch should NOT have been deleted")
-	}
+	assertEq(t, "recentCount", recentCount, 1)
 
-	// Non-empty batch should still exist
 	has, err = db.HasCIBatch(testRepo, 3, "sha-nonempty")
 	if err != nil {
 		t.Fatalf("HasCIBatch (non-empty): %v", err)
 	}
-	if !has {
-		t.Error("non-empty batch should NOT have been deleted")
-	}
+	assertEq(t, "has", has, true)
 }
 
 func TestCancelJob_ReturnsErrNoRowsForTerminalJobs(t *testing.T) {
@@ -606,33 +580,28 @@ func TestCancelJob_ReturnsErrNoRowsForTerminalJobs(t *testing.T) {
 		t.Fatalf("GetOrCreateRepo: %v", err)
 	}
 
-	// Create and complete a job
-	job := mustEnqueueReviewJob(t, db, repo.ID, "a..b", testAgent, testReview)
-	setJobStatus(t, db, job.ID, JobStatusDone)
+	t.Run("TerminalJob_ReturnsErrNoRows", func(t *testing.T) {
+		job := mustEnqueueReviewJob(t, db, repo.ID, "a..b", testAgent, testReview)
+		setJobStatus(t, db, job.ID, JobStatusDone)
 
-	// CancelJob on a terminal job should return sql.ErrNoRows
-	err = db.CancelJob(job.ID)
-	if err == nil {
-		t.Fatal("expected error for terminal job")
-	}
-	if err != sql.ErrNoRows {
-		t.Fatalf("expected sql.ErrNoRows, got: %v", err)
-	}
+		err := db.CancelJob(job.ID)
+		if err != sql.ErrNoRows {
+			t.Fatalf("expected sql.ErrNoRows, got: %v", err)
+		}
+	})
 
-	// CancelJob on a queued job should succeed
-	job2 := mustEnqueueReviewJob(t, db, repo.ID, "c..d", testAgent, testReview)
-	if err := db.CancelJob(job2.ID); err != nil {
-		t.Fatalf("CancelJob on queued job: %v", err)
-	}
+	t.Run("QueuedJob_Succeeds", func(t *testing.T) {
+		job := mustEnqueueReviewJob(t, db, repo.ID, "c..d", testAgent, testReview)
+		if err := db.CancelJob(job.ID); err != nil {
+			t.Fatalf("CancelJob on queued job: %v", err)
+		}
 
-	// Verify it was actually canceled
-	var status string
-	if err := db.QueryRow(`SELECT status FROM review_jobs WHERE id = ?`, job2.ID).Scan(&status); err != nil {
-		t.Fatalf("query status: %v", err)
-	}
-	if status != "canceled" {
-		t.Errorf("status = %q, want canceled", status)
-	}
+		var status string
+		if err := db.QueryRow(`SELECT status FROM review_jobs WHERE id = ?`, job.ID).Scan(&status); err != nil {
+			t.Fatalf("query status: %v", err)
+		}
+		assertEq(t, "status", status, "canceled")
+	})
 }
 
 func TestCancelSupersededBatches(t *testing.T) {

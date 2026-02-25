@@ -20,41 +20,39 @@ type mockConfig struct {
 }
 
 func newWaitMockHandler(cfg mockConfig) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/jobs" {
-			if cfg.OnJobsQuery != nil {
-				cfg.OnJobsQuery(r)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/jobs", func(w http.ResponseWriter, r *http.Request) {
+		if cfg.OnJobsQuery != nil {
+			cfg.OnJobsQuery(r)
+		}
+		if cfg.JobsErr != 0 {
+			w.WriteHeader(cfg.JobsErr)
+			// For compatibility with existing tests expecting specific error body
+			if cfg.JobsErr == http.StatusInternalServerError {
+				w.Write([]byte("database locked"))
 			}
-			if cfg.JobsErr != 0 {
-				w.WriteHeader(cfg.JobsErr)
-				// For compatibility with existing tests expecting specific error body
-				if cfg.JobsErr == http.StatusInternalServerError {
-					w.Write([]byte("database locked"))
-				}
-				return
-			}
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		// Ensure empty slice is encoded as [] not null if initialized but empty
+		jobs := cfg.Jobs
+		if jobs == nil {
+			jobs = []storage.ReviewJob{}
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"jobs":     jobs,
+			"has_more": false,
+		})
+	})
+	mux.HandleFunc("/api/review", func(w http.ResponseWriter, r *http.Request) {
+		if cfg.Review != nil {
 			w.WriteHeader(http.StatusOK)
-			// Ensure empty slice is encoded as [] not null if initialized but empty
-			jobs := cfg.Jobs
-			if jobs == nil {
-				jobs = []storage.ReviewJob{}
-			}
-			json.NewEncoder(w).Encode(map[string]any{
-				"jobs":     jobs,
-				"has_more": false,
-			})
-			return
+			json.NewEncoder(w).Encode(cfg.Review)
+		} else {
+			w.WriteHeader(http.StatusNotFound)
 		}
-		if r.URL.Path == "/api/review" {
-			if cfg.Review != nil {
-				w.WriteHeader(http.StatusOK)
-				json.NewEncoder(w).Encode(cfg.Review)
-			} else {
-				w.WriteHeader(http.StatusNotFound)
-			}
-			return
-		}
-	}
+	})
+	return mux.ServeHTTP
 }
 
 // requireExitCode asserts err is an *exitError with the expected code.
@@ -84,8 +82,7 @@ func newWaitEnv(t *testing.T, handler http.Handler) *waitEnv {
 	t.Helper()
 	repo := newTestGitRepo(t)
 	sha := repo.CommitFile("file.txt", "content", "initial commit")
-	_, cleanup := setupMockDaemon(t, handler)
-	t.Cleanup(cleanup)
+	daemonFromHandler(t, handler)
 	chdir(t, repo.Dir)
 	return &waitEnv{repo: repo, sha: sha}
 }
@@ -141,17 +138,11 @@ func TestWaitArgValidation(t *testing.T) {
 		},
 	}
 
-	newWaitEnv(t, newWaitMockHandler(mockConfig{}))
-
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			newWaitEnv(t, newWaitMockHandler(mockConfig{}))
 			_, err := runWait(t, tc.args...)
-			if err == nil {
-				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
-			}
-			if !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("expected error containing %q, got: %v", tc.wantErr, err)
-			}
+			assertErrorContains(t, err, tc.wantErr)
 		})
 	}
 }
@@ -164,20 +155,10 @@ func TestWaitArgValidationWithoutDaemon(t *testing.T) {
 	chdir(t, repo.Dir)
 
 	_, err := runWait(t, "--job", "0")
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "invalid job ID") {
-		t.Errorf("expected 'invalid job ID' error, got: %v", err)
-	}
+	assertErrorContains(t, err, "invalid job ID")
 
 	_, err = runWait(t, "--sha", "not-a-valid-ref")
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "invalid git ref") {
-		t.Errorf("expected 'invalid git ref' error, got: %v", err)
-	}
+	assertErrorContains(t, err, "invalid git ref")
 }
 
 func TestWait_Scenarios(t *testing.T) {
@@ -213,6 +194,7 @@ func TestWait_Scenarios(t *testing.T) {
 			mock:          mockConfig{},
 			expectErr:     true,
 			expectErrCode: 1,
+			expectOut:     "No job found",
 		},
 		{
 			name: "Passing Review",
@@ -255,14 +237,10 @@ func TestWait_Scenarios(t *testing.T) {
 				t.Fatalf("expected no error, got: %v", err)
 			}
 
-			if tc.expectOut == "" {
-				if tc.name == "Quiet mode suppresses output" && stdout != "" {
-					t.Errorf("expected no stdout in quiet mode, got: %q", stdout)
-				}
-			} else {
-				if !strings.Contains(stdout, tc.expectOut) {
-					t.Errorf("expected stdout to contain %q, got: %q", tc.expectOut, stdout)
-				}
+			if tc.expectOut == "" && stdout != "" {
+				t.Errorf("expected no stdout, got: %q", stdout)
+			} else if tc.expectOut != "" && !strings.Contains(stdout, tc.expectOut) {
+				t.Errorf("expected stdout to contain %q, got: %q", tc.expectOut, stdout)
 			}
 		})
 	}
@@ -275,12 +253,7 @@ func TestWaitJobIDPollingNon200Response(t *testing.T) {
 	}))
 
 	_, err := runWait(t, "--job", "42")
-	if err == nil {
-		t.Fatal("expected error for non-200 polling response")
-	}
-	if !strings.Contains(err.Error(), "500") {
-		t.Errorf("expected error to contain status code, got: %v", err)
-	}
+	assertErrorContains(t, err, "500")
 }
 
 func TestWaitNumericFallbackToJobID(t *testing.T) {
@@ -302,8 +275,7 @@ func TestWaitNumericFallbackToJobID(t *testing.T) {
 		},
 	}
 
-	_, cleanup := setupMockDaemon(t, newWaitMockHandler(mock))
-	t.Cleanup(cleanup)
+	daemonFromHandler(t, newWaitMockHandler(mock))
 	chdir(t, repo.Dir)
 
 	_, err := runWait(t, "42", "--quiet")
@@ -346,12 +318,7 @@ func TestWaitLookupNon200Response(t *testing.T) {
 	}))
 
 	_, err := runWait(t, "--sha", "HEAD")
-	if err == nil {
-		t.Fatal("expected error for non-200 response")
-	}
-	if !strings.Contains(err.Error(), "500 Internal Server Error") {
-		t.Errorf("expected error to contain status line, got: %v", err)
-	}
+	assertErrorContains(t, err, "500 Internal Server Error")
 }
 
 // setupRepoWithWorktree creates a repo, a worktree, and commits in both.
@@ -396,8 +363,7 @@ func TestWaitWorktreeResolvesRefFromWorktreeAndRepoFromMain(t *testing.T) {
 		},
 	}
 
-	_, cleanup := setupMockDaemon(t, newWaitMockHandler(mock))
-	t.Cleanup(cleanup)
+	daemonFromHandler(t, newWaitMockHandler(mock))
 
 	chdir(t, worktreeDir)
 

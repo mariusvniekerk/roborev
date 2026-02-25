@@ -15,6 +15,7 @@ import (
 
 	"github.com/roborev-dev/roborev/internal/agent"
 	"github.com/roborev-dev/roborev/internal/config"
+	"github.com/roborev-dev/roborev/internal/daemon"
 	"github.com/roborev-dev/roborev/internal/git"
 	"github.com/roborev-dev/roborev/internal/prompt/analyze"
 	"github.com/roborev-dev/roborev/internal/storage"
@@ -295,15 +296,15 @@ func runAnalysis(cmd *cobra.Command, typeName string, filePatterns []string, opt
 
 	// Per-file mode: create one job per file
 	if opts.perFile {
-		return runPerFileAnalysis(cmd, repoRoot, analysisType, files, opts, maxPromptSize)
+		return runPerFileAnalysis(cmd, serverAddr, repoRoot, analysisType, files, opts, maxPromptSize)
 	}
 
 	// Standard mode: all files in one job
-	return runSingleAnalysis(cmd, repoRoot, analysisType, files, opts, maxPromptSize)
+	return runSingleAnalysis(cmd, serverAddr, repoRoot, analysisType, files, opts, maxPromptSize)
 }
 
 // runSingleAnalysis creates a single analysis job for all files
-func runSingleAnalysis(cmd *cobra.Command, repoRoot string, analysisType *analyze.AnalysisType, files map[string]string, opts analyzeOptions, maxPromptSize int) error {
+func runSingleAnalysis(cmd *cobra.Command, serverAddr string, repoRoot string, analysisType *analyze.AnalysisType, files map[string]string, opts analyzeOptions, maxPromptSize int) error {
 	if !opts.quiet && !opts.jsonOutput {
 		cmd.Printf("Analyzing %d file(s) with %q analysis...\n", len(files), analysisType.Name)
 	}
@@ -337,7 +338,7 @@ func runSingleAnalysis(cmd *cobra.Command, repoRoot string, analysisType *analyz
 	}
 
 	// Enqueue the job
-	job, err := enqueueAnalysisJob(repoRoot, fullPrompt, outputPrefix, analysisType.Name, opts)
+	job, err := enqueueAnalysisJob(serverAddr, repoRoot, fullPrompt, outputPrefix, analysisType.Name, opts)
 	if err != nil {
 		return err
 	}
@@ -372,7 +373,7 @@ func runSingleAnalysis(cmd *cobra.Command, repoRoot string, analysisType *analyz
 }
 
 // runPerFileAnalysis creates one analysis job per file
-func runPerFileAnalysis(cmd *cobra.Command, repoRoot string, analysisType *analyze.AnalysisType, files map[string]string, opts analyzeOptions, maxPromptSize int) error {
+func runPerFileAnalysis(cmd *cobra.Command, serverAddr string, repoRoot string, analysisType *analyze.AnalysisType, files map[string]string, opts analyzeOptions, maxPromptSize int) error {
 	// Sort files for deterministic order
 	fileNames := make([]string, 0, len(files))
 	for name := range files {
@@ -408,7 +409,7 @@ func runPerFileAnalysis(cmd *cobra.Command, repoRoot string, analysisType *analy
 			}
 		}
 
-		job, err := enqueueAnalysisJob(repoRoot, fullPrompt, outputPrefix, analysisType.Name, opts)
+		job, err := enqueueAnalysisJob(serverAddr, repoRoot, fullPrompt, outputPrefix, analysisType.Name, opts)
 		if err != nil {
 			return fmt.Errorf("enqueue job for %s: %w", fileName, err)
 		}
@@ -494,21 +495,21 @@ func buildOutputPrefix(analysisType string, filePaths []string) string {
 }
 
 // enqueueAnalysisJob sends a job to the daemon
-func enqueueAnalysisJob(repoRoot, prompt, outputPrefix, label string, opts analyzeOptions) (*storage.ReviewJob, error) {
+func enqueueAnalysisJob(serverAddr string, repoRoot, prompt, outputPrefix, label string, opts analyzeOptions) (*storage.ReviewJob, error) {
 	branch := git.GetCurrentBranch(repoRoot)
 	if opts.branch != "" && opts.branch != "HEAD" {
 		branch = opts.branch
 	}
-	reqBody, _ := json.Marshal(map[string]any{
-		"repo_path":     repoRoot,
-		"git_ref":       label, // Use analysis type name as the TUI label
-		"branch":        branch,
-		"agent":         opts.agentName,
-		"model":         opts.model,
-		"reasoning":     opts.reasoning,
-		"custom_prompt": prompt,
-		"output_prefix": outputPrefix,
-		"agentic":       true, // Agentic mode needed for reading files when prompt exceeds size limit
+	reqBody, _ := json.Marshal(daemon.EnqueueRequest{
+		RepoPath:     repoRoot,
+		GitRef:       label, // Use analysis type name as the TUI label
+		Branch:       branch,
+		Agent:        opts.agentName,
+		Model:        opts.model,
+		Reasoning:    opts.reasoning,
+		CustomPrompt: prompt,
+		OutputPrefix: outputPrefix,
+		Agentic:      true, // Agentic mode needed for reading files when prompt exceeds size limit
 	})
 
 	resp, err := http.Post(serverAddr+"/api/enqueue", "application/json", bytes.NewReader(reqBody))

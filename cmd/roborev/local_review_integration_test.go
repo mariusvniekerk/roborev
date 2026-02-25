@@ -2,7 +2,11 @@
 
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/roborev-dev/roborev/internal/agent"
+)
 
 func TestLocalReviewReasoningLevels(t *testing.T) {
 	tests := []struct {
@@ -10,10 +14,10 @@ func TestLocalReviewReasoningLevels(t *testing.T) {
 		reasoning string
 		expected  string
 	}{
-		{"Fast", "fast", "reasoning: fast"},
-		{"Standard", "standard", "reasoning: standard"},
-		{"Thorough", "thorough", "reasoning: thorough"},
-		{"Default", "", "reasoning: thorough"}, // default (agent defaults)
+		{name: "Fast", reasoning: string(agent.ReasoningFast), expected: "reasoning: " + string(agent.ReasoningFast)},
+		{name: "Standard", reasoning: string(agent.ReasoningStandard), expected: "reasoning: " + string(agent.ReasoningStandard)},
+		{name: "Thorough", reasoning: string(agent.ReasoningThorough), expected: "reasoning: " + string(agent.ReasoningThorough)},
+		{name: "Default", reasoning: "", expected: "reasoning: " + string(agent.ReasoningThorough)}, // default (agent defaults)
 	}
 
 	for _, tc := range tests {

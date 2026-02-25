@@ -1042,15 +1042,15 @@ Examples:
 			}
 
 			// Build request body
-			reqFields := map[string]any{
-				"repo_path":    root,
-				"git_ref":      gitRef,
-				"branch":       branchName,
-				"agent":        agent,
-				"model":        model,
-				"reasoning":    reasoning,
-				"review_type":  reviewType,
-				"diff_content": diffContent,
+			reqFields := daemon.EnqueueRequest{
+				RepoPath:    root,
+				GitRef:      gitRef,
+				Branch:      branchName,
+				Agent:       agent,
+				Model:       model,
+				Reasoning:   reasoning,
+				ReviewType:  reviewType,
+				DiffContent: diffContent,
 			}
 
 			reqBody, _ := json.Marshal(reqFields)
@@ -1912,11 +1912,6 @@ Examples:
   roborev comment --job 1234567 "msg"  # Force numeric arg as job ID`,
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Ensure daemon is running
-			if err := ensureDaemon(); err != nil {
-				return fmt.Errorf("daemon not running: %w", err)
-			}
-
 			ref := args[0]
 
 			// Check if ref is a job ID (numeric) or SHA
@@ -1948,6 +1943,11 @@ Examples:
 						sha = ref
 					}
 				}
+			}
+
+			// Ensure daemon is running
+			if err := ensureDaemon(); err != nil {
+				return fmt.Errorf("daemon not running: %w", err)
 			}
 
 			// Message can be positional argument or flag
@@ -2234,10 +2234,10 @@ func waitForReviewWithInterval(jobID int64, pollInterval time.Duration) (*storag
 func enqueueReview(repoPath, gitRef, agentName string) (int64, error) {
 	addr := getDaemonAddr()
 
-	reqBody, _ := json.Marshal(map[string]string{
-		"repo_path": repoPath,
-		"git_ref":   gitRef,
-		"agent":     agentName,
+	reqBody, _ := json.Marshal(daemon.EnqueueRequest{
+		RepoPath: repoPath,
+		GitRef:   gitRef,
+		Agent:    agentName,
 	})
 
 	resp, err := http.Post(addr+"/api/enqueue", "application/json", bytes.NewReader(reqBody))

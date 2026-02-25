@@ -10,32 +10,17 @@ import (
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/google/go-cmp/cmp"
 	"github.com/mattn/go-runewidth"
 	"github.com/roborev-dev/roborev/internal/storage"
 )
 
 func TestTUIAddressReviewSuccess(t *testing.T) {
-	_, m := mockServerModel(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Errorf("Expected POST, got %s", r.Method)
-		}
-		var req map[string]any
-		json.NewDecoder(r.Body).Decode(&req)
-		if req["job_id"].(float64) != 100 {
-			t.Errorf("Expected job_id 100, got %v", req["job_id"])
-		}
-		if req["addressed"].(bool) != true {
-			t.Errorf("Expected addressed true, got %v", req["addressed"])
-		}
-		json.NewEncoder(w).Encode(map[string]bool{"success": true})
-	})
+	_, m := mockServerModel(t, expectJSONPost(t, "", addressRequest{JobID: 100, Addressed: true}, map[string]bool{"success": true}))
 	cmd := m.addressReview(42, 100, true, false, 1) // reviewID=42, jobID=100, newState=true, oldState=false
 	msg := cmd()
 
-	result, ok := msg.(tuiAddressedResultMsg)
-	if !ok {
-		t.Fatalf("Expected tuiAddressedResultMsg, got %T: %v", msg, msg)
-	}
+	result := assertMsgType[tuiAddressedResultMsg](t, msg)
 	if result.err != nil {
 		t.Errorf("Expected no error, got %v", result.err)
 	}
@@ -54,36 +39,19 @@ func TestTUIAddressReviewNotFound(t *testing.T) {
 	cmd := m.addressReview(999, 100, true, false, 1) // reviewID=999, jobID=100, newState=true, oldState=false
 	msg := cmd()
 
-	result, ok := msg.(tuiAddressedResultMsg)
-	if !ok {
-		t.Fatalf("Expected tuiAddressedResultMsg for 404, got %T: %v", msg, msg)
-	}
+	result := assertMsgType[tuiAddressedResultMsg](t, msg)
 	if result.err == nil || result.err.Error() != "review not found" {
 		t.Errorf("Expected 'review not found' error, got: %v", result.err)
 	}
 }
 
 func TestTUIToggleAddressedForJobSuccess(t *testing.T) {
-	_, m := mockServerModel(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/review/address" {
-			var req map[string]any
-			json.NewDecoder(r.Body).Decode(&req)
-			if req["job_id"].(float64) != 1 {
-				t.Errorf("Expected job_id 1, got %v", req["job_id"])
-			}
-			json.NewEncoder(w).Encode(map[string]bool{"success": true})
-		} else {
-			t.Errorf("Unexpected request: %s %s", r.Method, r.URL.Path)
-		}
-	})
+	_, m := mockServerModel(t, expectJSONPost(t, "/api/review/address", addressRequest{JobID: 1, Addressed: true}, map[string]bool{"success": true}))
 	currentState := false
 	cmd := m.toggleAddressedForJob(1, &currentState)
 	msg := cmd()
 
-	addressed, ok := msg.(tuiAddressedMsg)
-	if !ok {
-		t.Fatalf("Expected tuiAddressedMsg, got %T: %v", msg, msg)
-	}
+	addressed := assertMsgType[tuiAddressedMsg](t, msg)
 	if !bool(addressed) {
 		t.Error("Expected toggled state to be true (was false)")
 	}
@@ -96,10 +64,7 @@ func TestTUIToggleAddressedNoReview(t *testing.T) {
 	cmd := m.toggleAddressedForJob(999, nil)
 	msg := cmd()
 
-	errMsg, ok := msg.(tuiErrMsg)
-	if !ok {
-		t.Fatalf("Expected tuiErrMsg, got %T: %v", msg, msg)
-	}
+	errMsg := assertMsgType[tuiErrMsg](t, msg)
 	if errMsg.Error() != "no review for this job" {
 		t.Errorf("Expected 'no review for this job', got: %v", errMsg)
 	}
@@ -206,29 +171,11 @@ type addressRequest struct {
 }
 
 func TestTUIAddressReviewInBackgroundSuccess(t *testing.T) {
-	_, m := mockServerModel(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/review/address" || r.Method != http.MethodPost {
-			t.Fatalf("Unexpected request: %s %s", r.Method, r.URL.Path)
-		}
-		var req addressRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("Failed to decode request body: %v", err)
-		}
-		if req.JobID != 42 {
-			t.Errorf("Expected job_id=42, got %d", req.JobID)
-		}
-		if req.Addressed != true {
-			t.Errorf("Expected addressed=true, got %v", req.Addressed)
-		}
-		json.NewEncoder(w).Encode(map[string]bool{"success": true})
-	})
+	_, m := mockServerModel(t, expectJSONPost(t, "/api/review/address", addressRequest{JobID: 42, Addressed: true}, map[string]bool{"success": true}))
 	cmd := m.addressReviewInBackground(42, true, false, 1) // jobID=42, newState=true, oldState=false
 	msg := cmd()
 
-	result, ok := msg.(tuiAddressedResultMsg)
-	if !ok {
-		t.Fatalf("Expected tuiAddressedResultMsg, got %T: %v", msg, msg)
-	}
+	result := assertMsgType[tuiAddressedResultMsg](t, msg)
 	if result.err != nil {
 		t.Errorf("Expected no error, got %v", result.err)
 	}
@@ -246,17 +193,16 @@ func TestTUIAddressReviewInBackgroundSuccess(t *testing.T) {
 func TestTUIAddressReviewInBackgroundNotFound(t *testing.T) {
 	_, m := mockServerModel(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/review/address" || r.Method != http.MethodPost {
-			t.Fatalf("Unexpected request: %s %s", r.Method, r.URL.Path)
+			t.Errorf("Unexpected request: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
 		}
 		w.WriteHeader(http.StatusNotFound)
 	})
 	cmd := m.addressReviewInBackground(42, true, false, 1)
 	msg := cmd()
 
-	result, ok := msg.(tuiAddressedResultMsg)
-	if !ok {
-		t.Fatalf("Expected tuiAddressedResultMsg, got %T: %v", msg, msg)
-	}
+	result := assertMsgType[tuiAddressedResultMsg](t, msg)
 	if result.err == nil || !strings.Contains(result.err.Error(), "no review") {
 		t.Errorf("Expected error containing 'no review', got: %v", result.err)
 	}
@@ -271,17 +217,16 @@ func TestTUIAddressReviewInBackgroundNotFound(t *testing.T) {
 func TestTUIAddressReviewInBackgroundServerError(t *testing.T) {
 	_, m := mockServerModel(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/review/address" || r.Method != http.MethodPost {
-			t.Fatalf("Unexpected request: %s %s", r.Method, r.URL.Path)
+			t.Errorf("Unexpected request: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
 		}
 		w.WriteHeader(http.StatusInternalServerError)
 	})
 	cmd := m.addressReviewInBackground(42, true, false, 1)
 	msg := cmd()
 
-	result, ok := msg.(tuiAddressedResultMsg)
-	if !ok {
-		t.Fatalf("Expected tuiAddressedResultMsg, got %T: %v", msg, msg)
-	}
+	result := assertMsgType[tuiAddressedResultMsg](t, msg)
 	if result.err == nil {
 		t.Error("Expected error for address 500 response")
 	}
@@ -327,12 +272,7 @@ func TestTUIAddressedRollbackOnError(t *testing.T) {
 		t.Error("Expected error to be set")
 	}
 	// Stats should be rolled back too
-	if m.jobStats.Addressed != 0 {
-		t.Errorf("Expected Addressed=0 after rollback, got %d", m.jobStats.Addressed)
-	}
-	if m.jobStats.Unaddressed != 1 {
-		t.Errorf("Expected Unaddressed=1 after rollback, got %d", m.jobStats.Unaddressed)
-	}
+	assertJobStats(t, m, 0, 1)
 }
 
 func TestTUIAddressedRollbackAfterPollRefresh(t *testing.T) {
@@ -349,10 +289,7 @@ func TestTUIAddressedRollbackAfterPollRefresh(t *testing.T) {
 	// Step 1: optimistic toggle → addressed
 	result, _ := m.handleAddressedKey()
 	m = result.(tuiModel)
-	if m.jobStats.Addressed != 1 || m.jobStats.Unaddressed != 0 {
-		t.Fatalf("after toggle: Addressed=%d Unaddressed=%d",
-			m.jobStats.Addressed, m.jobStats.Unaddressed)
-	}
+	assertJobStats(t, m, 1, 0)
 
 	// Step 2: poll arrives with server truth (still unaddressed)
 	pollMsg := tuiJobsMsg{
@@ -364,10 +301,7 @@ func TestTUIAddressedRollbackAfterPollRefresh(t *testing.T) {
 	}
 	m, _ = updateModel(t, m, pollMsg)
 	// Pending delta should be re-applied on top of server stats
-	if m.jobStats.Addressed != 1 || m.jobStats.Unaddressed != 0 {
-		t.Fatalf("after poll: Addressed=%d Unaddressed=%d",
-			m.jobStats.Addressed, m.jobStats.Unaddressed)
-	}
+	assertJobStats(t, m, 1, 0)
 
 	// Step 3: error arrives → rollback
 	errMsg := tuiAddressedResultMsg{
@@ -378,14 +312,7 @@ func TestTUIAddressedRollbackAfterPollRefresh(t *testing.T) {
 		err:      fmt.Errorf("server error"),
 	}
 	m, _ = updateModel(t, m, errMsg)
-	if m.jobStats.Addressed != 0 {
-		t.Errorf("after rollback: expected Addressed=0, got %d",
-			m.jobStats.Addressed)
-	}
-	if m.jobStats.Unaddressed != 1 {
-		t.Errorf("after rollback: expected Unaddressed=1, got %d",
-			m.jobStats.Unaddressed)
-	}
+	assertJobStats(t, m, 0, 1)
 }
 
 func TestTUIAddressedPollConfirmsNoDoubleCount(t *testing.T) {
@@ -402,10 +329,7 @@ func TestTUIAddressedPollConfirmsNoDoubleCount(t *testing.T) {
 	// Step 1: optimistic toggle → addressed
 	result, _ := m.handleAddressedKey()
 	m = result.(tuiModel)
-	if m.jobStats.Addressed != 1 || m.jobStats.Unaddressed != 0 {
-		t.Fatalf("after toggle: Addressed=%d Unaddressed=%d",
-			m.jobStats.Addressed, m.jobStats.Unaddressed)
-	}
+	assertJobStats(t, m, 1, 0)
 
 	// Step 2: poll arrives with server already reflecting the change
 	pollMsg := tuiJobsMsg{
@@ -417,14 +341,7 @@ func TestTUIAddressedPollConfirmsNoDoubleCount(t *testing.T) {
 	}
 	m, _ = updateModel(t, m, pollMsg)
 	// Pending should be cleared (server confirmed), no double-counting
-	if m.jobStats.Addressed != 1 {
-		t.Errorf("after confirm poll: expected Addressed=1, got %d",
-			m.jobStats.Addressed)
-	}
-	if m.jobStats.Unaddressed != 0 {
-		t.Errorf("after confirm poll: expected Unaddressed=0, got %d",
-			m.jobStats.Unaddressed)
-	}
+	assertJobStats(t, m, 1, 0)
 }
 
 func TestTUIAddressedSuccessNoRollback(t *testing.T) {
@@ -484,7 +401,7 @@ func TestTUIAddressedToggleMovesSelectionWithHideActive(t *testing.T) {
 }
 
 func TestTUISetJobAddressedHelper(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 
 	// Test with nil Addressed pointer - should allocate
 	m.jobs = []storage.ReviewJob{
@@ -514,30 +431,15 @@ func TestTUISetJobAddressedHelper(t *testing.T) {
 }
 
 func TestTUICancelJobSuccess(t *testing.T) {
-	_, m := mockServerModel(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/job/cancel" {
-			t.Errorf("Expected /api/job/cancel, got %s", r.URL.Path)
-		}
-		if r.Method != http.MethodPost {
-			t.Errorf("Expected POST, got %s", r.Method)
-		}
-		var req struct {
-			JobID int64 `json:"job_id"`
-		}
-		json.NewDecoder(r.Body).Decode(&req)
-		if req.JobID != 42 {
-			t.Errorf("Expected job_id=42, got %d", req.JobID)
-		}
-		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	})
+	type cancelRequest struct {
+		JobID int64 `json:"job_id"`
+	}
+	_, m := mockServerModel(t, expectJSONPost(t, "/api/job/cancel", cancelRequest{JobID: 42}, map[string]any{"success": true}))
 	oldFinishedAt := time.Now().Add(-1 * time.Hour)
 	cmd := m.cancelJob(42, storage.JobStatusRunning, &oldFinishedAt)
 	msg := cmd()
 
-	result, ok := msg.(tuiCancelResultMsg)
-	if !ok {
-		t.Fatalf("Expected tuiCancelResultMsg, got %T: %v", msg, msg)
-	}
+	result := assertMsgType[tuiCancelResultMsg](t, msg)
 	if result.err != nil {
 		t.Errorf("Expected no error, got %v", result.err)
 	}
@@ -560,10 +462,7 @@ func TestTUICancelJobNotFound(t *testing.T) {
 	cmd := m.cancelJob(99, storage.JobStatusQueued, nil)
 	msg := cmd()
 
-	result, ok := msg.(tuiCancelResultMsg)
-	if !ok {
-		t.Fatalf("Expected tuiCancelResultMsg, got %T: %v", msg, msg)
-	}
+	result := assertMsgType[tuiCancelResultMsg](t, msg)
 	if result.err == nil {
 		t.Error("Expected error for 404, got nil")
 	}
@@ -819,7 +718,7 @@ func TestTUIRespondSuccessClearsOnlyMatchingJob(t *testing.T) {
 }
 
 func TestTUIRespondBackspaceMultiByte(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewComment
 	m.commentJobID = 1
 
@@ -864,7 +763,7 @@ func containsRune(s string, r rune) bool {
 }
 
 func TestTUIRespondViewTruncationMultiByte(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewComment
 	m.commentJobID = 1
 	m.width = 30
@@ -910,7 +809,7 @@ func TestTUIRespondViewTruncationMultiByte(t *testing.T) {
 }
 
 func TestTUIRespondViewTabExpansion(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewComment
 	m.commentJobID = 1
 	m.width = 40
@@ -982,14 +881,7 @@ func TestAddressedKeyUpdatesStatsOptimistically(t *testing.T) {
 	result, _ := m.handleAddressedKey()
 	m2 := result.(tuiModel)
 
-	if m2.jobStats.Addressed != 1 {
-		t.Errorf("expected Addressed=1, got %d",
-			m2.jobStats.Addressed)
-	}
-	if m2.jobStats.Unaddressed != 1 {
-		t.Errorf("expected Unaddressed=1, got %d",
-			m2.jobStats.Unaddressed)
-	}
+	assertJobStats(t, m2, 1, 1)
 }
 
 func TestAddressedKeyUpdatesStatsFromReviewView(t *testing.T) {
@@ -1016,18 +908,11 @@ func TestAddressedKeyUpdatesStatsFromReviewView(t *testing.T) {
 	result, _ := m.handleAddressedKey()
 	m2 := result.(tuiModel)
 
-	if m2.jobStats.Addressed != 1 {
-		t.Errorf("expected Addressed=1, got %d",
-			m2.jobStats.Addressed)
-	}
-	if m2.jobStats.Unaddressed != 0 {
-		t.Errorf("expected Unaddressed=0, got %d",
-			m2.jobStats.Unaddressed)
-	}
+	assertJobStats(t, m2, 1, 0)
 }
 
 func setupTestModel(jobs []storage.ReviewJob, opts ...func(*tuiModel)) tuiModel {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.jobs = jobs
 	for _, opt := range opts {
 		opt(&m)
@@ -1058,4 +943,50 @@ func withStartedAt(t time.Time) func(*storage.ReviewJob) {
 
 func withFinishedAt(t *time.Time) func(*storage.ReviewJob) {
 	return func(j *storage.ReviewJob) { j.FinishedAt = t }
+}
+
+// expectJSONPost is a helper to mock expected POST requests and respond with JSON.
+func expectJSONPost[Req any, Res any](t *testing.T, path string, expected Req, response Res) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("Expected POST, got %s", r.Method)
+		}
+		if path != "" && r.URL.Path != path {
+			t.Errorf("Expected path %s, got %s", path, r.URL.Path)
+		}
+
+		var req Req
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("Failed to decode request body: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if diff := cmp.Diff(expected, req); diff != "" {
+			t.Errorf("Request payload mismatch (-want +got):\n%s", diff)
+			http.Error(w, "payload mismatch", http.StatusBadRequest)
+			return
+		}
+		json.NewEncoder(w).Encode(response)
+	}
+}
+
+// assertMsgType is a helper to assert the type of a tea.Msg and return it.
+func assertMsgType[T any](t *testing.T, msg tea.Msg) T {
+	t.Helper()
+	result, ok := msg.(T)
+	if !ok {
+		t.Fatalf("Expected %T, got %T: %v", new(T), msg, msg)
+	}
+	return result
+}
+
+// assertJobStats is a helper to assert the jobStats of a model.
+func assertJobStats(t *testing.T, m tuiModel, addressed, unaddressed int) {
+	t.Helper()
+	if m.jobStats.Addressed != addressed {
+		t.Fatalf("expected Addressed=%d, got %d", addressed, m.jobStats.Addressed)
+	}
+	if m.jobStats.Unaddressed != unaddressed {
+		t.Fatalf("expected Unaddressed=%d, got %d", unaddressed, m.jobStats.Unaddressed)
+	}
 }

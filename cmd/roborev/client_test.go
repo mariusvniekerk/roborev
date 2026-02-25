@@ -66,8 +66,8 @@ func mockSequenceHandler(t *testing.T, steps ...MockStep) http.HandlerFunc {
 	t.Cleanup(func() {
 		mu.Lock()
 		defer mu.Unlock()
-		if call != len(steps) {
-			t.Errorf("expected %d calls to mockSequenceHandler, got %d", len(steps), call)
+		if !t.Failed() && call != len(steps) {
+			t.Errorf("expected %d calls to sequence handler, got %d", len(steps), call)
 		}
 	})
 
@@ -119,8 +119,7 @@ func TestGetCommentsForJob(t *testing.T) {
 			baseHandler(w, r)
 		}
 
-		_, cleanup := setupMockDaemon(t, http.HandlerFunc(handler))
-		defer cleanup()
+		daemonFromHandler(t, http.HandlerFunc(handler))
 
 		responses, err := getCommentsForJob(42)
 		if err != nil {
@@ -133,8 +132,7 @@ func TestGetCommentsForJob(t *testing.T) {
 
 	t.Run("returns error on non-200", func(t *testing.T) {
 		handler := newMockHandler(t, "GET", "/api/comments", nil, http.StatusInternalServerError)
-		_, cleanup := setupMockDaemon(t, handler)
-		defer cleanup()
+		daemonFromHandler(t, handler)
 
 		_, err := getCommentsForJob(42)
 		if err == nil {
@@ -151,8 +149,7 @@ func TestWaitForReview(t *testing.T) {
 		mux.Handle("/api/review", newMockHandler(t, "GET", "/api/review",
 			storage.Review{ID: 1, JobID: 1, Output: "Review complete"}, 0))
 
-		_, cleanup := setupMockDaemon(t, mux)
-		defer cleanup()
+		daemonFromHandler(t, mux)
 
 		review, err := waitForReview(1)
 		if err != nil {
@@ -179,8 +176,7 @@ func TestWaitForReview(t *testing.T) {
 		mux.Handle("/api/review", newMockHandler(t, "GET", "/api/review",
 			storage.Review{ID: 1, JobID: 1, Output: "Review after polling"}, 0))
 
-		_, cleanup := setupMockDaemon(t, mux)
-		defer cleanup()
+		daemonFromHandler(t, mux)
 
 		review, err := waitForReviewWithInterval(1, 1*time.Millisecond)
 		if err != nil {
@@ -198,8 +194,7 @@ func TestWaitForReview(t *testing.T) {
 		resp := map[string]any{
 			"jobs": []storage.ReviewJob{{ID: 1, Status: storage.JobStatusFailed, Error: "agent crashed"}},
 		}
-		_, cleanup := setupMockDaemon(t, newMockHandler(t, "GET", "/api/jobs", resp, 0))
-		defer cleanup()
+		daemonFromHandler(t, newMockHandler(t, "GET", "/api/jobs", resp, 0))
 
 		_, err := waitForReview(1)
 		if err == nil {
@@ -214,8 +209,7 @@ func TestWaitForReview(t *testing.T) {
 		resp := map[string]any{
 			"jobs": []storage.ReviewJob{{ID: 1, Status: storage.JobStatusCanceled}},
 		}
-		_, cleanup := setupMockDaemon(t, newMockHandler(t, "GET", "/api/jobs", resp, 0))
-		defer cleanup()
+		daemonFromHandler(t, newMockHandler(t, "GET", "/api/jobs", resp, 0))
 
 		_, err := waitForReview(1)
 		if err == nil {
@@ -227,113 +221,149 @@ func TestWaitForReview(t *testing.T) {
 	})
 }
 
+// normalizeTestPath resolves symlinks and returns the absolute path
+func normalizeTestPath(t *testing.T, path string) string {
+	t.Helper()
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	return path
+}
+
 func TestFindJobForCommit(t *testing.T) {
 	tests := []struct {
-		name          string
-		setupRepo     func(t *testing.T) string // Returns the repo path to search for
-		mockResponses [][]storage.ReviewJob     // Sequence of job lists to return
-		mockHandler   http.HandlerFunc          // Optional custom handler override
-		commitSHA     string
-		expectedID    int64
-		expectFound   bool
-		expectError   string
+		name        string
+		setupTest   func(t *testing.T) (string, []MockStep)                    // Returns the repo path and mock steps
+		mockHandler func(t *testing.T, w http.ResponseWriter, r *http.Request) // Optional custom handler override
+		commitSHA   string
+		expectedID  int64
+		expectFound bool
+		expectError string
 	}{
 		{
-			name: "finds matching job",
-			setupRepo: func(t *testing.T) string {
-				return t.TempDir()
-			},
+			name:      "finds matching job",
 			commitSHA: "def456",
-			mockResponses: [][]storage.ReviewJob{
-				{{ID: 2, GitRef: "def456", RepoPath: "/tmp/repo"}},
+			setupTest: func(t *testing.T) (string, []MockStep) {
+				repoDir := normalizeTestPath(t, t.TempDir())
+				return repoDir, []MockStep{
+					{
+						Jobs:          []storage.ReviewJob{{ID: 2, GitRef: "def456", RepoPath: repoDir}},
+						ExpectedQuery: map[string]string{"git_ref": "def456", "repo": repoDir, "limit": "1"},
+					},
+				}
 			},
 			expectedID:  2,
 			expectFound: true,
 		},
 		{
-			name: "returns nil when not found",
-			setupRepo: func(t *testing.T) string {
-				return t.TempDir()
-			},
+			name:      "returns nil when not found",
 			commitSHA: "notfound",
-			mockResponses: [][]storage.ReviewJob{
-				{}, // First call empty (specific repo)
-				{}, // Second call empty (fallback)
+			setupTest: func(t *testing.T) (string, []MockStep) {
+				repoDir := normalizeTestPath(t, t.TempDir())
+				return repoDir, []MockStep{
+					{
+						Jobs:          []storage.ReviewJob{},
+						ExpectedQuery: map[string]string{"git_ref": "notfound", "repo": repoDir, "limit": "1"},
+					},
+					{
+						Jobs:          []storage.ReviewJob{},
+						ExpectedQuery: map[string]string{"git_ref": "notfound", "limit": "100"},
+					},
+				}
 			},
 			expectFound: false,
 		},
 		{
-			name: "fallback skips jobs from different repo",
-			setupRepo: func(t *testing.T) string {
-				return t.TempDir()
-			},
+			name:      "fallback skips jobs from different repo",
 			commitSHA: "abc123",
-			mockResponses: [][]storage.ReviewJob{
-				{}, // First call empty
-				{
-					{ID: 1, GitRef: "abc123", RepoPath: "/other/repo"},
-					{ID: 2, GitRef: "abc123", RepoPath: "/another/repo"},
-				},
+			setupTest: func(t *testing.T) (string, []MockStep) {
+				repoDir := normalizeTestPath(t, t.TempDir())
+				return repoDir, []MockStep{
+					{
+						Jobs:          []storage.ReviewJob{},
+						ExpectedQuery: map[string]string{"git_ref": "abc123", "repo": repoDir, "limit": "1"},
+					},
+					{
+						Jobs: []storage.ReviewJob{
+							{ID: 1, GitRef: "abc123", RepoPath: "/other/repo"},
+							{ID: 2, GitRef: "abc123", RepoPath: "/another/repo"},
+						},
+						ExpectedQuery: map[string]string{"git_ref": "abc123", "limit": "100"},
+					},
+				}
 			},
 			expectFound: false,
 		},
 		{
-			name: "fallback matches job with same normalized path",
-			setupRepo: func(t *testing.T) string {
-				tmpDir := t.TempDir()
+			name:      "fallback matches job with same normalized path",
+			commitSHA: "abc123",
+			setupTest: func(t *testing.T) (string, []MockStep) {
+				tmpDir := normalizeTestPath(t, t.TempDir())
 				repoPath := filepath.Join(tmpDir, "repo")
 				if err := os.MkdirAll(repoPath, 0755); err != nil {
 					t.Fatal(err)
 				}
-				return repoPath
-			},
-			commitSHA: "abc123",
-			mockResponses: [][]storage.ReviewJob{
-				{}, // First call empty (simulating repo mismatch or not found initially)
-				{
-					// This job has the path we just created
-					{ID: 1, GitRef: "abc123", RepoPath: "PLACEHOLDER_REPO_PATH"},
-				},
+				return repoPath, []MockStep{
+					{
+						Jobs:          []storage.ReviewJob{},
+						ExpectedQuery: map[string]string{"git_ref": "abc123", "repo": repoPath, "limit": "1"},
+					},
+					{
+						Jobs: []storage.ReviewJob{
+							{ID: 1, GitRef: "abc123", RepoPath: repoPath},
+						},
+						ExpectedQuery: map[string]string{"git_ref": "abc123", "limit": "100"},
+					},
+				}
 			},
 			expectedID:  1,
 			expectFound: true,
 		},
 		{
-			name: "returns error on non-200 response",
-			setupRepo: func(t *testing.T) string {
-				return "/test/repo"
-			},
+			name:      "returns error on non-200 response",
 			commitSHA: "abc123",
-			mockHandler: func(w http.ResponseWriter, r *http.Request) {
+			setupTest: func(t *testing.T) (string, []MockStep) {
+				return normalizeTestPath(t, "/test/repo"), nil
+			},
+			mockHandler: func(t *testing.T, w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusInternalServerError)
 			},
 			expectError: "500",
 		},
 		{
-			name: "returns error on invalid JSON",
-			setupRepo: func(t *testing.T) string {
-				return t.TempDir()
-			},
+			name:      "returns error on invalid JSON",
 			commitSHA: "abc123",
-			mockHandler: func(w http.ResponseWriter, r *http.Request) {
+			setupTest: func(t *testing.T) (string, []MockStep) {
+				return normalizeTestPath(t, t.TempDir()), nil
+			},
+			mockHandler: func(t *testing.T, w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write([]byte("not json"))
 			},
 			expectError: "decode",
 		},
 		{
-			name: "fallback skips jobs with empty or relative paths",
-			setupRepo: func(t *testing.T) string {
-				return t.TempDir()
-			},
+			name:      "fallback skips jobs with empty or relative paths",
 			commitSHA: "abc123",
-			mockResponses: [][]storage.ReviewJob{
-				{}, // First call empty
-				{
-					{ID: 1, GitRef: "abc123", RepoPath: ""},
-					{ID: 2, GitRef: "abc123", RepoPath: "relative/path"},
-					{ID: 3, GitRef: "abc123", RepoPath: "PLACEHOLDER_REPO_PATH"},
-				},
+			setupTest: func(t *testing.T) (string, []MockStep) {
+				repoDir := normalizeTestPath(t, t.TempDir())
+				return repoDir, []MockStep{
+					{
+						Jobs:          []storage.ReviewJob{},
+						ExpectedQuery: map[string]string{"git_ref": "abc123", "repo": repoDir, "limit": "1"},
+					},
+					{
+						Jobs: []storage.ReviewJob{
+							{ID: 1, GitRef: "abc123", RepoPath: ""},
+							{ID: 2, GitRef: "abc123", RepoPath: "relative/path"},
+							{ID: 3, GitRef: "abc123", RepoPath: repoDir},
+						},
+						ExpectedQuery: map[string]string{"git_ref": "abc123", "limit": "100"},
+					},
+				}
 			},
 			expectedID:  3,
 			expectFound: true,
@@ -342,55 +372,18 @@ func TestFindJobForCommit(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			repoDir := tt.setupRepo(t)
-
-			// Fixup placeholder paths in mock responses
-			if len(tt.mockResponses) > 0 {
-				for i := range tt.mockResponses {
-					for j := range tt.mockResponses[i] {
-						if tt.mockResponses[i][j].RepoPath == "PLACEHOLDER_REPO_PATH" {
-							tt.mockResponses[i][j].RepoPath = repoDir
-						}
-					}
-				}
-			}
-
-			// Normalize repoDir to match client behavior (handles symlinks like /var -> /private/var)
-			if resolved, err := filepath.EvalSymlinks(repoDir); err == nil {
-				repoDir = resolved
-			}
-			if abs, err := filepath.Abs(repoDir); err == nil {
-				repoDir = abs
-			}
+			repoDir, steps := tt.setupTest(t)
 
 			var handler http.HandlerFunc
 			if tt.mockHandler != nil {
-				handler = tt.mockHandler
-			} else {
-				var steps []MockStep
-				for i, jobs := range tt.mockResponses {
-					step := MockStep{
-						Jobs:          jobs,
-						ExpectedQuery: make(map[string]string),
-					}
-					// Always expect git_ref
-					step.ExpectedQuery["git_ref"] = tt.commitSHA
-
-					if i == 0 {
-						// First call expects repo and limit=1
-						step.ExpectedQuery["repo"] = repoDir
-						step.ExpectedQuery["limit"] = "1"
-					} else {
-						// Fallback calls expect limit=100
-						step.ExpectedQuery["limit"] = "100"
-					}
-					steps = append(steps, step)
+				handler = func(w http.ResponseWriter, r *http.Request) {
+					tt.mockHandler(t, w, r)
 				}
+			} else {
 				handler = mockSequenceHandler(t, steps...)
 			}
 
-			_, cleanup := setupMockDaemon(t, handler)
-			defer cleanup()
+			daemonFromHandler(t, handler)
 
 			job, err := findJobForCommit(repoDir, tt.commitSHA)
 

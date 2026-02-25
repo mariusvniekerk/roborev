@@ -116,20 +116,69 @@ func (e *MigrationTestEnv) QueryRow(sql string, args ...any) pgx.Row {
 
 // Data Factory Helpers
 
-func createTestRepo(t *testing.T, pool *PgPool, identity string) int64 {
+type TestRepoOpts struct {
+	Identity string
+}
+
+func (opts *TestRepoOpts) applyDefaults() {
+	if opts.Identity == "" {
+		opts.Identity = "https://github.com/test/repo-" + uuid.NewString() + ".git"
+	}
+}
+
+func createTestRepo(t *testing.T, pool *pgxpool.Pool, opts TestRepoOpts) int64 {
 	t.Helper()
-	id, err := pool.GetOrCreateRepo(t.Context(), identity)
+	opts.applyDefaults()
+
+	var id int64
+	err := pool.QueryRow(t.Context(), `
+		INSERT INTO repos (identity)
+		VALUES ($1)
+		ON CONFLICT (identity) DO UPDATE SET identity = EXCLUDED.identity
+		RETURNING id
+	`, opts.Identity).Scan(&id)
 	if err != nil {
-		t.Fatalf("Failed to create repo %s: %v", identity, err)
+		t.Fatalf("Failed to create repo %s: %v", opts.Identity, err)
 	}
 	return id
 }
 
-func createTestCommit(t *testing.T, pool *PgPool, repoID int64, sha string) int64 {
+type TestCommitOpts struct {
+	RepoID    int64
+	SHA       string
+	Author    string
+	Subject   string
+	Timestamp time.Time
+}
+
+func (opts *TestCommitOpts) applyDefaults() {
+	if opts.SHA == "" {
+		opts.SHA = uuid.NewString()
+	}
+	if opts.Author == "" {
+		opts.Author = "Test Author"
+	}
+	if opts.Subject == "" {
+		opts.Subject = "Test Subject"
+	}
+	if opts.Timestamp.IsZero() {
+		opts.Timestamp = time.Now()
+	}
+}
+
+func createTestCommit(t *testing.T, pool *pgxpool.Pool, opts TestCommitOpts) int64 {
 	t.Helper()
-	id, err := pool.GetOrCreateCommit(t.Context(), repoID, sha, "Test Author", "Test Subject", time.Now())
+	opts.applyDefaults()
+
+	var id int64
+	err := pool.QueryRow(t.Context(), `
+		INSERT INTO commits (repo_id, sha, author, subject, timestamp)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (repo_id, sha) DO UPDATE SET author = EXCLUDED.author
+		RETURNING id
+	`, opts.RepoID, opts.SHA, opts.Author, opts.Subject, opts.Timestamp).Scan(&id)
 	if err != nil {
-		t.Fatalf("Failed to create commit %s: %v", sha, err)
+		t.Fatalf("Failed to create commit %s: %v", opts.SHA, err)
 	}
 	return id
 }
@@ -147,8 +196,7 @@ type TestJobOpts struct {
 	UpdatedAt       time.Time
 }
 
-func createTestJob(t *testing.T, pool *PgPool, opts TestJobOpts) {
-	t.Helper()
+func (opts *TestJobOpts) applyDefaults() {
 	if opts.UUID == "" {
 		opts.UUID = uuid.NewString()
 	}
@@ -164,17 +212,24 @@ func createTestJob(t *testing.T, pool *PgPool, opts TestJobOpts) {
 	if opts.SourceMachineID == "" {
 		opts.SourceMachineID = uuid.NewString()
 	}
+
+	now := time.Now()
 	if opts.EnqueuedAt.IsZero() {
-		opts.EnqueuedAt = time.Now()
+		opts.EnqueuedAt = now
 	}
 	if opts.CreatedAt.IsZero() {
-		opts.CreatedAt = time.Now()
+		opts.CreatedAt = now
 	}
 	if opts.UpdatedAt.IsZero() {
-		opts.UpdatedAt = time.Now()
+		opts.UpdatedAt = now
 	}
+}
 
-	_, err := pool.pool.Exec(t.Context(), `
+func createTestJob(t *testing.T, pool *pgxpool.Pool, opts TestJobOpts) {
+	t.Helper()
+	opts.applyDefaults()
+
+	_, err := pool.Exec(t.Context(), `
 		INSERT INTO review_jobs (uuid, repo_id, commit_id, git_ref, agent, status, source_machine_id, enqueued_at, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 	`, opts.UUID, opts.RepoID, opts.CommitID, opts.GitRef, opts.Agent, opts.Status, opts.SourceMachineID, opts.EnqueuedAt, opts.CreatedAt, opts.UpdatedAt)
@@ -195,25 +250,30 @@ type TestReviewOpts struct {
 	UpdatedByMachineID string
 }
 
-func createTestReview(t *testing.T, pool *PgPool, opts TestReviewOpts) {
-	t.Helper()
+func (opts *TestReviewOpts) applyDefaults() {
 	if opts.UUID == "" {
 		opts.UUID = uuid.NewString()
 	}
 	if opts.Agent == "" {
 		opts.Agent = "test"
 	}
+	now := time.Now()
 	if opts.CreatedAt.IsZero() {
-		opts.CreatedAt = time.Now()
+		opts.CreatedAt = now
 	}
 	if opts.UpdatedAt.IsZero() {
-		opts.UpdatedAt = time.Now()
+		opts.UpdatedAt = now
 	}
 	if opts.UpdatedByMachineID == "" {
 		opts.UpdatedByMachineID = uuid.NewString()
 	}
+}
 
-	_, err := pool.pool.Exec(t.Context(), `
+func createTestReview(t *testing.T, pool *pgxpool.Pool, opts TestReviewOpts) {
+	t.Helper()
+	opts.applyDefaults()
+
+	_, err := pool.Exec(t.Context(), `
 		INSERT INTO reviews (uuid, job_uuid, agent, prompt, output, addressed, created_at, updated_at, updated_by_machine_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 	`, opts.UUID, opts.JobUUID, opts.Agent, opts.Prompt, opts.Output, opts.Addressed, opts.CreatedAt, opts.UpdatedAt, opts.UpdatedByMachineID)
@@ -222,23 +282,21 @@ func createTestReview(t *testing.T, pool *PgPool, opts TestReviewOpts) {
 	}
 }
 
+func hasExecutableCode(stmt string) bool {
+	for line := range strings.SplitSeq(stmt, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "--") {
+			return true
+		}
+	}
+	return false
+}
+
 func parseSQLStatements(sql string) []string {
 	var stmts []string
 	for stmt := range strings.SplitSeq(sql, ";") {
 		stmt = strings.TrimSpace(stmt)
-		if stmt == "" {
-			continue
-		}
-		// Skip statements that are only comments
-		hasCode := false
-		for line := range strings.SplitSeq(stmt, "\n") {
-			line = strings.TrimSpace(line)
-			if line != "" && !strings.HasPrefix(line, "--") {
-				hasCode = true
-				break
-			}
-		}
-		if hasCode {
+		if stmt != "" && hasExecutableCode(stmt) {
 			stmts = append(stmts, stmt)
 		}
 	}

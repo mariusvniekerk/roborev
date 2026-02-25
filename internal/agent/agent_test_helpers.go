@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -117,20 +118,14 @@ type MockCLIResult struct {
 	StdinFile string // Non-empty when CaptureStdin was set
 }
 
-// newMockDroidAgent creates a DroidAgent backed by a temporary shell script.
-// Returns the agent and the temp directory used by writeTempCommand.
-func newMockDroidAgent(t *testing.T, scriptContent string) *DroidAgent {
+// readMockArgs reads the captured arguments from a mock CLI's ArgsFile and splits them into a slice.
+func readMockArgs(t *testing.T, path string) []string {
 	t.Helper()
-	cmdPath := writeTempCommand(t, scriptContent)
-	return NewDroidAgent(cmdPath)
-}
-
-// runReviewScenario creates a mock DroidAgent from a shell script, runs Review,
-// and returns the result and error.
-func runReviewScenario(t *testing.T, script, prompt string) (string, error) {
-	t.Helper()
-	a := newMockDroidAgent(t, script)
-	return a.Review(context.Background(), t.TempDir(), "deadbeef", prompt, nil)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read args file %s: %v", path, err)
+	}
+	return strings.Split(strings.TrimSpace(string(content)), " ")
 }
 
 // assertContainsArg checks that args contains target, failing with a descriptive message.
@@ -233,7 +228,7 @@ func makeToolCallJSON(name string, args map[string]any) string {
 func assertContains(t *testing.T, s, substr string) {
 	t.Helper()
 	if !strings.Contains(s, substr) {
-		t.Errorf("expected %q to contain %q", s, substr)
+		t.Errorf("expected string to contain %q\nDocument content:\n%s", substr, s)
 	}
 }
 
@@ -242,6 +237,14 @@ func assertNotContains(t *testing.T, s, substr string) {
 	t.Helper()
 	if strings.Contains(s, substr) {
 		t.Errorf("expected %q to not contain %q", s, substr)
+	}
+}
+
+// assertEqual fails the test if got != want.
+func assertEqual(t *testing.T, got, want string) {
+	t.Helper()
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
@@ -312,3 +315,29 @@ func assertFileNotContains(t *testing.T, path, unexpected string) {
 		t.Errorf("file %s contained leaked string: %q", path, unexpected)
 	}
 }
+
+// assertNoError checks that the given error is nil, failing the test with the given message if it is not.
+func assertNoError(t *testing.T, err error, msg string) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("%s: %v", msg, err)
+	}
+}
+
+// FakeAgent implements Agent for testing purposes.
+type FakeAgent struct {
+	NameStr  string
+	ReviewFn func(ctx context.Context, repoPath, commitSHA, prompt string, output io.Writer) (string, error)
+}
+
+func (a *FakeAgent) Name() string { return a.NameStr }
+func (a *FakeAgent) Review(ctx context.Context, repoPath, commitSHA, prompt string, output io.Writer) (string, error) {
+	if a.ReviewFn != nil {
+		return a.ReviewFn(ctx, repoPath, commitSHA, prompt, output)
+	}
+	return "", nil
+}
+func (a *FakeAgent) WithReasoning(level ReasoningLevel) Agent { return a }
+func (a *FakeAgent) WithAgentic(agentic bool) Agent           { return a }
+func (a *FakeAgent) WithModel(model string) Agent             { return a }
+func (a *FakeAgent) CommandLine() string                      { return "" }

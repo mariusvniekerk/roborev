@@ -5,6 +5,15 @@ import (
 	"testing"
 )
 
+func assertContainsAll(t *testing.T, got string, wants []string) {
+	t.Helper()
+	for _, want := range wants {
+		if !strings.Contains(got, want) {
+			t.Errorf("output missing expected substring %q\nDocument content:\n%s", want, got)
+		}
+	}
+}
+
 func TestIsQuotaFailure(t *testing.T) {
 	tests := []struct {
 		name string
@@ -80,21 +89,16 @@ func TestBuildSynthesisPrompt_Basic(t *testing.T) {
 	}
 	prompt := BuildSynthesisPrompt(reviews, "")
 
-	checks := []string{
+	assertContainsAll(t, prompt, []string{
 		"combining multiple code review outputs",
 		"Agent=codex",
 		"Agent=gemini",
 		"Found XSS vulnerability",
 		"No issues found.",
-	}
-	for _, check := range checks {
-		if !strings.Contains(prompt, check) {
-			t.Errorf("prompt missing %q", check)
-		}
-	}
+	})
 }
 
-func TestBuildSynthesisPrompt_MinSeverity(t *testing.T) {
+func TestBuildSynthesisPrompt_Severity(t *testing.T) {
 	reviews := []ReviewResult{
 		{
 			Agent:      "codex",
@@ -104,17 +108,25 @@ func TestBuildSynthesisPrompt_MinSeverity(t *testing.T) {
 		},
 	}
 
-	prompt := BuildSynthesisPrompt(reviews, "high")
-	if !strings.Contains(
-		prompt, "Only include High and Critical") {
-		t.Error(
-			"expected severity filter instruction for high")
+	tests := []struct {
+		name            string
+		severity        string
+		wantContains    string
+		wantNotContains string
+	}{
+		{"high severity", "high", "Only include High and Critical", ""},
+		{"low severity", "low", "", "Omit findings"},
 	}
-
-	prompt = BuildSynthesisPrompt(reviews, "low")
-	if strings.Contains(prompt, "Omit findings") {
-		t.Error(
-			"low severity should not add filter instruction")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prompt := BuildSynthesisPrompt(reviews, tt.severity)
+			if tt.wantContains != "" && !strings.Contains(prompt, tt.wantContains) {
+				t.Errorf("prompt missing %q", tt.wantContains)
+			}
+			if tt.wantNotContains != "" && strings.Contains(prompt, tt.wantNotContains) {
+				t.Errorf("prompt unexpectedly contains %q", tt.wantNotContains)
+			}
+		})
 	}
 }
 
@@ -142,20 +154,16 @@ func TestBuildSynthesisPrompt_QuotaAndFailed(t *testing.T) {
 	}
 	prompt := BuildSynthesisPrompt(reviews, "")
 
-	if !strings.Contains(prompt, "[SKIPPED]") {
-		t.Error("expected [SKIPPED] for quota failure")
-	}
-	if !strings.Contains(prompt, "[FAILED]") {
-		t.Error("expected [FAILED] for real failure")
-	}
-	if !strings.Contains(
-		prompt, "agent quota exhausted") {
-		t.Error("expected quota note")
-	}
+	assertContainsAll(t, prompt, []string{
+		"[SKIPPED]",
+		"[FAILED]",
+		"agent quota exhausted",
+	})
 }
 
 func TestBuildSynthesisPrompt_Truncation(t *testing.T) {
-	longOutput := strings.Repeat("x", 20000)
+	const promptLimit = 20000
+	longOutput := strings.Repeat("x", promptLimit)
 	reviews := []ReviewResult{
 		{
 			Agent:      "codex",
@@ -166,10 +174,8 @@ func TestBuildSynthesisPrompt_Truncation(t *testing.T) {
 	}
 	prompt := BuildSynthesisPrompt(reviews, "")
 
-	if !strings.Contains(prompt, "...(truncated)") {
-		t.Error("expected truncation marker for long output")
-	}
-	if len(prompt) > 20000 {
+	assertContainsAll(t, prompt, []string{"...(truncated)"})
+	if len(prompt) > promptLimit {
 		t.Errorf(
 			"prompt should be truncated, got %d chars",
 			len(prompt))
@@ -185,7 +191,7 @@ func TestFormatSynthesizedComment(t *testing.T) {
 		"Combined findings here", reviews,
 		"abc123456789")
 
-	checks := []string{
+	assertContainsAll(t, comment, []string{
 		"## roborev: Combined Review (`abc1234`)",
 		"Combined findings here",
 		"Synthesized from 2 reviews",
@@ -193,12 +199,7 @@ func TestFormatSynthesizedComment(t *testing.T) {
 		"gemini",
 		"security",
 		"design",
-	}
-	for _, check := range checks {
-		if !strings.Contains(comment, check) {
-			t.Errorf("comment missing %q", check)
-		}
-	}
+	})
 }
 
 func TestFormatRawBatchComment(t *testing.T) {
@@ -219,18 +220,13 @@ func TestFormatRawBatchComment(t *testing.T) {
 	comment := FormatRawBatchComment(
 		reviews, "def456789012")
 
-	checks := []string{
+	assertContainsAll(t, comment, []string{
 		"## roborev: Combined Review (`def4567`)",
 		"Synthesis unavailable",
 		"<details>",
 		"Found issue X",
 		"Review failed",
-	}
-	for _, check := range checks {
-		if !strings.Contains(comment, check) {
-			t.Errorf("comment missing %q", check)
-		}
-	}
+	})
 }
 
 func TestFormatAllFailedComment(t *testing.T) {
@@ -246,14 +242,10 @@ func TestFormatAllFailedComment(t *testing.T) {
 		comment := FormatAllFailedComment(
 			reviews, "aaa111222333")
 
-		if !strings.Contains(
-			comment, "Review Failed") {
-			t.Error("expected 'Review Failed' header")
-		}
-		if !strings.Contains(
-			comment, "Check CI logs") {
-			t.Error("expected log check instruction")
-		}
+		assertContainsAll(t, comment, []string{
+			"Review Failed",
+			"Check CI logs",
+		})
 	})
 
 	t.Run("all quota", func(t *testing.T) {
@@ -269,10 +261,7 @@ func TestFormatAllFailedComment(t *testing.T) {
 		comment := FormatAllFailedComment(
 			reviews, "bbb222333444")
 
-		if !strings.Contains(
-			comment, "Review Skipped") {
-			t.Error("expected 'Review Skipped' header")
-		}
+		assertContainsAll(t, comment, []string{"Review Skipped"})
 		if strings.Contains(
 			comment, "Check CI logs") {
 			t.Error(
@@ -301,13 +290,7 @@ func TestSkippedAgentNote(t *testing.T) {
 			},
 		}
 		note := SkippedAgentNote(reviews)
-		if !strings.Contains(note, "gemini") {
-			t.Error("expected gemini in note")
-		}
-		if !strings.Contains(
-			note, "review skipped") {
-			t.Error("expected singular 'review skipped'")
-		}
+		assertContainsAll(t, note, []string{"gemini", "review skipped"})
 	})
 
 	t.Run("multiple skips", func(t *testing.T) {
@@ -324,9 +307,6 @@ func TestSkippedAgentNote(t *testing.T) {
 			},
 		}
 		note := SkippedAgentNote(reviews)
-		if !strings.Contains(
-			note, "reviews skipped") {
-			t.Error("expected plural 'reviews skipped'")
-		}
+		assertContainsAll(t, note, []string{"reviews skipped"})
 	})
 }

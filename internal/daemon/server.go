@@ -65,7 +65,7 @@ func NewServer(db *storage.DB, cfg *config.Config, configPath string) *Server {
 	configWatcher := NewConfigWatcher(configPath, cfg, broadcaster, activityLog)
 
 	// Create hook runner to fire hooks on review events
-	hookRunner := NewHookRunner(configWatcher, broadcaster)
+	hookRunner := NewHookRunner(configWatcher, broadcaster, log.Default())
 
 	s := &Server{
 		db:            db,
@@ -253,6 +253,12 @@ func (s *Server) Stop() error {
 	}
 
 	return nil
+}
+
+// Close shuts down the server and releases its resources.
+// It is primarily provided for ease of use in test cleanup.
+func (s *Server) Close() error {
+	return s.Stop()
 }
 
 // ConfigWatcher returns the server's config watcher (for use by external components)

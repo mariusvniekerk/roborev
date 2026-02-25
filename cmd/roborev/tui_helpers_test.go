@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -14,13 +15,17 @@ import (
 
 var testANSIRegex = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
+func stripTestANSI(s string) string {
+	return testANSIRegex.ReplaceAllString(s, "")
+}
+
 func TestRenderMarkdownLinesPreservesNewlines(t *testing.T) {
 	// Verify that single newlines in plain text are preserved (not collapsed into one paragraph)
 	lines := renderMarkdownLines("Line 1\nLine 2\nLine 3", 80, 80, styles.DarkStyleConfig, 2)
 
 	found := 0
 	for _, line := range lines {
-		trimmed := strings.TrimSpace(testANSIRegex.ReplaceAllString(line, ""))
+		trimmed := strings.TrimSpace(stripTestANSI(line))
 		if trimmed == "Line 1" || trimmed == "Line 2" || trimmed == "Line 3" {
 			found++
 		}
@@ -44,16 +49,17 @@ func TestMarkdownCacheBehavior(t *testing.T) {
 	baseID := int64(1)
 
 	tests := []struct {
-		name      string
-		text      string
-		width     int
-		id        int
-		expectHit bool
+		name          string
+		text          string
+		width         int
+		id            int
+		expectHit     bool
+		expectedMatch string
 	}{
-		{"SameInputs", baseText, baseWidth, int(baseID), true},
-		{"DiffText", "Different", baseWidth, int(baseID), false},
-		{"DiffWidth", baseText, 40, int(baseID), false},
-		{"DiffID", baseText, baseWidth, 2, false},
+		{"SameInputs", baseText, baseWidth, int(baseID), true, ""},
+		{"DiffText", "Different", baseWidth, int(baseID), false, "Different"},
+		{"DiffWidth", baseText, 40, int(baseID), false, ""},
+		{"DiffID", baseText, baseWidth, 2, false, ""},
 	}
 
 	for _, tt := range tests {
@@ -82,15 +88,13 @@ func TestMarkdownCacheBehavior(t *testing.T) {
 				}
 			}
 
-			// Additional check for content correctness on text change
-			if tt.name == "DiffText" {
-				// Verify the content actually reflects the new input
+			if tt.expectedMatch != "" {
 				combined := ""
 				for _, line := range lines2 {
-					combined += testANSIRegex.ReplaceAllString(line, "")
+					combined += stripTestANSI(line)
 				}
-				if !strings.Contains(combined, "Different") {
-					t.Errorf("Expected output to contain 'Different', got %q", combined)
+				if !strings.Contains(combined, tt.expectedMatch) {
+					t.Errorf("Expected output to contain %q, got %q", tt.expectedMatch, combined)
 				}
 			}
 		})
@@ -159,33 +163,11 @@ func TestRenderViewSafety_NilCache(t *testing.T) {
 
 func TestScrollPageUpAfterPageDown(t *testing.T) {
 	tests := []struct {
-		name      string
-		view      tuiView
-		setup     func(*tuiModel, string)
-		render    func(*tuiModel) string
-		getScroll func(tuiModel) int
-		getMax    func(tuiModel) int
+		name string
+		view tuiView
 	}{
-		{
-			name: "PromptView",
-			view: tuiViewPrompt,
-			setup: func(m *tuiModel, content string) {
-				m.currentReview.Prompt = content
-			},
-			render:    func(m *tuiModel) string { return m.renderPromptView() },
-			getScroll: func(m tuiModel) int { return m.promptScroll },
-			getMax:    func(m tuiModel) int { return m.mdCache.lastPromptMaxScroll },
-		},
-		{
-			name: "ReviewView",
-			view: tuiViewReview,
-			setup: func(m *tuiModel, content string) {
-				m.currentReview.Output = content
-			},
-			render:    func(m *tuiModel) string { return m.renderReviewView() },
-			getScroll: func(m tuiModel) int { return m.reviewScroll },
-			getMax:    func(m tuiModel) int { return m.mdCache.lastReviewMaxScroll },
-		},
+		{"PromptView", tuiViewPrompt},
+		{"ReviewView", tuiViewReview},
 	}
 
 	for _, tt := range tests {
@@ -206,10 +188,18 @@ func TestScrollPageUpAfterPageDown(t *testing.T) {
 					Job: &storage.ReviewJob{GitRef: "abc"},
 				},
 			}
-			tt.setup(&m, longContent)
 
-			tt.render(&m)
-			maxScroll := tt.getMax(m)
+			var maxScroll int
+			if tt.view == tuiViewPrompt {
+				m.currentReview.Prompt = longContent
+				m.renderPromptView()
+				maxScroll = m.mdCache.lastPromptMaxScroll
+			} else {
+				m.currentReview.Output = longContent
+				m.renderReviewView()
+				maxScroll = m.mdCache.lastReviewMaxScroll
+			}
+
 			if maxScroll == 0 {
 				t.Fatal("Expected non-zero max scroll")
 			}
@@ -219,14 +209,21 @@ func TestScrollPageUpAfterPageDown(t *testing.T) {
 				m, _ = pressSpecial(m, tea.KeyPgDown)
 			}
 
-			if s := tt.getScroll(m); s > maxScroll {
+			getScroll := func(m tuiModel) int {
+				if tt.view == tuiViewPrompt {
+					return m.promptScroll
+				}
+				return m.reviewScroll
+			}
+
+			if s := getScroll(m); s > maxScroll {
 				t.Errorf("Scroll %d exceeded max %d", s, maxScroll)
 			}
 
 			// Page up
-			before := tt.getScroll(m)
+			before := getScroll(m)
 			m, _ = pressSpecial(m, tea.KeyPgUp)
-			if tt.getScroll(m) >= before {
+			if getScroll(m) >= before {
 				t.Error("Page up did not reduce scroll")
 			}
 		})
@@ -308,7 +305,7 @@ func TestTruncateLongLinesFenceEdgeCases(t *testing.T) {
 			lines := strings.SplitSeq(out, "\n")
 			// Find the longLine (or its truncation) in the output
 			for line := range lines {
-				if strings.HasPrefix(line, "xxx") || line == longLine {
+				if strings.Contains(line, "xxxxxxxxxx") { // 10 x's is enough to identify the line
 					truncated := len(line) <= 20
 					if tt.wantTrunc && !truncated {
 						t.Errorf("Expected truncation inside fence, got len=%d: %q", len(line), line)
@@ -341,7 +338,7 @@ func TestRenderMarkdownLinesPreservesLongProse(t *testing.T) {
 
 	combined := ""
 	for _, line := range lines {
-		combined += testANSIRegex.ReplaceAllString(line, "") + " "
+		combined += stripTestANSI(line) + " "
 	}
 	for _, word := range []string{"important", "word-wrapped", "truncated", "information", "rendered"} {
 		if !strings.Contains(combined, word) {
@@ -463,7 +460,7 @@ func TestRenderMarkdownLinesNoOverflow(t *testing.T) {
 	lines := renderMarkdownLines(text, width, width, styles.DarkStyleConfig, 2)
 
 	for i, line := range lines {
-		stripped := testANSIRegex.ReplaceAllString(line, "")
+		stripped := stripTestANSI(line)
 		if len(stripped) > width+10 { // small tolerance for trailing spaces
 			t.Errorf("line %d exceeds width %d: len=%d %q", i, width, len(stripped), stripped)
 		}
@@ -471,7 +468,6 @@ func TestRenderMarkdownLinesNoOverflow(t *testing.T) {
 }
 
 func TestReflowHelpRows(t *testing.T) {
-	t.Parallel()
 
 	tests := []struct {
 		name     string
@@ -517,7 +513,6 @@ func TestReflowHelpRows(t *testing.T) {
 }
 
 func TestRenderHelpTableLinesWithinWidth(t *testing.T) {
-	t.Parallel()
 
 	// Real help row sets used by the TUI views.
 	helpSets := map[string][][]helpItem{
@@ -554,7 +549,7 @@ func TestRenderHelpTableLinesWithinWidth(t *testing.T) {
 
 				// No rendered line should exceed the target width.
 				for i, line := range lines {
-					visible := testANSIRegex.ReplaceAllString(line, "")
+					visible := stripTestANSI(line)
 					visW := runewidth.StringWidth(visible)
 					if visW > width {
 						t.Errorf("line %d width %d > target %d: %q",
@@ -563,5 +558,187 @@ func TestRenderHelpTableLinesWithinWidth(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestSanitizeForDisplay(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "plain text unchanged",
+			input:    "Hello, world!",
+			expected: "Hello, world!",
+		},
+		{
+			name:     "preserves newlines and tabs",
+			input:    "Line1\n\tIndented",
+			expected: "Line1\n\tIndented",
+		},
+		{
+			name:     "strips ANSI color codes",
+			input:    "\x1b[31mred text\x1b[0m",
+			expected: "red text",
+		},
+		{
+			name:     "strips cursor movement",
+			input:    "\x1b[2Jhello\x1b[H",
+			expected: "hello",
+		},
+		{
+			name:     "strips OSC sequences (title set with BEL)",
+			input:    "\x1b]0;Evil Title\x07normal text",
+			expected: "normal text",
+		},
+		{
+			name:     "strips OSC sequences (title set with ST)",
+			input:    "\x1b]0;Evil Title\x1b\\normal text",
+			expected: "normal text",
+		},
+		{
+			name:     "strips control characters",
+			input:    "hello\x00world\x07\x08test",
+			expected: "helloworldtest",
+		},
+		{
+			name:     "handles complex escape sequence",
+			input:    "\x1b[1;32mBold Green\x1b[0m and \x1b[4munderline\x1b[24m",
+			expected: "Bold Green and underline",
+		},
+		{
+			name:     "empty string unchanged",
+			input:    "",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeForDisplay(tt.input)
+			if got != tt.expected {
+				t.Errorf("sanitizeForDisplay(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestPatchFiles(t *testing.T) {
+	tests := []struct {
+		name  string
+		patch string
+		want  []string
+	}{
+		{
+			name: "simple add",
+			patch: `diff --git a/main.go b/main.go
+--- a/main.go
++++ b/main.go
+@@ -1 +1,2 @@
+ package main
++// new line
+`,
+			want: []string{"main.go"},
+		},
+		{
+			name: "file in b/ directory not double-stripped",
+			patch: `diff --git a/b/main.go b/b/main.go
+--- a/b/main.go
++++ b/b/main.go
+@@ -1 +1,2 @@
+ package main
++// new line
+`,
+			want: []string{"b/main.go"},
+		},
+		{
+			name: "file in a/ directory not double-stripped",
+			patch: `diff --git a/a/utils.go b/a/utils.go
+--- a/a/utils.go
++++ b/a/utils.go
+@@ -1 +1,2 @@
+ package a
++// new line
+`,
+			want: []string{"a/utils.go"},
+		},
+		{
+			name: "new file with /dev/null",
+			patch: `diff --git a/new.go b/new.go
+--- /dev/null
++++ b/new.go
+@@ -0,0 +1 @@
++package main
+`,
+			want: []string{"new.go"},
+		},
+		{
+			name: "deleted file with /dev/null",
+			patch: `diff --git a/old.go b/old.go
+--- a/old.go
++++ /dev/null
+@@ -1 +0,0 @@
+-package main
+`,
+			want: []string{"old.go"},
+		},
+		{
+			name: "rename",
+			patch: `diff --git a/old.go b/renamed.go
+--- a/old.go
++++ b/renamed.go
+@@ -1 +1 @@
+-package old
++package renamed
+`,
+			want: []string{"old.go", "renamed.go"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := patchFiles(tt.patch)
+			if err != nil {
+				t.Fatalf("patchFiles returned error: %v", err)
+			}
+			wantSet := map[string]bool{}
+			for _, f := range tt.want {
+				wantSet[f] = true
+			}
+			if len(got) != len(tt.want) {
+				t.Errorf("expected %d files, got %d: %v", len(tt.want), len(got), got)
+			}
+			gotSet := map[string]bool{}
+			for _, f := range got {
+				if gotSet[f] {
+					t.Errorf("duplicate file in output: %q", f)
+				}
+				gotSet[f] = true
+			}
+			for f := range wantSet {
+				if !gotSet[f] {
+					t.Errorf("missing expected file %q", f)
+				}
+			}
+			for f := range gotSet {
+				if !wantSet[f] {
+					t.Errorf("unexpected file %q", f)
+				}
+			}
+		})
+	}
+}
+
+func TestDirtyPatchFilesError(t *testing.T) {
+	// dirtyPatchFiles should return an error when git diff fails
+	// (e.g., invalid repo path), not silently return nil.
+	missingPath := filepath.Join(t.TempDir(), "missing")
+	_, err := dirtyPatchFiles(missingPath, []string{"file.go"})
+	if err == nil {
+		t.Fatal("expected error from dirtyPatchFiles with invalid repo, got nil")
+	}
+	if !strings.Contains(err.Error(), "git diff") {
+		t.Errorf("expected error to mention 'git diff', got: %v", err)
 	}
 }

@@ -177,44 +177,74 @@ func TestSignJWT_Structure(t *testing.T) {
 		t.Fatal("missing exp")
 	}
 
-	// iat should be ~60s in the past, exp ~10min in the future
-	now := float64(time.Now().Unix())
-	if iat > now {
-		t.Error("iat should be in the past")
+	// assert relative invariants to avoid flaky tests under slow execution
+	if exp-iat != 660 {
+		t.Errorf("expected duration (exp-iat) to be 660s, got %v", exp-iat)
 	}
-	if exp < now {
-		t.Error("exp should be in the future")
+
+	now := float64(time.Now().Unix())
+	if iat > now+60 || iat < now-600 {
+		t.Errorf("iat %v out of bounds (now: %v)", iat, now)
+	}
+	if exp > now+660 || exp < now+60 {
+		t.Errorf("exp %v out of bounds (now: %v)", exp, now)
 	}
 }
 
+type mockResponse struct {
+	path string
+	body map[string]any
+}
+
+type mockServer struct {
+	callCount int
+	responses []mockResponse
+	t         *testing.T
+}
+
+func (m *mockServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	m.callCount++
+	if m.callCount > len(m.responses) {
+		m.t.Errorf("unexpected call %d", m.callCount)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	resp := m.responses[m.callCount-1]
+
+	// Verify Authorization header has Bearer JWT
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		m.t.Errorf("expected Bearer auth, got: %s", auth)
+	}
+
+	if resp.path != "" && r.URL.Path != resp.path {
+		m.t.Errorf("unexpected path: %s (expected %s)", r.URL.Path, resp.path)
+	}
+
+	// Verify User-Agent is set
+	if ua := r.Header.Get("User-Agent"); ua != "roborev" {
+		m.t.Errorf("expected User-Agent 'roborev', got %q", ua)
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(resp.body)
+}
+
 func TestTokenCaching(t *testing.T) {
-	callCount := 0
-	tp, _ := setupMockProvider(t, func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-
-		// Verify Authorization header has Bearer JWT
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
-			t.Errorf("expected Bearer auth, got: %s", auth)
-		}
-
-		// Verify the URL path
-		expectedPath := fmt.Sprintf("/app/installations/%d/access_tokens", testInstallationID)
-		if r.URL.Path != expectedPath {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-
-		// Verify User-Agent is set
-		if ua := r.Header.Get("User-Agent"); ua != "roborev" {
-			t.Errorf("expected User-Agent 'roborev', got %q", ua)
-		}
-
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]any{
-			"token":      "ghs_test_token_123",
-			"expires_at": time.Now().Add(1 * time.Hour).Format(time.RFC3339),
-		})
-	})
+	mock := &mockServer{
+		t: t,
+		responses: []mockResponse{
+			{
+				path: fmt.Sprintf("/app/installations/%d/access_tokens", testInstallationID),
+				body: map[string]any{
+					"token":      "ghs_test_token_123",
+					"expires_at": time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+				},
+			},
+		},
+	}
+	tp, _ := setupMockProvider(t, mock.ServeHTTP)
 
 	// First call should hit the server
 	token1, err := tp.TokenForInstallation(testInstallationID)
@@ -224,8 +254,8 @@ func TestTokenCaching(t *testing.T) {
 	if token1 != "ghs_test_token_123" {
 		t.Errorf("expected ghs_test_token_123, got %s", token1)
 	}
-	if callCount != 1 {
-		t.Errorf("expected 1 server call, got %d", callCount)
+	if mock.callCount != 1 {
+		t.Errorf("expected 1 server call, got %d", mock.callCount)
 	}
 
 	// Second call should use cache
@@ -236,42 +266,53 @@ func TestTokenCaching(t *testing.T) {
 	if token2 != token1 {
 		t.Error("expected cached token")
 	}
-	if callCount != 1 {
-		t.Errorf("expected still 1 server call (cached), got %d", callCount)
+	if mock.callCount != 1 {
+		t.Errorf("expected still 1 server call (cached), got %d", mock.callCount)
 	}
 }
-
 func TestTokenRefreshOnExpiry(t *testing.T) {
-	callCount := 0
-	tp, _ := setupMockProvider(t, func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]any{
-			"token":      "ghs_refreshed",
-			"expires_at": time.Now().Add(1 * time.Hour).Format(time.RFC3339),
-		})
-	})
-
-	// Manually set an expired cached token for installation
-	tp.mu.Lock()
-	tp.tokens[int64(testInstallationID)] = &cachedToken{
-		token:   "ghs_old",
-		expires: time.Now().Add(2 * time.Minute), // Within 5 min buffer → should refresh
+	mock := &mockServer{
+		t: t,
+		responses: []mockResponse{
+			{
+				path: fmt.Sprintf("/app/installations/%d/access_tokens", testInstallationID),
+				body: map[string]any{
+					"token":      "ghs_old",
+					"expires_at": time.Now().Add(1 * time.Second).Format(time.RFC3339),
+				},
+			},
+			{
+				path: fmt.Sprintf("/app/installations/%d/access_tokens", testInstallationID),
+				body: map[string]any{
+					"token":      "ghs_refreshed",
+					"expires_at": time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+				},
+			},
+		},
 	}
-	tp.mu.Unlock()
+	tp, _ := setupMockProvider(t, mock.ServeHTTP)
 
-	token, err := tp.TokenForInstallation(testInstallationID)
+	// First call caches expiring token
+	token1, err := tp.TokenForInstallation(testInstallationID)
 	if err != nil {
-		t.Fatalf("TokenForInstallation(): %v", err)
+		t.Fatalf("first TokenForInstallation(): %v", err)
 	}
-	if token != "ghs_refreshed" {
-		t.Errorf("expected refreshed token, got %s", token)
+	if token1 != "ghs_old" {
+		t.Errorf("expected expiring token, got %s", token1)
 	}
-	if callCount != 1 {
-		t.Errorf("expected 1 refresh call, got %d", callCount)
+
+	// Second call should refresh since token is within 5 min buffer
+	token2, err := tp.TokenForInstallation(testInstallationID)
+	if err != nil {
+		t.Fatalf("second TokenForInstallation(): %v", err)
+	}
+	if token2 != "ghs_refreshed" {
+		t.Errorf("expected refreshed token, got %s", token2)
+	}
+	if mock.callCount != 2 {
+		t.Errorf("expected 2 server calls (refresh), got %d", mock.callCount)
 	}
 }
-
 func TestTokenExchangeError(t *testing.T) {
 	tp, _ := setupMockProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -288,24 +329,26 @@ func TestTokenExchangeError(t *testing.T) {
 }
 
 func TestTokenCaching_MultipleInstallations(t *testing.T) {
-	callCount := 0
-	tp, _ := setupMockProvider(t, func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		// Return a token that encodes which installation was requested
-		var token string
-		if strings.Contains(r.URL.Path, "/111/") {
-			token = "ghs_token_for_111"
-		} else if strings.Contains(r.URL.Path, "/222/") {
-			token = "ghs_token_for_222"
-		} else {
-			token = "ghs_unknown"
-		}
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]any{
-			"token":      token,
-			"expires_at": time.Now().Add(1 * time.Hour).Format(time.RFC3339),
-		})
-	})
+	mock := &mockServer{
+		t: t,
+		responses: []mockResponse{
+			{
+				path: "/app/installations/111/access_tokens",
+				body: map[string]any{
+					"token":      "ghs_token_for_111",
+					"expires_at": time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+				},
+			},
+			{
+				path: "/app/installations/222/access_tokens",
+				body: map[string]any{
+					"token":      "ghs_token_for_222",
+					"expires_at": time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+				},
+			},
+		},
+	}
+	tp, _ := setupMockProvider(t, mock.ServeHTTP)
 
 	// Get token for installation 111
 	token1, err := tp.TokenForInstallation(111)
@@ -315,8 +358,8 @@ func TestTokenCaching_MultipleInstallations(t *testing.T) {
 	if token1 != "ghs_token_for_111" {
 		t.Errorf("expected ghs_token_for_111, got %s", token1)
 	}
-	if callCount != 1 {
-		t.Errorf("expected 1 server call, got %d", callCount)
+	if mock.callCount != 1 {
+		t.Errorf("expected 1 server call, got %d", mock.callCount)
 	}
 
 	// Get token for installation 222
@@ -327,8 +370,8 @@ func TestTokenCaching_MultipleInstallations(t *testing.T) {
 	if token2 != "ghs_token_for_222" {
 		t.Errorf("expected ghs_token_for_222, got %s", token2)
 	}
-	if callCount != 2 {
-		t.Errorf("expected 2 server calls, got %d", callCount)
+	if mock.callCount != 2 {
+		t.Errorf("expected 2 server calls, got %d", mock.callCount)
 	}
 
 	// Re-request installation 111 — should be cached
@@ -339,8 +382,8 @@ func TestTokenCaching_MultipleInstallations(t *testing.T) {
 	if token1b != "ghs_token_for_111" {
 		t.Errorf("expected cached ghs_token_for_111, got %s", token1b)
 	}
-	if callCount != 2 {
-		t.Errorf("expected still 2 server calls (cached), got %d", callCount)
+	if mock.callCount != 2 {
+		t.Errorf("expected still 2 server calls (cached), got %d", mock.callCount)
 	}
 
 	// Re-request installation 222 — should be cached
@@ -351,7 +394,7 @@ func TestTokenCaching_MultipleInstallations(t *testing.T) {
 	if token2b != "ghs_token_for_222" {
 		t.Errorf("expected cached ghs_token_for_222, got %s", token2b)
 	}
-	if callCount != 2 {
-		t.Errorf("expected still 2 server calls (cached), got %d", callCount)
+	if mock.callCount != 2 {
+		t.Errorf("expected still 2 server calls (cached), got %d", mock.callCount)
 	}
 }

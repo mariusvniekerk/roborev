@@ -74,37 +74,48 @@ func assertConfigValue(t *testing.T, path, dotKey string, expected any) {
 	}
 }
 
-// stubRepoEnv stubs the repoRootFromGit and currentWorkingDir functions for
-// tests and restores them on cleanup.
-type stubRepoEnv struct {
-	t *testing.T
-}
-
-func newStubRepoEnv(t *testing.T) *stubRepoEnv {
+func assertErrorContains(t *testing.T, err error, want string) {
 	t.Helper()
-	oldGit := repoRootFromGit
-	oldWD := currentWorkingDir
-	t.Cleanup(func() {
-		repoRootFromGit = oldGit
-		currentWorkingDir = oldWD
-	})
-	return &stubRepoEnv{t: t}
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("error %q does not contain %q", err.Error(), want)
+	}
 }
 
-func (s *stubRepoEnv) SetGitRoot(path string) {
-	repoRootFromGit = func(string) (string, error) { return path, nil }
+// stubRepoResolver implements RepoResolver for testing.
+type stubRepoResolver struct {
+	gitRoot    string
+	gitErr     error
+	workingDir string
+	workingErr error
 }
 
-func (s *stubRepoEnv) SetGitError(err error) {
-	repoRootFromGit = func(string) (string, error) { return "", err }
+func (s *stubRepoResolver) RepoRoot() (string, error) {
+	return s.gitRoot, s.gitErr
 }
 
-func (s *stubRepoEnv) SetWorkingDir(path string) {
-	currentWorkingDir = func() (string, error) { return path, nil }
+func (s *stubRepoResolver) WorkingDir() (string, error) {
+	return s.workingDir, s.workingErr
 }
 
-func (s *stubRepoEnv) SetWorkingDirError(err error) {
-	currentWorkingDir = func() (string, error) { return "", err }
+func (s *stubRepoResolver) SetGitRoot(path string) {
+	s.gitRoot = path
+	s.gitErr = nil
+}
+
+func (s *stubRepoResolver) SetGitError(err error) {
+	s.gitErr = err
+}
+
+func (s *stubRepoResolver) SetWorkingDir(path string) {
+	s.workingDir = path
+	s.workingErr = nil
+}
+
+func (s *stubRepoResolver) SetWorkingDirError(err error) {
+	s.workingErr = err
 }
 
 // createFakeGitRepo creates a temporary directory with a .git subdirectory,
@@ -116,6 +127,38 @@ func createFakeGitRepo(t *testing.T) string {
 		t.Fatalf("create .git dir: %v", err)
 	}
 	return dir
+}
+
+type configEnv struct {
+	DataDir  string
+	RepoDir  string
+	Resolver *stubRepoResolver
+}
+
+func setupConfigEnv(t *testing.T, globalTOML, localTOML string) configEnv {
+	t.Helper()
+	dataDir := t.TempDir()
+	t.Setenv("ROBOREV_DATA_DIR", dataDir)
+
+	if globalTOML != "" {
+		globalPath := filepath.Join(dataDir, "config.toml")
+		if err := os.WriteFile(globalPath, []byte(globalTOML), 0644); err != nil {
+			t.Fatalf("write global config: %v", err)
+		}
+	}
+
+	repoDir := createFakeGitRepo(t)
+	if localTOML != "" {
+		localPath := filepath.Join(repoDir, ".roborev.toml")
+		if err := os.WriteFile(localPath, []byte(localTOML), 0644); err != nil {
+			t.Fatalf("write local config: %v", err)
+		}
+	}
+
+	resolver := &stubRepoResolver{}
+	resolver.SetGitRoot(repoDir)
+
+	return configEnv{DataDir: dataDir, RepoDir: repoDir, Resolver: resolver}
 }
 
 func TestDetermineScope(t *testing.T) {
@@ -173,10 +216,10 @@ func TestDetermineScope(t *testing.T) {
 
 func TestRepoRoot(t *testing.T) {
 	t.Run("uses git resolver when available", func(t *testing.T) {
-		env := newStubRepoEnv(t)
-		env.SetGitRoot("/tmp/from-git")
+		resolver := &stubRepoResolver{}
+		resolver.SetGitRoot("/tmp/from-git")
 
-		got, err := repoRoot()
+		got, err := repoRoot(resolver)
 		if err != nil {
 			t.Fatalf("repoRoot returned error: %v", err)
 		}
@@ -192,11 +235,11 @@ func TestRepoRoot(t *testing.T) {
 			t.Fatalf("create nested dir: %v", err)
 		}
 
-		env := newStubRepoEnv(t)
-		env.SetGitError(errors.New(errGitStub))
-		env.SetWorkingDir(nestedDir)
+		resolver := &stubRepoResolver{}
+		resolver.SetGitError(errors.New(errGitStub))
+		resolver.SetWorkingDir(nestedDir)
 
-		got, err := repoRoot()
+		got, err := repoRoot(resolver)
 		if err != nil {
 			t.Fatalf("repoRoot returned error: %v", err)
 		}
@@ -206,11 +249,11 @@ func TestRepoRoot(t *testing.T) {
 	})
 
 	t.Run("optional lookup returns empty when not in repo", func(t *testing.T) {
-		env := newStubRepoEnv(t)
-		env.SetGitError(errors.New(errGitStub))
-		env.SetWorkingDir(t.TempDir())
+		resolver := &stubRepoResolver{}
+		resolver.SetGitError(errors.New(errGitStub))
+		resolver.SetWorkingDir(t.TempDir())
 
-		got, err := repoRoot()
+		got, err := repoRoot(resolver)
 		if err != nil {
 			t.Fatalf("repoRoot returned error: %v", err)
 		}
@@ -219,14 +262,13 @@ func TestRepoRoot(t *testing.T) {
 		}
 	})
 }
-
 func TestRequireRepoRoot(t *testing.T) {
 	t.Run("returns not repo error when required and missing", func(t *testing.T) {
-		env := newStubRepoEnv(t)
-		env.SetGitError(errors.New(errGitStub))
-		env.SetWorkingDir(t.TempDir())
+		resolver := &stubRepoResolver{}
+		resolver.SetGitError(errors.New(errGitStub))
+		resolver.SetWorkingDir(t.TempDir())
 
-		_, err := requireRepoRoot()
+		_, err := requireRepoRoot(resolver)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -236,44 +278,26 @@ func TestRequireRepoRoot(t *testing.T) {
 	})
 
 	t.Run("surfaces resolver errors", func(t *testing.T) {
-		env := newStubRepoEnv(t)
-		env.SetGitError(errors.New(errGitStub))
-		env.SetWorkingDirError(errors.New(errCwdStub))
+		resolver := &stubRepoResolver{}
+		resolver.SetGitError(errors.New(errGitStub))
+		resolver.SetWorkingDirError(errors.New(errCwdStub))
 
-		_, err := requireRepoRoot()
-		if err == nil {
-			t.Fatal("expected error")
-		}
-		if !strings.Contains(err.Error(), "determine repository root: "+errCwdStub) {
-			t.Fatalf("unexpected error: %v", err)
-		}
+		_, err := requireRepoRoot(resolver)
+		assertErrorContains(t, err, "determine repository root: "+errCwdStub)
 	})
 }
-
 func TestGetValueForScopeMergedPrefersLocal(t *testing.T) {
-	dataDir := t.TempDir()
-	t.Setenv("ROBOREV_DATA_DIR", dataDir)
+	env := setupConfigEnv(t, "review_agent = \"global-agent\"\n", "review_agent = \"local-agent\"\n")
 
-	globalPath := filepath.Join(dataDir, "config.toml")
-	if err := os.WriteFile(globalPath, []byte("review_agent = \"global-agent\"\n"), 0644); err != nil {
-		t.Fatalf("write global config: %v", err)
-	}
-
-	repoDir := createFakeGitRepo(t)
-	if err := os.WriteFile(filepath.Join(repoDir, ".roborev.toml"), []byte("review_agent = \"local-agent\"\n"), 0644); err != nil {
-		t.Fatalf("write local config: %v", err)
-	}
-
-	nestedDir := filepath.Join(repoDir, "a", "b")
+	nestedDir := filepath.Join(env.RepoDir, "a", "b")
 	if err := os.MkdirAll(nestedDir, 0755); err != nil {
 		t.Fatalf("create nested dir: %v", err)
 	}
 
-	env := newStubRepoEnv(t)
-	env.SetGitError(errors.New(errGitStub))
-	env.SetWorkingDir(nestedDir)
+	env.Resolver.SetGitError(errors.New(errGitStub))
+	env.Resolver.SetWorkingDir(nestedDir)
 
-	got, err := getValueForScope("review_agent", scopeMerged)
+	got, err := getValueForScope(env.Resolver, "review_agent", scopeMerged)
 	if err != nil {
 		t.Fatalf("getValueForScope returned error: %v", err)
 	}
@@ -281,41 +305,24 @@ func TestGetValueForScopeMergedPrefersLocal(t *testing.T) {
 		t.Fatalf("getValueForScope = %q, want %q", got, "local-agent")
 	}
 }
-
 func TestGetValueForScopeMergedRepoResolutionError(t *testing.T) {
-	dataDir := t.TempDir()
-	t.Setenv("ROBOREV_DATA_DIR", dataDir)
+	env := setupConfigEnv(t, "", "")
 
-	env := newStubRepoEnv(t)
-	env.SetGitError(errors.New(errGitStub))
-	env.SetWorkingDirError(errors.New(errCwdStub))
+	env.Resolver.SetGitError(errors.New(errGitStub))
+	env.Resolver.SetWorkingDirError(errors.New(errCwdStub))
 
-	_, err := getValueForScope("review_agent", scopeMerged)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "determine repository root: "+errCwdStub) {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	_, err := getValueForScope(env.Resolver, "review_agent", scopeMerged)
+	assertErrorContains(t, err, "determine repository root: "+errCwdStub)
 }
-
 func TestListMergedConfigRepoResolutionError(t *testing.T) {
-	dataDir := t.TempDir()
-	t.Setenv("ROBOREV_DATA_DIR", dataDir)
+	env := setupConfigEnv(t, "", "")
 
-	env := newStubRepoEnv(t)
-	env.SetGitError(errors.New(errGitStub))
-	env.SetWorkingDirError(errors.New(errCwdStub))
+	env.Resolver.SetGitError(errors.New(errGitStub))
+	env.Resolver.SetWorkingDirError(errors.New(errCwdStub))
 
-	err := listMergedConfig(false)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "determine repository root: "+errCwdStub) {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	err := listMergedConfig(env.Resolver, false)
+	assertErrorContains(t, err, "determine repository root: "+errCwdStub)
 }
-
 func TestSetConfigKey(t *testing.T) {
 	path := setupConfigFile(t)
 
@@ -453,77 +460,28 @@ func TestSetRawMapKey(t *testing.T) {
 }
 
 func TestGetValueForScopeMergedMalformedLocalConfig(t *testing.T) {
-	dataDir := t.TempDir()
-	t.Setenv("ROBOREV_DATA_DIR", dataDir)
+	env := setupConfigEnv(t, "review_agent = \"global-agent\"\n", "invalid toml [[[")
 
-	// Write a valid global config
-	globalPath := filepath.Join(dataDir, "config.toml")
-	if err := os.WriteFile(globalPath, []byte("review_agent = \"global-agent\"\n"), 0644); err != nil {
-		t.Fatalf("write global config: %v", err)
-	}
-
-	// Create repo with malformed .roborev.toml
-	repoDir := createFakeGitRepo(t)
-	if err := os.WriteFile(filepath.Join(repoDir, ".roborev.toml"), []byte("invalid toml [[["), 0644); err != nil {
-		t.Fatalf("write malformed config: %v", err)
-	}
-
-	env := newStubRepoEnv(t)
-	env.SetGitRoot(repoDir)
-
-	_, err := getValueForScope("review_agent", scopeMerged)
-	if err == nil {
-		t.Fatal("expected error for malformed local config")
-	}
-	if !strings.Contains(err.Error(), "load repo config") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	_, err := getValueForScope(env.Resolver, "review_agent", scopeMerged)
+	assertErrorContains(t, err, "load repo config")
 }
-
 func TestListMergedConfigMalformedLocalConfig(t *testing.T) {
-	dataDir := t.TempDir()
-	t.Setenv("ROBOREV_DATA_DIR", dataDir)
+	env := setupConfigEnv(t, "", "invalid toml [[[")
 
-	// Create repo with malformed .roborev.toml
-	repoDir := createFakeGitRepo(t)
-	if err := os.WriteFile(filepath.Join(repoDir, ".roborev.toml"), []byte("invalid toml [[["), 0644); err != nil {
-		t.Fatalf("write malformed config: %v", err)
-	}
-
-	env := newStubRepoEnv(t)
-	env.SetGitRoot(repoDir)
-
-	err := listMergedConfig(false)
-	if err == nil {
-		t.Fatal("expected error for malformed local config")
-	}
-	if !strings.Contains(err.Error(), "load repo config") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	err := listMergedConfig(env.Resolver, false)
+	assertErrorContains(t, err, "load repo config")
 }
-
 func TestListGlobalConfigExplicitKeys(t *testing.T) {
-	dataDir := t.TempDir()
-	t.Setenv("ROBOREV_DATA_DIR", dataDir)
-
-	// Write a global config with:
-	// - explicit default-valued key (max_workers = 4, which matches DefaultConfig)
-	// - explicit zero key (review_context_count = 0)
-	// - explicit false key (sync.enabled = false)
-	globalPath := filepath.Join(dataDir, "config.toml")
-	if err := os.WriteFile(globalPath, []byte(strings.Join([]string{
+	setupConfigEnv(t, strings.Join([]string{
 		`max_workers = 4`,
 		`review_context_count = 0`,
 		``,
 		`[sync]`,
 		`enabled = false`,
-	}, "\n")+"\n"), 0644); err != nil {
-		t.Fatalf("write global config: %v", err)
-	}
+	}, "\n")+"\n", "")
 
 	// Capture stdout
 	output := captureOutput(t, listGlobalConfig)
-
 	// Explicit default-valued key should be shown
 	if !strings.Contains(output, "max_workers=4") {
 		t.Errorf("output should include explicit default-valued key max_workers=4, got:\n%s", output)
@@ -546,28 +504,15 @@ func TestListGlobalConfigExplicitKeys(t *testing.T) {
 }
 
 func TestListLocalConfigExplicitKeys(t *testing.T) {
-	dataDir := t.TempDir()
-	t.Setenv("ROBOREV_DATA_DIR", dataDir)
-
-	repoDir := createFakeGitRepo(t)
-
-	// Write a local config with:
-	// - explicit key with value
-	// - explicit zero key (review_context_count = 0)
-	// - explicit false in nested struct not applicable for RepoConfig, so use zero int
-	if err := os.WriteFile(filepath.Join(repoDir, ".roborev.toml"), []byte(strings.Join([]string{
+	env := setupConfigEnv(t, "", strings.Join([]string{
 		`agent = "claude-code"`,
 		`review_context_count = 0`,
-	}, "\n")+"\n"), 0644); err != nil {
-		t.Fatalf("write local config: %v", err)
-	}
-
-	env := newStubRepoEnv(t)
-	env.SetGitRoot(repoDir)
+	}, "\n")+"\n")
 
 	// Capture stdout
-	output := captureOutput(t, listLocalConfig)
-
+	output := captureOutput(t, func() error {
+		return listLocalConfig(env.Resolver)
+	})
 	// Explicit key should be shown
 	if !strings.Contains(output, "agent=claude-code") {
 		t.Errorf("output should include explicit agent=claude-code, got:\n%s", output)
@@ -585,26 +530,13 @@ func TestListLocalConfigExplicitKeys(t *testing.T) {
 }
 
 func TestGetValueForScopeMergedRepoOnlyKeyNotSet(t *testing.T) {
-	dataDir := t.TempDir()
-	t.Setenv("ROBOREV_DATA_DIR", dataDir)
-
-	// Write a valid global config (no local config)
-	globalPath := filepath.Join(dataDir, "config.toml")
-	if err := os.WriteFile(globalPath, []byte("default_agent = \"codex\"\n"), 0644); err != nil {
-		t.Fatalf("write global config: %v", err)
-	}
+	env := setupConfigEnv(t, "default_agent = \"codex\"\n", "")
 
 	// No repo (no .git dir)
-	env := newStubRepoEnv(t)
-	env.SetGitError(errors.New(errGitStub))
-	env.SetWorkingDir(t.TempDir())
+	env.Resolver.SetGitError(errors.New(errGitStub))
+	env.Resolver.SetWorkingDir(t.TempDir())
 
 	// "agent" is a repo-only key — should not fall through to global config
-	_, err := getValueForScope("agent", scopeMerged)
-	if err == nil {
-		t.Fatal("expected error for repo-only key with no local config")
-	}
-	if !strings.Contains(err.Error(), "not set in local config") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	_, err := getValueForScope(env.Resolver, "agent", scopeMerged)
+	assertErrorContains(t, err, "not set in local config")
 }

@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -49,13 +50,14 @@ func createRuntimeFile(t *testing.T, dir string, pid int, data *runtimeData) str
 	return path
 }
 
-// startMockDaemon starts an httptest server handled by handler and returns the
-// "host:port" address. The server is closed automatically when the test ends.
-func startMockDaemon(t *testing.T, handler http.HandlerFunc) string {
+// startMockDaemon starts an httptest server with an http.ServeMux and returns the
+// "host:port" address and the mux. The server is closed automatically when the test ends.
+func startMockDaemon(t *testing.T) (string, *http.ServeMux) {
 	t.Helper()
-	server := httptest.NewServer(handler)
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
-	return strings.TrimPrefix(server.URL, "http://")
+	return strings.TrimPrefix(server.URL, "http://"), mux
 }
 
 // mockIdentifyProcess replaces the global identifyProcess function with mock
@@ -82,42 +84,65 @@ func TestFindAvailablePort(t *testing.T) {
 	}
 }
 
+func TestFindAvailablePort_Ephemeral(t *testing.T) {
+	// Test finding an available port with ephemeral :0
+	addr, port, err := FindAvailablePort("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("FindAvailablePort failed for ephemeral port: %v", err)
+	}
+
+	if addr == "" {
+		t.Error("Expected non-empty address")
+	}
+	if port == 0 {
+		t.Error("Expected non-zero port assigned by OS")
+	}
+	expectedAddr := fmt.Sprintf("127.0.0.1:%d", port)
+	if addr != expectedAddr {
+		t.Errorf("Expected address %q, got %q", expectedAddr, addr)
+	}
+}
+
 func TestRuntimeInfoReadWrite(t *testing.T) {
 	testenv.SetDataDir(t)
 
-	// Write runtime info
-	err := WriteRuntime(defaultTestAddr, defaultTestPort, "test-version")
-	if err != nil {
-		t.Fatalf("WriteRuntime failed: %v", err)
-	}
+	t.Run("WriteAndRead", func(t *testing.T) {
+		// Write runtime info
+		err := WriteRuntime(defaultTestAddr, defaultTestPort, "test-version")
+		if err != nil {
+			t.Fatalf("WriteRuntime failed: %v", err)
+		}
 
-	// Read it back
-	info, err := ReadRuntime()
-	if err != nil {
-		t.Fatalf("ReadRuntime failed: %v", err)
-	}
+		// Read it back
+		info, err := ReadRuntime()
+		if err != nil {
+			t.Fatalf("ReadRuntime failed: %v", err)
+		}
 
-	if info.Addr != defaultTestAddr {
-		t.Errorf("Expected addr '%s', got '%s'", defaultTestAddr, info.Addr)
-	}
-	if info.Port != defaultTestPort {
-		t.Errorf("Expected port %d, got %d", defaultTestPort, info.Port)
-	}
-	if info.PID == 0 {
-		t.Error("Expected non-zero PID")
-	}
-	if info.Version != "test-version" {
-		t.Errorf("Expected version 'test-version', got '%s'", info.Version)
-	}
+		if info.Addr != defaultTestAddr {
+			t.Errorf("Expected addr '%s', got '%s'", defaultTestAddr, info.Addr)
+		}
+		if info.Port != defaultTestPort {
+			t.Errorf("Expected port %d, got %d", defaultTestPort, info.Port)
+		}
+		if info.PID == 0 {
+			t.Error("Expected non-zero PID")
+		}
+		if info.Version != "test-version" {
+			t.Errorf("Expected version 'test-version', got '%s'", info.Version)
+		}
+	})
 
-	// Remove it
-	RemoveRuntime()
+	t.Run("Remove", func(t *testing.T) {
+		// Remove it
+		RemoveRuntime()
 
-	// Should fail to read now
-	_, err = ReadRuntime()
-	if err == nil {
-		t.Error("Expected error after RemoveRuntime")
-	}
+		// Should fail to read now
+		_, err := ReadRuntime()
+		if err == nil {
+			t.Error("Expected error after RemoveRuntime")
+		}
+	})
 }
 
 func TestKillDaemonSkipsHTTPForNonLoopback(t *testing.T) {
@@ -127,19 +152,24 @@ func TestKillDaemonSkipsHTTPForNonLoopback(t *testing.T) {
 		t.Fatal("192.168.1.100:7373 should not be identified as loopback")
 	}
 
+	// Mock identifyProcess so we don't have to rely on actual OS PID behavior
+	mockIdentifyProcess(t, func(pid int) processIdentity {
+		return processNotRoborev
+	})
+
 	// KillDaemon with a non-loopback address should skip HTTP and fall
-	// through to killProcess (which fails for a non-existent PID).
+	// through to killProcess (which returns true because of the mock).
 	// This must complete promptly without attempting network connections.
 	info := &RuntimeInfo{
-		PID:  999999,               // Non-existent PID
+		PID:  os.Getpid(),          // Existing PID, but mocked as not-roborev
 		Addr: "192.168.1.100:7373", // Non-loopback address
 	}
 
 	result := KillDaemon(info)
 
-	// killProcess confirms a non-existent PID is dead, so KillDaemon returns true
+	// killProcess confirms the process is not roborev, so KillDaemon returns true
 	if !result {
-		t.Error("KillDaemon should return true for non-existent PID (process confirmed dead)")
+		t.Error("KillDaemon should return true for process confirmed not roborev")
 	}
 }
 
@@ -152,11 +182,11 @@ func TestListAllRuntimesSkipsUnreadableFiles(t *testing.T) {
 	dataDir := testenv.SetDataDir(t)
 
 	// Create a valid runtime file
-	createRuntimeFile(t, dataDir, 12345, nil)
+	createRuntimeFile(t, dataDir, math.MaxInt32, nil)
 
 	// Create an unreadable runtime file
-	unreadablePath := createRuntimeFile(t, dataDir, 99999, &runtimeData{
-		PID:  99999,
+	unreadablePath := createRuntimeFile(t, dataDir, math.MaxInt32-1, &runtimeData{
+		PID:  math.MaxInt32 - 1,
 		Addr: "127.0.0.1:7374",
 	})
 	os.Chmod(unreadablePath, 0000)
@@ -176,10 +206,10 @@ func TestListAllRuntimesSkipsUnreadableFiles(t *testing.T) {
 
 	// Should have found the valid runtime
 	if len(runtimes) != 1 {
-		t.Errorf("Expected 1 runtime, got %d", len(runtimes))
+		t.Fatalf("Expected exactly 1 runtime, got %d", len(runtimes))
 	}
-	if len(runtimes) > 0 && runtimes[0].PID != 12345 {
-		t.Errorf("Expected PID 12345, got %d", runtimes[0].PID)
+	if runtimes[0].PID != math.MaxInt32 {
+		t.Errorf("Expected PID %d, got %d", math.MaxInt32, runtimes[0].PID)
 	}
 }
 
@@ -188,10 +218,10 @@ func TestIdentifyProcessTriState(t *testing.T) {
 
 	// Non-existent PID should return processUnknown (can't determine)
 	// or processNotRoborev if the system can confirm no such process
-	result := identifyProcess(999999999)
+	result := identifyProcess(math.MaxInt32)
 	// Either unknown or not-roborev is acceptable for non-existent PID
 	if result == processIsRoborev {
-		t.Error("identifyProcess(999999999) should not return processIsRoborev for non-existent PID")
+		t.Error("identifyProcess(math.MaxInt32) should not return processIsRoborev for non-existent PID")
 	}
 
 	// Current process is a test binary, not roborev daemon
@@ -210,7 +240,7 @@ func TestIdentifyProcessTriState(t *testing.T) {
 func TestKillProcessConservativeOnUnknown(t *testing.T) {
 	// Test that killProcess is conservative when process identity is unknown
 	// Using a very high PID that almost certainly doesn't exist
-	nonExistentPID := 999999999
+	nonExistentPID := math.MaxInt32
 
 	// killProcess should return true for non-existent PID (process is dead)
 	// This is safe because the process doesn't exist at all
@@ -274,12 +304,6 @@ func TestIsLoopbackAddr(t *testing.T) {
 }
 
 func TestIsDaemonAliveStatusCodes(t *testing.T) {
-	var nextStatus int
-	// Start one server for all cases
-	addr := startMockDaemon(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(nextStatus)
-	})
-
 	tests := []struct {
 		name       string
 		statusCode int
@@ -309,7 +333,10 @@ func TestIsDaemonAliveStatusCodes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			nextStatus = tt.statusCode
+			addr, mux := startMockDaemon(t)
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.statusCode)
+			})
 			got := IsDaemonAlive(addr)
 			if got != tt.wantAlive {
 				t.Errorf("IsDaemonAlive with %d = %v, want %v", tt.statusCode, got, tt.wantAlive)
@@ -331,7 +358,7 @@ func TestListAllRuntimesWithGlobMetacharacters(t *testing.T) {
 	t.Setenv("ROBOREV_DATA_DIR", dataDir)
 
 	// Create a valid runtime file
-	createRuntimeFile(t, dataDir, 12345, nil)
+	createRuntimeFile(t, dataDir, math.MaxInt32, nil)
 
 	// ListAllRuntimes should work despite glob metacharacters in path
 	runtimes, err := ListAllRuntimes()
@@ -340,9 +367,9 @@ func TestListAllRuntimesWithGlobMetacharacters(t *testing.T) {
 	}
 
 	if len(runtimes) != 1 {
-		t.Errorf("Expected 1 runtime, got %d", len(runtimes))
+		t.Fatalf("Expected exactly 1 runtime, got %d", len(runtimes))
 	}
-	if len(runtimes) > 0 && runtimes[0].PID != 12345 {
-		t.Errorf("Expected PID 12345, got %d", runtimes[0].PID)
+	if runtimes[0].PID != math.MaxInt32 {
+		t.Errorf("Expected PID %d, got %d", math.MaxInt32, runtimes[0].PID)
 	}
 }

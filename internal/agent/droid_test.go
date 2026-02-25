@@ -10,11 +10,11 @@ import (
 
 func TestDroidBuildArgs(t *testing.T) {
 	tests := []struct {
-		name      string
-		agentic   bool
-		reasoning ReasoningLevel
-		wantArgs  []string
-		dontWant  []string
+		name     string
+		agentic  bool
+		setup    func(*DroidAgent) *DroidAgent
+		wantArgs []string
+		dontWant []string
 	}{
 		{
 			name:     "Non-agentic default",
@@ -28,27 +28,27 @@ func TestDroidBuildArgs(t *testing.T) {
 			wantArgs: []string{"--auto", "medium"},
 		},
 		{
-			name:      "Reasoning Thorough",
-			reasoning: ReasoningThorough,
-			wantArgs:  []string{"--reasoning-effort", "high"},
+			name:     "Reasoning Thorough",
+			setup:    func(a *DroidAgent) *DroidAgent { return a.WithReasoning(ReasoningThorough).(*DroidAgent) },
+			wantArgs: []string{"--reasoning-effort", "high"},
 		},
 		{
-			name:      "Reasoning Fast",
-			reasoning: ReasoningFast,
-			wantArgs:  []string{"--reasoning-effort", "low"},
+			name:     "Reasoning Fast",
+			setup:    func(a *DroidAgent) *DroidAgent { return a.WithReasoning(ReasoningFast).(*DroidAgent) },
+			wantArgs: []string{"--reasoning-effort", "low"},
 		},
 		{
-			name:      "Reasoning Standard",
-			reasoning: ReasoningStandard,
-			dontWant:  []string{"--reasoning-effort"},
+			name:     "Reasoning Standard",
+			setup:    func(a *DroidAgent) *DroidAgent { return a.WithReasoning(ReasoningStandard).(*DroidAgent) },
+			dontWant: []string{"--reasoning-effort"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			a := NewDroidAgent("droid")
-			if tt.reasoning != "" {
-				a = a.WithReasoning(tt.reasoning).(*DroidAgent)
+			if tt.setup != nil {
+				a = tt.setup(a)
 			}
 
 			args := a.buildArgs(tt.agentic)
@@ -88,36 +88,62 @@ func TestDroidWithAgentic(t *testing.T) {
 	}
 }
 
-func TestDroidReviewSuccess(t *testing.T) {
-	outputContent := "Review feedback from Droid"
-	script := NewScriptBuilder().AddOutput(outputContent).Build()
-	result, err := runReviewScenario(t, script, "review this commit")
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
+func TestDroidReviewOutcomes(t *testing.T) {
+	tests := []struct {
+		name        string
+		mockOpts    MockCLIOpts
+		wantError   bool
+		errContains string
+		wantResult  string
+		exactMatch  bool
+	}{
+		{
+			name:       "Success",
+			mockOpts:   MockCLIOpts{StdoutLines: []string{"Review feedback from Droid"}},
+			wantResult: "Review feedback from Droid\n",
+			exactMatch: true,
+		},
+		{
+			name:        "Failure",
+			mockOpts:    MockCLIOpts{StderrLines: []string{"error: something went wrong"}, ExitCode: 1},
+			wantError:   true,
+			errContains: "droid failed",
+		},
+		{
+			name:       "Empty Output",
+			mockOpts:   MockCLIOpts{},
+			wantResult: "No review output generated",
+			exactMatch: true,
+		},
 	}
-	if !strings.Contains(result, outputContent) {
-		t.Fatalf("expected result to contain %q, got %q", outputContent, result)
-	}
-}
 
-func TestDroidReviewFailure(t *testing.T) {
-	script := NewScriptBuilder().AddRaw(`echo "error: something went wrong" >&2`).AddRaw("exit 1").Build()
-	_, err := runReviewScenario(t, script, "review this commit")
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "droid failed") {
-		t.Fatalf("expected 'droid failed' in error, got %v", err)
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := mockAgentCLI(t, tt.mockOpts)
+			a := NewDroidAgent(mock.CmdPath)
 
-func TestDroidReviewEmptyOutput(t *testing.T) {
-	result, err := runReviewScenario(t, NewScriptBuilder().AddRaw("exit 0").Build(), "review this commit")
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if result != "No review output generated" {
-		t.Fatalf("expected 'No review output generated', got %q", result)
+			result, err := a.Review(context.Background(), t.TempDir(), "HEAD", "review this commit", nil)
+
+			if tt.wantError {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), tt.errContains) {
+					t.Fatalf("expected error to contain %q, got %v", tt.errContains, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+			if tt.exactMatch {
+				if result != tt.wantResult {
+					t.Fatalf("expected exact result %q, got %q", tt.wantResult, result)
+				}
+			} else if !strings.Contains(result, tt.wantResult) {
+				t.Fatalf("expected result to contain %q, got %q", tt.wantResult, result)
+			}
+		})
 	}
 }
 

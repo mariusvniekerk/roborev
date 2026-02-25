@@ -12,6 +12,36 @@ import (
 	"github.com/roborev-dev/roborev/internal/storage"
 )
 
+// setupRenderModel creates a standardized tuiModel for rendering tests
+func setupRenderModel(view tuiView, review *storage.Review, opts ...func(*tuiModel)) tuiModel {
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
+	m.width, m.height = 100, 30
+	m.currentView = view
+	m.currentReview = review
+	for _, opt := range opts {
+		opt(&m)
+	}
+	return m
+}
+
+func withModelBranch(b string) func(*tuiModel) {
+	return func(m *tuiModel) { m.currentBranch = b }
+}
+
+func assertOutputContains(t *testing.T, got, want string) {
+	t.Helper()
+	if !strings.Contains(got, want) {
+		t.Errorf("Expected output to contain %q, got:\n%s", want, got)
+	}
+}
+
+func assertAbsent(t *testing.T, got, want string) {
+	t.Helper()
+	if strings.Contains(got, want) {
+		t.Errorf("Expected output NOT to contain %q, got:\n%s", want, got)
+	}
+}
+
 func TestTUIFetchReviewNotFound(t *testing.T) {
 	_, m := mockServerModel(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -178,17 +208,18 @@ func TestTUIFetchReviewNoFallbackForRangeReview(t *testing.T) {
 
 func TestTUIReviewNavigation(t *testing.T) {
 	tests := []struct {
-		name          string
-		initialJobs   []storage.ReviewJob
-		initialIdx    int
-		initialID     int64
-		initialScroll int
-		key           any // rune or tea.KeyType
-		wantIdx       int
-		wantJobID     int64
-		wantScroll    int
-		wantFlash     string
-		wantCmd       bool // Expect a command (fetch)
+		name                 string
+		initialJobs          []storage.ReviewJob
+		initialIdx           int
+		initialID            int64
+		initialScroll        int
+		key                  any // rune or tea.KeyType
+		wantIdx              int
+		wantJobID            int64
+		wantScroll           int
+		wantFlash            string
+		wantCmd              bool // Expect a command (fetch)
+		checkFailedJobInline bool
 	}{
 		{
 			name: "J Next skips queued/running",
@@ -288,18 +319,19 @@ func TestTUIReviewNavigation(t *testing.T) {
 				makeJob(1),
 				makeJob(2, withStatus(storage.JobStatusFailed), withAgent("codex"), withError("something went wrong")),
 			},
-			initialIdx: 0,
-			initialID:  1,
-			key:        'j',
-			wantIdx:    1,
-			wantJobID:  2,
-			wantCmd:    false,
+			initialIdx:           0,
+			initialID:            1,
+			key:                  'j',
+			wantIdx:              1,
+			wantJobID:            2,
+			wantCmd:              false,
+			checkFailedJobInline: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := newTuiModel("http://localhost")
+			m := newTuiModel("http://localhost", WithExternalIODisabled())
 			m.jobs = tt.initialJobs
 			m.selectedIdx = tt.initialIdx
 			m.selectedJobID = tt.initialID
@@ -346,7 +378,7 @@ func TestTUIReviewNavigation(t *testing.T) {
 			}
 
 			// Specific check for failed job inline content
-			if tt.name == "Navigate to Failed Job Inline" {
+			if tt.checkFailedJobInline {
 				if m2.currentReview == nil {
 					t.Fatal("Expected currentReview to be set for failed job")
 				}
@@ -363,7 +395,7 @@ func TestTUIReviewNavigation(t *testing.T) {
 
 func TestTUIReviewStaleResponseIgnored(t *testing.T) {
 	// Test that stale review responses are ignored (race condition fix)
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 
 	m.jobs = []storage.ReviewJob{
 		makeJob(1),
@@ -393,7 +425,7 @@ func TestTUIReviewStaleResponseIgnored(t *testing.T) {
 
 func TestTUIReviewMsgWithMatchingJobID(t *testing.T) {
 	// Test that review responses with matching job ID are accepted
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 
 	m.jobs = []storage.ReviewJob{
 		makeJob(1),
@@ -423,7 +455,7 @@ func TestTUIReviewMsgWithMatchingJobID(t *testing.T) {
 
 func TestTUISelectionSyncInReviewView(t *testing.T) {
 	// Test that selectedIdx syncs with currentReview.Job.ID when jobs refresh
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 
 	// Initial state: viewing review for job 2
 	m.jobs = []storage.ReviewJob{
@@ -460,7 +492,7 @@ func TestTUIJobsRefreshDuringReviewNavigation(t *testing.T) {
 	// This tests the race condition fix: user navigates to job 3, but jobs refresh
 	// arrives before the review loads. Selection should stay on job 3, not revert
 	// to the currently displayed review's job (job 2).
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 
 	m.jobs = []storage.ReviewJob{
 		makeJob(1),
@@ -519,7 +551,7 @@ func TestTUIEmptyRefreshWhileViewingReview(t *testing.T) {
 	// Test that transient empty jobs refresh doesn't break selection
 	// when viewing a review. Selection should restore to displayed review
 	// when jobs repopulate.
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 
 	m.jobs = []storage.ReviewJob{
 		makeJob(1),
@@ -562,7 +594,7 @@ func TestTUIEmptyRefreshWhileViewingReview(t *testing.T) {
 func TestTUIEmptyRefreshSeedsFromCurrentReview(t *testing.T) {
 	// Test that if selectedJobID somehow becomes 0 while viewing a review,
 	// it gets seeded from the current review when jobs repopulate
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 
 	m.jobs = []storage.ReviewJob{}
 	m.selectedIdx = 0
@@ -589,7 +621,7 @@ func TestTUIEmptyRefreshSeedsFromCurrentReview(t *testing.T) {
 }
 
 func TestTUIReviewMsgSetsBranchName(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.jobs = []storage.ReviewJob{
 		makeJob(1),
 	}
@@ -612,7 +644,7 @@ func TestTUIReviewMsgSetsBranchName(t *testing.T) {
 }
 
 func TestTUIReviewMsgEmptyBranchForRange(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.jobs = []storage.ReviewJob{
 		makeJob(1, withRef("abc123..def456")),
 	}
@@ -634,342 +666,9 @@ func TestTUIReviewMsgEmptyBranchForRange(t *testing.T) {
 	}
 }
 
-func TestTUIRenderReviewViewWithBranchAndAddressed(t *testing.T) {
-	m := newTuiModel("http://localhost")
-	m.width = 100
-	m.height = 30
-	m.currentView = tuiViewReview
-	m.currentBranch = "feature/test"
-	m.currentReview = &storage.Review{
-		ID:        10,
-		Output:    "Some review output",
-		Addressed: true,
-		Job: &storage.ReviewJob{
-			ID:       1,
-			GitRef:   "abc1234",
-			RepoName: "myrepo",
-			Agent:    "codex",
-		},
-	}
-
-	output := m.View()
-
-	// Should contain branch info
-	if !strings.Contains(output, "on feature/test") {
-		t.Error("Expected output to contain 'on feature/test'")
-	}
-
-	// Should contain [ADDRESSED]
-	if !strings.Contains(output, "[ADDRESSED]") {
-		t.Error("Expected output to contain '[ADDRESSED]'")
-	}
-
-	// Should contain repo name and ref
-	if !strings.Contains(output, "myrepo") {
-		t.Error("Expected output to contain 'myrepo'")
-	}
-	if !strings.Contains(output, "abc1234") {
-		t.Error("Expected output to contain 'abc1234'")
-	}
-}
-
-func TestTUIRenderReviewViewWithModel(t *testing.T) {
-	m := newTuiModel("http://localhost")
-	m.width = 100
-	m.height = 30
-	m.currentView = tuiViewReview
-	m.currentReview = &storage.Review{
-		ID:     10,
-		Agent:  "codex",
-		Output: "Some review output",
-		Job: &storage.ReviewJob{
-			ID:       1,
-			GitRef:   "abc1234",
-			RepoName: "myrepo",
-			Agent:    "codex",
-			Model:    "o3",
-		},
-	}
-
-	output := m.View()
-
-	// Should contain agent with model in format "(codex: o3)"
-	if !strings.Contains(output, "(codex: o3)") {
-		t.Errorf("Expected output to contain '(codex: o3)', got:\n%s", output)
-	}
-}
-
-func TestTUIRenderReviewViewWithoutModel(t *testing.T) {
-	m := newTuiModel("http://localhost")
-	m.width = 100
-	m.height = 30
-	m.currentView = tuiViewReview
-	m.currentReview = &storage.Review{
-		ID:     10,
-		Agent:  "codex",
-		Output: "Some review output",
-		Job: &storage.ReviewJob{
-			ID:       1,
-			GitRef:   "abc1234",
-			RepoName: "myrepo",
-			Agent:    "codex",
-			Model:    "", // No model set
-		},
-	}
-
-	output := m.View()
-
-	// Should contain just the agent "(codex)" without model
-	if !strings.Contains(output, "(codex)") {
-		t.Errorf("Expected output to contain '(codex)', got:\n%s", output)
-	}
-	// Should NOT contain the colon separator that would indicate a model
-	if strings.Contains(output, "(codex:") {
-		t.Error("Expected output NOT to contain '(codex:' when no model is set")
-	}
-}
-
-func TestTUIRenderPromptViewWithModel(t *testing.T) {
-	m := newTuiModel("http://localhost")
-	m.width = 100
-	m.height = 30
-	m.currentView = tuiViewPrompt
-	m.currentReview = &storage.Review{
-		ID:     10,
-		Agent:  "codex",
-		Prompt: "Review this code",
-		Job: &storage.ReviewJob{
-			ID:     1,
-			GitRef: "abc1234",
-			Agent:  "codex",
-			Model:  "o3",
-		},
-	}
-
-	output := m.View()
-
-	// Should contain job ID
-	if !strings.Contains(output, "#1") {
-		t.Errorf("Expected Prompt view to contain '#1', got:\n%s", output)
-	}
-	// Should contain agent with model in format "(codex: o3)"
-	if !strings.Contains(output, "(codex: o3)") {
-		t.Errorf("Expected Prompt view to contain '(codex: o3)', got:\n%s", output)
-	}
-}
-
-func TestTUIRenderPromptViewWithoutModel(t *testing.T) {
-	m := newTuiModel("http://localhost")
-	m.width = 100
-	m.height = 30
-	m.currentView = tuiViewPrompt
-	m.currentReview = &storage.Review{
-		ID:     10,
-		Agent:  "codex",
-		Prompt: "Review this code",
-		Job: &storage.ReviewJob{
-			ID:     1,
-			GitRef: "abc1234",
-			Agent:  "codex",
-			Model:  "", // No model set
-		},
-	}
-
-	output := m.View()
-
-	// Should contain just the agent "(codex)" without model
-	if !strings.Contains(output, "(codex)") {
-		t.Errorf("Expected Prompt view to contain '(codex)', got:\n%s", output)
-	}
-	// Should NOT contain the colon separator that would indicate a model
-	if strings.Contains(output, "(codex:") {
-		t.Error("Expected Prompt view NOT to contain '(codex:' when no model is set")
-	}
-}
-
-func TestTUIRenderReviewViewNoBranchForRange(t *testing.T) {
-	m := newTuiModel("http://localhost")
-	m.width = 100
-	m.height = 30
-	m.currentView = tuiViewReview
-	m.currentBranch = "" // Empty for range
-	m.currentReview = &storage.Review{
-		ID:     10,
-		Output: "Some review output",
-		Job: &storage.ReviewJob{
-			ID:       1,
-			GitRef:   "abc123..def456",
-			RepoName: "myrepo",
-			Agent:    "codex",
-		},
-	}
-
-	output := m.View()
-
-	// Should NOT contain "on " prefix when no branch
-	if strings.Contains(output, " on ") {
-		t.Error("Expected output to NOT contain ' on ' for range commits")
-	}
-
-	// Should contain the range ref
-	if !strings.Contains(output, "abc123..def456") {
-		t.Error("Expected output to contain the range ref")
-	}
-}
-
-func TestTUIRenderReviewViewNoBlankLineWithoutVerdict(t *testing.T) {
-	m := newTuiModel("http://localhost")
-	m.width = 100
-	m.height = 30
-	m.currentView = tuiViewReview
-	m.currentReview = &storage.Review{
-		ID:     10,
-		Output: "Line 1\nLine 2\nLine 3",
-		Job: &storage.ReviewJob{
-			ID:       1,
-			GitRef:   "abc1234",
-			RepoName: "myrepo",
-			Agent:    "codex",
-			Verdict:  nil, // No verdict
-		},
-	}
-
-	output := m.View()
-	lines := strings.Split(output, "\n")
-
-	// Line 0: Title
-	if !strings.Contains(lines[0], "Review") {
-		t.Errorf("Line 0 should contain 'Review', got: %s", lines[0])
-	}
-
-	// Line 1: Location (ref)
-	if len(lines) > 1 && !strings.Contains(lines[1], "abc1234") {
-		t.Errorf("Line 1 should contain ref 'abc1234', got: %s", lines[1])
-	}
-
-	// Content should appear after the header (no verdict line inserted)
-	foundContent := false
-	for _, line := range lines[2:] {
-		if strings.Contains(stripANSI(line), "Line 1") {
-			foundContent = true
-			break
-		}
-	}
-	if !foundContent {
-		t.Errorf("Content should contain 'Line 1' after header, output:\n%s", output)
-	}
-}
-
-func TestTUIRenderReviewViewVerdictOnLine2(t *testing.T) {
-	verdictPass := "P"
-	m := newTuiModel("http://localhost")
-	m.width = 100
-	m.height = 30
-	m.currentView = tuiViewReview
-	m.currentReview = &storage.Review{
-		ID:     10,
-		Output: "Line 1\nLine 2\nLine 3",
-		Job: &storage.ReviewJob{
-			ID:       1,
-			GitRef:   "abc1234",
-			RepoName: "myrepo",
-			Agent:    "codex",
-			Verdict:  &verdictPass,
-		},
-	}
-
-	output := m.View()
-	lines := strings.Split(output, "\n")
-
-	// Line 0: Title
-	if !strings.Contains(lines[0], "Review") {
-		t.Errorf("Line 0 should contain 'Review', got: %s", lines[0])
-	}
-
-	// Line 1: Location (ref)
-	if len(lines) > 1 && !strings.Contains(lines[1], "abc1234") {
-		t.Errorf("Line 1 should contain ref 'abc1234', got: %s", lines[1])
-	}
-
-	// Line 2: Verdict
-	if len(lines) > 2 && !strings.Contains(lines[2], "Verdict") {
-		t.Errorf("Line 2 should contain 'Verdict', got: %s", lines[2])
-	}
-
-	// Content should appear after verdict line
-	foundContent := false
-	for _, line := range lines[3:] {
-		if strings.Contains(stripANSI(line), "Line 1") {
-			foundContent = true
-			break
-		}
-	}
-	if !foundContent {
-		t.Errorf("Content should contain 'Line 1' after verdict, output:\n%s", output)
-	}
-}
-
-func TestTUIRenderReviewViewAddressedWithoutVerdict(t *testing.T) {
-	// Test that [ADDRESSED] appears on line 2 when no verdict is present
-	m := newTuiModel("http://localhost")
-	m.width = 100
-	m.height = 30
-	m.currentView = tuiViewReview
-	m.currentReview = &storage.Review{
-		ID:        10,
-		Output:    "Line 1\n\nLine 2\n\nLine 3",
-		Addressed: true,
-		Job: &storage.ReviewJob{
-			ID:       1,
-			GitRef:   "abc1234",
-			RepoName: "myrepo",
-			Agent:    "codex",
-			Verdict:  nil, // No verdict
-		},
-	}
-
-	output := m.View()
-	lines := strings.Split(output, "\n")
-
-	// Require at least 4 lines: title, location, addressed, content
-	if len(lines) < 4 {
-		t.Fatalf("Expected at least 4 lines, got %d:\n%s", len(lines), output)
-	}
-
-	// Line 0: Title
-	if !strings.Contains(lines[0], "Review") {
-		t.Errorf("Line 0 should contain 'Review', got: %s", lines[0])
-	}
-
-	// Line 1: Location (ref)
-	if !strings.Contains(lines[1], "abc1234") {
-		t.Errorf("Line 1 should contain ref 'abc1234', got: %s", lines[1])
-	}
-
-	// Line 2: [ADDRESSED] (no verdict)
-	if !strings.Contains(lines[2], "[ADDRESSED]") {
-		t.Errorf("Line 2 should contain '[ADDRESSED]', got: %s", lines[2])
-	}
-	if strings.Contains(lines[2], "Verdict") {
-		t.Errorf("Line 2 should not contain 'Verdict' when no verdict is set, got: %s", lines[2])
-	}
-
-	// Content should appear after addressed line
-	foundContent := false
-	for _, line := range lines[3:] {
-		if strings.Contains(stripANSI(line), "Line 1") {
-			foundContent = true
-			break
-		}
-	}
-	if !foundContent {
-		t.Errorf("Content should contain 'Line 1' after addressed line, output:\n%s", output)
-	}
-}
-
 func TestTUIBranchClearedOnFailedJobNavigation(t *testing.T) {
 	// Test that navigating from a successful review with branch to a failed job clears the branch
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.width = 100
 	m.height = 30
 	m.currentView = tuiViewReview
@@ -1003,7 +702,7 @@ func TestTUIBranchClearedOnFailedJobNavigation(t *testing.T) {
 
 func TestTUIBranchClearedOnFailedJobEnter(t *testing.T) {
 	// Test that pressing Enter on a failed job clears the branch
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.width = 100
 	m.height = 30
 	m.currentView = tuiViewQueue
@@ -1029,37 +728,10 @@ func TestTUIBranchClearedOnFailedJobEnter(t *testing.T) {
 	}
 }
 
-func TestTUIRenderFailedJobNoBranchShown(t *testing.T) {
-	// Test that failed jobs don't show stale branch in rendered output
-	m := newTuiModel("http://localhost")
-	m.width = 100
-	m.height = 30
-	m.currentView = tuiViewReview
-	m.currentBranch = "" // Should be cleared
-	m.currentReview = &storage.Review{
-		Agent:  "codex",
-		Output: "Job failed:\n\nsome error",
-		Job: &storage.ReviewJob{
-			ID:       1,
-			GitRef:   "abc1234",
-			RepoName: "myrepo",
-			Agent:    "codex",
-			Status:   storage.JobStatusFailed,
-		},
-	}
-
-	output := m.View()
-
-	// Should NOT contain "on " when branch is cleared
-	if strings.Contains(output, " on ") {
-		t.Error("Failed job should not show branch in output")
-	}
-}
-
 func TestTUIRenderQueueViewBranchFilterOnlyNoPanic(t *testing.T) {
 	// Test that renderQueueView doesn't panic when branch filter is active
 	// but repo filter is empty (regression test for index out of range)
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.width = 100
 	m.height = 30
 	m.currentView = tuiViewQueue
@@ -1083,218 +755,8 @@ func TestTUIRenderQueueViewBranchFilterOnlyNoPanic(t *testing.T) {
 	}
 }
 
-func TestTUIVisibleLinesCalculationNoVerdict(t *testing.T) {
-	// Test that visibleLines = height - 4 when no verdict (title + location + status + help)
-	// Help text is ~106 chars, so use width >= 110 to avoid wrapping
-	m := newTuiModel("http://localhost")
-	m.width = 120
-	m.height = 10 // Small height to test calculation
-	m.currentView = tuiViewReview
-	// Create 20 lines of content to ensure scrolling.
-	// Glamour with WithPreservedNewLines renders this as 21 lines
-	// (1 leading blank + 20 content lines).
-	m.currentReview = &storage.Review{
-		ID:     10,
-		Output: "L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10\nL11\nL12\nL13\nL14\nL15\nL16\nL17\nL18\nL19\nL20",
-		Job: &storage.ReviewJob{
-			ID:      1,
-			GitRef:  "abc1234",
-			Agent:   "codex",
-			Verdict: nil, // No verdict
-		},
-	}
-
-	output := m.View()
-
-	// With height=10, no verdict, wide terminal: visibleLines = 10 - 5 = 5
-	// Non-content: title (1) + location (1) + status line (1) + help (2) = 5
-	// Glamour produces 21 rendered lines; only 5 visible.
-	visibleContentLines := 5
-	totalRenderedLines := 21
-
-	// Count content lines (glamour indents with spaces, so check trimmed)
-	contentCount := 0
-	for line := range strings.SplitSeq(output, "\n") {
-		trimmed := strings.TrimSpace(stripANSI(line))
-		if len(trimmed) >= 2 && trimmed[0] == 'L' && trimmed[1] >= '0' && trimmed[1] <= '9' {
-			contentCount++
-		}
-	}
-
-	if contentCount == 0 {
-		t.Error("Expected at least some content lines visible")
-	}
-
-	// Should show scroll indicator
-	expected := fmt.Sprintf("[1-%d of %d lines]", visibleContentLines, totalRenderedLines)
-	if !strings.Contains(output, expected) {
-		t.Errorf("Expected scroll indicator '%s', output: %s", expected, output)
-	}
-}
-
-func TestTUIVisibleLinesCalculationWithVerdict(t *testing.T) {
-	// Test that visibleLines = height - 5 when verdict present (title + location + verdict + status + help)
-	// Help text is ~106 chars, so use width >= 110 to avoid wrapping
-	verdictPass := "P"
-	m := newTuiModel("http://localhost")
-	m.width = 120
-	m.height = 10 // Small height to test calculation
-	m.currentView = tuiViewReview
-	m.currentReview = &storage.Review{
-		ID:     10,
-		Output: "L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10\nL11\nL12\nL13\nL14\nL15\nL16\nL17\nL18\nL19\nL20",
-		Job: &storage.ReviewJob{
-			ID:      1,
-			GitRef:  "abc1234",
-			Agent:   "codex",
-			Verdict: &verdictPass,
-		},
-	}
-
-	output := m.View()
-
-	// With height=10, verdict, wide terminal: visibleLines = 10 - 6 = 4
-	// Non-content: title (1) + location (1) + verdict (1) + status line (1) + help (2) = 6
-	// Glamour produces 21 rendered lines.
-	visibleContentLines := 4
-	totalRenderedLines := 21
-
-	expected := fmt.Sprintf("[1-%d of %d lines]", visibleContentLines, totalRenderedLines)
-	if !strings.Contains(output, expected) {
-		t.Errorf("Expected scroll indicator '%s', output: %s", expected, output)
-	}
-}
-
-func TestTUIVisibleLinesCalculationNarrowTerminal(t *testing.T) {
-	// Test that visibleLines accounts for help text wrapping at narrow terminals
-	// Two help lines, each wraps to 2 lines at width=50
-	m := newTuiModel("http://localhost")
-	m.width = 50
-	m.height = 10
-	m.currentView = tuiViewReview
-	m.currentReview = &storage.Review{
-		ID:     10,
-		Output: "L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10\nL11\nL12\nL13\nL14\nL15\nL16\nL17\nL18\nL19\nL20",
-		Job: &storage.ReviewJob{
-			ID:      1,
-			GitRef:  "abc1234",
-			Agent:   "codex",
-			Verdict: nil, // No verdict
-		},
-	}
-
-	output := m.View()
-
-	// With height=10, no verdict, narrow terminal (width=50):
-	// Help rows reflow to 4 lines at width=50.
-	// Non-content: title (1) + location (1) + status line (1) + help (4) = 7
-	// visibleLines = 10 - 7 = 3
-	// Glamour produces 21 rendered lines.
-	visibleContentLines := 3
-	totalRenderedLines := 21
-
-	expected := fmt.Sprintf("[1-%d of %d lines]", visibleContentLines, totalRenderedLines)
-	if !strings.Contains(output, expected) {
-		t.Errorf("Expected scroll indicator '%s', output: %s", expected, output)
-	}
-}
-
-func TestTUIVisibleLinesCalculationNarrowTerminalWithVerdict(t *testing.T) {
-	// Test narrow terminal with verdict - validates extra header line branch
-	// Two help lines, each wraps to 2 lines at width=50
-	verdictFail := "F"
-	m := newTuiModel("http://localhost")
-	m.width = 50
-	m.height = 10
-	m.currentView = tuiViewReview
-	m.currentReview = &storage.Review{
-		ID:     10,
-		Output: "L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10\nL11\nL12\nL13\nL14\nL15\nL16\nL17\nL18\nL19\nL20",
-		Job: &storage.ReviewJob{
-			ID:      1,
-			GitRef:  "abc1234",
-			Agent:   "codex",
-			Verdict: &verdictFail,
-		},
-	}
-
-	output := m.View()
-
-	// With height=10, verdict present, narrow terminal (width=50):
-	// Help rows reflow to 4 lines at width=50.
-	// Non-content: title (1) + location (1) + verdict (1) + status line (1) + help (4) = 8
-	// visibleLines = 10 - 8 = 2
-	// Glamour produces 21 rendered lines.
-	visibleContentLines := 2
-	totalRenderedLines := 21
-
-	expected := fmt.Sprintf("[1-%d of %d lines]", visibleContentLines, totalRenderedLines)
-	if !strings.Contains(output, expected) {
-		t.Errorf("Expected scroll indicator '%s', output: %s", expected, output)
-	}
-
-	// Should show verdict
-	if !strings.Contains(output, "Verdict") {
-		t.Error("Expected output to contain verdict")
-	}
-}
-
-func TestTUIVisibleLinesCalculationLongTitleWraps(t *testing.T) {
-	// Test that long titles and location lines correctly wrap and reduce visible lines
-	// New layout:
-	// - Title: "Review #1 very-long-repository-name-here (claude-code)" = ~54 chars, ceil(54/50) = 2 lines
-	// - Location line: "very-long-repository-name-here abc1234567890..de on feature/very-long-branch-name" = 81 chars, ceil(81/50) = 2 lines
-	// - Addressed line: 1 line (since Addressed=true)
-	// - Status line: 1 line
-	// - Help: 4 lines (reflows at width=50)
-	// Non-content: 2 + 2 + 1 + 1 + 4 = 10
-	// visibleLines = 12 - 10 = 2
-	m := newTuiModel("http://localhost")
-	m.width = 50
-	m.height = 12
-	m.currentView = tuiViewReview
-	m.currentBranch = "feature/very-long-branch-name"
-
-	m.currentReview = &storage.Review{
-		ID:        10,
-		Output:    "L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10\nL11\nL12\nL13\nL14\nL15\nL16\nL17\nL18\nL19\nL20",
-		Addressed: true,
-		Agent:     "claude-code",
-		Job: &storage.ReviewJob{
-			ID:       1,
-			GitRef:   "abc1234567890..def5678901234", // Range ref (17 chars via shortRef)
-			RepoName: "very-long-repository-name-here",
-			Agent:    "claude-code",
-			Verdict:  nil, // No verdict
-		},
-	}
-
-	output := m.View()
-
-	// visibleLines = 12 - 10 = 2
-	// Glamour produces 21 rendered lines.
-	visibleContentLines := 2
-	totalRenderedLines := 21
-
-	expected := fmt.Sprintf("[1-%d of %d lines]", visibleContentLines, totalRenderedLines)
-	if !strings.Contains(output, expected) {
-		t.Errorf("Expected scroll indicator '%s', output: %s", expected, output)
-	}
-
-	// Should contain the long repo name and branch
-	if !strings.Contains(output, "very-long-repository-name-here") {
-		t.Error("Expected output to contain long repo name")
-	}
-	if !strings.Contains(output, "feature/very-long-branch-name") {
-		t.Error("Expected output to contain long branch name")
-	}
-	if !strings.Contains(output, "[ADDRESSED]") {
-		t.Error("Expected output to contain [ADDRESSED]")
-	}
-}
-
 func TestTUIReviewViewAddressedRollbackOnError(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 
 	// Initial state with review view showing an unaddressed review
 	m.currentView = tuiViewReview
@@ -1327,7 +789,7 @@ func TestTUIReviewViewAddressedRollbackOnError(t *testing.T) {
 }
 
 func TestTUIReviewViewAddressedSuccessNoRollback(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 
 	// Initial state with review view
 	m.currentView = tuiViewReview
@@ -1356,7 +818,7 @@ func TestTUIReviewViewAddressedSuccessNoRollback(t *testing.T) {
 }
 
 func TestTUIReviewViewNavigateAwayBeforeError(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 
 	// Setup: jobs in queue with addressed=false
 	addrA := false
@@ -1406,7 +868,7 @@ func TestTUIReviewViewNavigateAwayBeforeError(t *testing.T) {
 }
 
 func TestTUIReviewViewToggleSyncsQueueJob(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 
 	// Setup: job in queue with addressed=false
 	addr := false
@@ -1436,7 +898,7 @@ func TestTUIReviewViewToggleSyncsQueueJob(t *testing.T) {
 func TestTUIReviewViewErrorWithoutJobID(t *testing.T) {
 	// Test that review-view errors without jobID are still handled if
 	// pendingReviewAddressed matches
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 
 	// Review without an associated job (Job is nil)
 	m.currentView = tuiViewReview
@@ -1477,7 +939,7 @@ func TestTUIReviewViewErrorWithoutJobID(t *testing.T) {
 
 func TestTUIReviewViewStaleErrorWithoutJobID(t *testing.T) {
 	// Test that stale review-view errors without jobID are ignored
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 
 	// Review without an associated job
 	m.currentView = tuiViewReview
@@ -1521,7 +983,7 @@ func TestTUIReviewViewSameStateLateError(t *testing.T) {
 	// Test: true (seq 1) → false (seq 2) → true (seq 3), with late error from first true
 	// The late error has newState=true which matches current pending newState,
 	// but sequence numbers now distinguish same-state toggles.
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 
 	// Review without an associated job
 	m.currentView = tuiViewReview
@@ -1565,7 +1027,7 @@ func TestTUIReviewViewSameStateLateError(t *testing.T) {
 }
 
 func TestTUIEscapeFromReviewTriggersRefreshWithHideAddressed(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewReview
 	m.hideAddressed = true
 	m.loadingJobs = false
@@ -1590,7 +1052,7 @@ func TestTUIEscapeFromReviewTriggersRefreshWithHideAddressed(t *testing.T) {
 }
 
 func TestTUIEscapeFromReviewNoRefreshWithoutHideAddressed(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewReview
 	m.hideAddressed = false
 	m.loadingJobs = false
@@ -1616,7 +1078,7 @@ func TestTUIEscapeFromReviewNoRefreshWithoutHideAddressed(t *testing.T) {
 
 func TestTUICommitMsgViewNavigationFromQueue(t *testing.T) {
 	// Test that pressing escape in commit message view returns to the originating view (queue)
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.jobs = []storage.ReviewJob{makeJob(1, withRef("abc123"))}
 	m.selectedIdx = 0
 	m.selectedJobID = 1
@@ -1644,7 +1106,7 @@ func TestTUICommitMsgViewNavigationFromQueue(t *testing.T) {
 
 func TestTUICommitMsgViewNavigationFromReview(t *testing.T) {
 	// Test that pressing escape in commit message view returns to the originating view (review)
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	j := makeJob(1, withRef("abc123"))
 	m.jobs = []storage.ReviewJob{j}
 	m.currentReview = makeReview(1, &j)
@@ -1663,7 +1125,7 @@ func TestTUICommitMsgViewNavigationFromReview(t *testing.T) {
 
 func TestTUICommitMsgViewNavigationWithQ(t *testing.T) {
 	// Test that pressing 'q' in commit message view also returns to originating view
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewCommitMsg
 	m.commitMsgFromView = tuiViewReview
 	m.commitMsgContent = "test message"
@@ -1681,7 +1143,7 @@ func TestFetchCommitMsgJobTypeDetection(t *testing.T) {
 	// This is critical: Prompt field is populated for ALL jobs (stores review prompt),
 	// so we must use IsTaskJob() to identify task jobs, not Prompt != ""
 
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 
 	tests := []struct {
 		name        string
@@ -1823,7 +1285,7 @@ func TestFetchCommitMsgJobTypeDetection(t *testing.T) {
 
 func TestTUIHelpViewToggleFromQueue(t *testing.T) {
 	// Test that '?' opens help from queue and pressing '?' again returns to queue
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewQueue
 
 	// Press '?' to open help
@@ -1846,7 +1308,7 @@ func TestTUIHelpViewToggleFromQueue(t *testing.T) {
 
 func TestTUIHelpViewToggleFromReview(t *testing.T) {
 	// Test that '?' opens help from review and escape returns to review
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	j := makeJob(1, withRef("abc123"))
 	m.currentReview = makeReview(1, &j)
 	m.currentView = tuiViewReview
@@ -1886,7 +1348,7 @@ func (m *mockClipboard) WriteText(text string) error {
 func TestTUIYankCopyFromReviewView(t *testing.T) {
 	mock := &mockClipboard{}
 
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.clipboard = mock
 	m.currentView = tuiViewReview
 	m.currentReview = makeReview(1, &storage.ReviewJob{ID: 1}, withReviewAgent("test"), withReviewOutput("This is the review content to copy"))
@@ -1917,7 +1379,7 @@ func TestTUIYankCopyFromReviewView(t *testing.T) {
 }
 
 func TestTUIYankCopyShowsFlashMessage(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewReview
 	m.currentReview = makeReview(1, &storage.ReviewJob{ID: 1}, withReviewAgent("test"), withReviewOutput("Review content"))
 	m.width = 80
@@ -1946,7 +1408,7 @@ func TestTUIYankCopyShowsFlashMessage(t *testing.T) {
 }
 
 func TestTUIYankCopyShowsErrorOnFailure(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewQueue
 
 	// Simulate receiving a failed clipboard result
@@ -1964,7 +1426,7 @@ func TestTUIYankCopyShowsErrorOnFailure(t *testing.T) {
 func TestTUIYankFlashViewNotAffectedByViewChange(t *testing.T) {
 	// Test that flash message is attributed to the view where copy was triggered,
 	// even if the user switches views before the clipboard result arrives.
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewQueue
 	m.width = 80
 	m.height = 24
@@ -1989,7 +1451,7 @@ func TestTUIYankFlashViewNotAffectedByViewChange(t *testing.T) {
 }
 
 func TestTUIYankFromQueueRequiresCompletedJob(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewQueue
 	m.jobs = []storage.ReviewJob{
 		makeJob(1, withRef("abc123"), withAgent("test"), withStatus(storage.JobStatusRunning)),
@@ -2108,7 +1570,7 @@ func TestTUIFetchReviewAndCopyEmptyOutput(t *testing.T) {
 func TestTUIClipboardWriteFailurePropagates(t *testing.T) {
 	mock := &mockClipboard{err: fmt.Errorf("clipboard unavailable: xclip not found")}
 
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.clipboard = mock
 	m.currentView = tuiViewReview
 	m.currentReview = makeReview(1, &storage.ReviewJob{ID: 1}, withReviewAgent("test"), withReviewOutput("Review content"))
@@ -2371,175 +1833,10 @@ func TestFormatClipboardContent(t *testing.T) {
 	}
 }
 
-func TestTUILogOutputPreservesLinesOnEmptyResponse(t *testing.T) {
-	// When a completed job's incremental poll returns no new data,
-	// the TUI should preserve existing lines. In the incremental
-	// flow, this is an append with no new lines (offset unchanged).
-	m := newTuiModel("http://localhost")
-	m.currentView = tuiViewLog
-	m.logJobID = 1
-	m.logStreaming = true
-	m.logFetchSeq = 1
-	m.height = 30
-
-	// Set up initial lines as if we had been streaming output
-	m.logLines = []logLine{
-		{text: "Line 1"},
-		{text: "Line 2"},
-		{text: "Line 3"},
-	}
-
-	// Simulate job completion: incremental poll returns no new
-	// lines (append mode, offset unchanged).
-	emptyMsg := tuiLogOutputMsg{
-		lines:   []logLine{},
-		hasMore: false,
-		err:     nil,
-		append:  true,
-		seq:     1,
-	}
-
-	m2, _ := updateModel(t, m, emptyMsg)
-
-	// Lines should be preserved (not cleared)
-	if len(m2.logLines) != 3 {
-		t.Fatalf("Expected 3 lines preserved, got %d", len(m2.logLines))
-	}
-
-	// Streaming should stop
-	if m2.logStreaming {
-		t.Error("Expected logStreaming to be false after job completes")
-	}
-
-	// Verify the original content is still there
-	if m2.logLines[0].text != "Line 1" {
-		t.Errorf("Expected 'Line 1', got %q", m2.logLines[0].text)
-	}
-}
-
-func TestTUILogOutputUpdatesLinesWhenStreaming(t *testing.T) {
-	// Test that when streaming and new lines arrive, they are updated
-	m := newTuiModel("http://localhost")
-	m.currentView = tuiViewLog
-	m.logJobID = 1
-	m.logStreaming = true
-	m.height = 30
-
-	// Set up initial lines
-	m.logLines = []logLine{
-		{text: "Old line"},
-	}
-
-	// New lines arrive while still streaming
-	newMsg := tuiLogOutputMsg{
-		lines: []logLine{
-			{text: "Old line"},
-			{text: "New line"},
-		},
-		hasMore: true, // Still streaming
-		err:     nil,
-	}
-
-	m2, _ := updateModel(t, m, newMsg)
-
-	// Lines should be updated
-	if len(m2.logLines) != 2 {
-		t.Errorf("Expected 2 lines, got %d", len(m2.logLines))
-	}
-
-	// Streaming should continue
-	if !m2.logStreaming {
-		t.Error("Expected logStreaming to be true while job is running")
-	}
-}
-
-func TestTUILogOutputErrNoLogShowsJobError(t *testing.T) {
-	// When a failed job has no log file, the flash message should
-	// contain the stored error instead of a generic message.
-	m := newTuiModel("http://localhost")
-	m.currentView = tuiViewLog
-	m.logJobID = 42
-	m.logFromView = tuiViewQueue
-	m.logStreaming = false
-	m.height = 30
-	m.jobs = []storage.ReviewJob{
-		makeJob(42,
-			withStatus(storage.JobStatusFailed),
-			withError("agent timeout after 300s"),
-		),
-	}
-
-	msg := tuiLogOutputMsg{err: errNoLog}
-	m2, _ := updateModel(t, m, msg)
-
-	// Should return to previous view.
-	if m2.currentView != tuiViewQueue {
-		t.Errorf("expected queue view, got %d", m2.currentView)
-	}
-	// Flash should contain the stored error.
-	if !strings.Contains(m2.flashMessage, "agent timeout") {
-		t.Errorf("flash should contain job error, got %q",
-			m2.flashMessage)
-	}
-	if !strings.Contains(m2.flashMessage, "42") {
-		t.Errorf("flash should contain job ID, got %q",
-			m2.flashMessage)
-	}
-}
-
-func TestTUILogOutputErrNoLogGenericForNonFailed(t *testing.T) {
-	// For a done (non-failed) job with no log, the flash should
-	// be the generic "No log available" message.
-	m := newTuiModel("http://localhost")
-	m.currentView = tuiViewLog
-	m.logJobID = 10
-	m.logFromView = tuiViewQueue
-	m.height = 30
-	m.jobs = []storage.ReviewJob{
-		makeJob(10, withStatus(storage.JobStatusDone)),
-	}
-
-	msg := tuiLogOutputMsg{err: errNoLog}
-	m2, _ := updateModel(t, m, msg)
-
-	if m2.currentView != tuiViewQueue {
-		t.Errorf("expected queue view, got %d", m2.currentView)
-	}
-	if m2.flashMessage != "No log available for this job" {
-		t.Errorf("expected generic flash, got %q", m2.flashMessage)
-	}
-}
-
-func TestTUILogOutputRunningJobKeepsWaiting(t *testing.T) {
-	// Running job with empty first fetch should keep logLines nil
-	// so the UI shows "Waiting for output..." instead of "(no output)".
-	m := newTuiModel("http://localhost")
-	m.currentView = tuiViewLog
-	m.logJobID = 1
-	m.logStreaming = true
-	m.logLines = nil // first fetch
-	m.height = 30
-
-	// Empty lines, still streaming.
-	msg := tuiLogOutputMsg{
-		lines:   nil,
-		hasMore: true,
-	}
-	m2, _ := updateModel(t, m, msg)
-
-	if m2.logLines != nil {
-		t.Errorf("logLines should stay nil for running empty fetch, got %v",
-			m2.logLines)
-	}
-	if !m2.logStreaming {
-		t.Error("logStreaming should remain true")
-	}
-}
-
 func TestTUILogVisibleLinesWithCommandHeader(t *testing.T) {
 	// logVisibleLines() should account for the command-line header
 	// when the job has a known agent with a command line.
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.height = 30
 	m.logJobID = 1
 
@@ -2565,7 +1862,7 @@ func TestTUILogVisibleLinesWithCommandHeader(t *testing.T) {
 func TestTUILogPagingUsesLogVisibleLines(t *testing.T) {
 	// pgdown/end/g in log view should use logVisibleLines() for
 	// scroll calculations, correctly accounting for headers.
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewLog
 	m.logJobID = 1
 	m.height = 20
@@ -2626,7 +1923,7 @@ func TestTUILogPagingUsesLogVisibleLines(t *testing.T) {
 
 func TestTUILogPagingNoHeader(t *testing.T) {
 	// Same paging test but without command header (no agent).
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewLog
 	m.logJobID = 1
 	m.height = 20
@@ -2659,229 +1956,10 @@ func TestTUILogPagingNoHeader(t *testing.T) {
 	}
 }
 
-func TestTUILogOutputIgnoredWhenNotInLogView(t *testing.T) {
-	// Test that log output messages are ignored when not in log view.
-	m := newTuiModel("http://localhost")
-	m.currentView = tuiViewQueue // Not in log view
-	m.logJobID = 1
-
-	// Existing lines from a previous log session.
-	m.logLines = []logLine{
-		{text: "Previous session line"},
-	}
-
-	// New lines arrive (stale message from previous log session).
-	msg := tuiLogOutputMsg{
-		lines: []logLine{
-			{text: "Should be ignored"},
-		},
-		hasMore: false,
-		err:     nil,
-	}
-
-	m2, _ := updateModel(t, m, msg)
-
-	// Lines should not be updated since we're not in log view.
-	if len(m2.logLines) != 1 {
-		t.Fatalf("Expected 1 line (unchanged), got %d", len(m2.logLines))
-	}
-	if m2.logLines[0].text != "Previous session line" {
-		t.Errorf("Lines should not be updated when not in log view")
-	}
-}
-
-func TestTUILogOutputAppendMode(t *testing.T) {
-	m := newTuiModel("http://localhost")
-	m.currentView = tuiViewLog
-	m.logJobID = 1
-	m.logStreaming = true
-	m.height = 30
-
-	// Simulate first fetch (replace mode).
-	m.logLines = []logLine{
-		{text: "Line 1"},
-		{text: "Line 2"},
-	}
-	m.logOffset = 100
-
-	// Incremental append with new lines.
-	msg := tuiLogOutputMsg{
-		lines: []logLine{
-			{text: "Line 3"},
-			{text: "Line 4"},
-		},
-		hasMore:   true,
-		newOffset: 200,
-		append:    true,
-	}
-
-	m2, _ := updateModel(t, m, msg)
-
-	if len(m2.logLines) != 4 {
-		t.Fatalf("expected 4 lines, got %d", len(m2.logLines))
-	}
-	if m2.logLines[0].text != "Line 1" {
-		t.Errorf("first line should be preserved")
-	}
-	if m2.logLines[2].text != "Line 3" {
-		t.Errorf("appended line should be Line 3, got %q",
-			m2.logLines[2].text)
-	}
-	if m2.logOffset != 200 {
-		t.Errorf("logOffset = %d, want 200", m2.logOffset)
-	}
-}
-
-func TestTUILogOutputAppendNoNewLines(t *testing.T) {
-	// When append=true but no new lines, existing lines
-	// should be preserved unchanged.
-	m := newTuiModel("http://localhost")
-	m.currentView = tuiViewLog
-	m.logJobID = 1
-	m.logStreaming = true
-	m.height = 30
-	m.logOffset = 100
-
-	m.logLines = []logLine{
-		{text: "Existing"},
-	}
-
-	msg := tuiLogOutputMsg{
-		hasMore:   true,
-		newOffset: 100,
-		append:    true,
-	}
-
-	m2, _ := updateModel(t, m, msg)
-
-	if len(m2.logLines) != 1 {
-		t.Fatalf("expected 1 line, got %d", len(m2.logLines))
-	}
-	if m2.logLines[0].text != "Existing" {
-		t.Errorf("existing line should be preserved")
-	}
-}
-
-func TestTUILogOutputReplaceMode(t *testing.T) {
-	// When append=false, lines should be fully replaced.
-	m := newTuiModel("http://localhost")
-	m.currentView = tuiViewLog
-	m.logJobID = 1
-	m.logStreaming = false
-	m.height = 30
-
-	m.logLines = []logLine{
-		{text: "Old line 1"},
-		{text: "Old line 2"},
-	}
-
-	msg := tuiLogOutputMsg{
-		lines: []logLine{
-			{text: "New line 1"},
-		},
-		hasMore:   false,
-		newOffset: 50,
-		append:    false,
-	}
-
-	m2, _ := updateModel(t, m, msg)
-
-	if len(m2.logLines) != 1 {
-		t.Fatalf("expected 1 line, got %d", len(m2.logLines))
-	}
-	if m2.logLines[0].text != "New line 1" {
-		t.Errorf("line should be replaced")
-	}
-	if m2.logOffset != 50 {
-		t.Errorf("logOffset = %d, want 50", m2.logOffset)
-	}
-}
-
-func TestTUILogOutputStaleSeqDropped(t *testing.T) {
-	// Messages with a stale seq should be silently dropped.
-	m := newTuiModel("http://localhost")
-	m.currentView = tuiViewLog
-	m.logJobID = 1
-	m.logStreaming = true
-	m.logFetchSeq = 5
-	m.logLoading = true // current-seq fetch is in-flight
-	m.height = 30
-
-	m.logLines = []logLine{{text: "Current"}}
-
-	msg := tuiLogOutputMsg{
-		lines:     []logLine{{text: "Stale data"}},
-		hasMore:   true,
-		newOffset: 999,
-		append:    false,
-		seq:       3, // older than m.logFetchSeq
-	}
-
-	m2, _ := updateModel(t, m, msg)
-
-	// Lines and offset should be unchanged.
-	if len(m2.logLines) != 1 || m2.logLines[0].text != "Current" {
-		t.Errorf("stale msg should not update lines")
-	}
-	if m2.logOffset != 0 {
-		t.Errorf(
-			"stale msg should not update offset, got %d",
-			m2.logOffset,
-		)
-	}
-	// logLoading must remain true — stale responses must not
-	// clear the in-flight guard for the current session.
-	if !m2.logLoading {
-		t.Error("stale msg should not clear logLoading")
-	}
-}
-
-func TestTUILogOutputOffsetReset(t *testing.T) {
-	// When server resets offset (newOffset < previous offset),
-	// lines should be replaced, not appended.
-	m := newTuiModel("http://localhost")
-	m.currentView = tuiViewLog
-	m.logJobID = 1
-	m.logStreaming = true
-	m.logFetchSeq = 1
-	m.logOffset = 500
-	m.height = 30
-
-	m.logLines = []logLine{
-		{text: "Old line 1"},
-		{text: "Old line 2"},
-	}
-
-	// Server reset: newOffset=100, append=false (reset path).
-	msg := tuiLogOutputMsg{
-		lines: []logLine{
-			{text: "Reset line 1"},
-		},
-		hasMore:   true,
-		newOffset: 100,
-		append:    false,
-		seq:       1,
-	}
-
-	m2, _ := updateModel(t, m, msg)
-
-	if len(m2.logLines) != 1 {
-		t.Fatalf("expected 1 line after reset, got %d",
-			len(m2.logLines))
-	}
-	if m2.logLines[0].text != "Reset line 1" {
-		t.Errorf("expected reset content, got %q",
-			m2.logLines[0].text)
-	}
-	if m2.logOffset != 100 {
-		t.Errorf("logOffset = %d, want 100", m2.logOffset)
-	}
-}
-
 func TestTUILogLoadingGuard(t *testing.T) {
 	// When logLoading is true, tuiLogTickMsg should not start
 	// another fetch.
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewLog
 	m.logJobID = 1
 	m.logStreaming = true
@@ -2899,78 +1977,10 @@ func TestTUILogLoadingGuard(t *testing.T) {
 	}
 }
 
-func TestTUILogOutputReplaceModeEmptyClearsStale(t *testing.T) {
-	// Replace mode with zero lines should clear stale content
-	// (e.g. after log truncation/reset).
-	m := newTuiModel("http://localhost")
-	m.currentView = tuiViewLog
-	m.logJobID = 1
-	m.logStreaming = true
-	m.logFetchSeq = 1
-	m.height = 30
-
-	m.logLines = []logLine{
-		{text: "Stale line 1"},
-		{text: "Stale line 2"},
-	}
-
-	msg := tuiLogOutputMsg{
-		lines:     nil,
-		hasMore:   false,
-		newOffset: 0,
-		append:    false,
-		seq:       1,
-	}
-
-	m2, _ := updateModel(t, m, msg)
-
-	if m2.logLines == nil {
-		t.Fatal("logLines should be empty slice, not nil")
-	}
-	if len(m2.logLines) != 0 {
-		t.Errorf(
-			"expected 0 lines after empty replace, got %d",
-			len(m2.logLines),
-		)
-	}
-}
-
-func TestTUILogOutputPersistsFormatter(t *testing.T) {
-	// The formatter returned in tuiLogOutputMsg should be
-	// persisted into m.logFmtr for incremental reuse.
-	m := newTuiModel("http://localhost")
-	m.currentView = tuiViewLog
-	m.logJobID = 1
-	m.logStreaming = true
-	m.logFetchSeq = 1
-	m.height = 30
-
-	fmtr := newStreamFormatter(nil, true)
-	fmtr.hasOutput = true // simulate accumulated state
-
-	msg := tuiLogOutputMsg{
-		lines:     []logLine{{text: "Line 1"}},
-		hasMore:   true,
-		newOffset: 100,
-		append:    false,
-		seq:       1,
-		fmtr:      fmtr,
-	}
-
-	m2, _ := updateModel(t, m, msg)
-
-	if m2.logFmtr != fmtr {
-		t.Error("logFmtr should be persisted from msg")
-	}
-	if !m2.logFmtr.hasOutput {
-		t.Error("persisted formatter should retain state")
-	}
-}
-
 func TestTUILogErrorDroppedOutsideLogView(t *testing.T) {
 	// A late-arriving error from an in-flight log fetch should
 	// not set m.err when the user has navigated away.
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewQueue // user navigated back
 	m.logFetchSeq = 3
 	m.logLoading = true
@@ -2993,7 +2003,7 @@ func TestTUILogErrorDroppedOutsideLogView(t *testing.T) {
 func TestTUILogViewLookupFixJob(t *testing.T) {
 	// renderLogView should find jobs in fixJobs when opened
 	// from the tasks view.
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewLog
 	m.logJobID = 42
 	m.logFromView = tuiViewTasks
@@ -3022,7 +2032,7 @@ func TestTUILogViewLookupFixJob(t *testing.T) {
 
 func TestTUILogCancelFixJob(t *testing.T) {
 	// Pressing 'x' in log view should cancel fix jobs.
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewLog
 	m.logJobID = 42
 	m.logFromView = tuiViewTasks
@@ -3056,7 +2066,7 @@ func TestTUILogCancelFixJob(t *testing.T) {
 func TestTUILogVisibleLinesFixJob(t *testing.T) {
 	// logVisibleLines must account for the command-line header
 	// when viewing a fix job (from m.fixJobs, not m.jobs).
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewLog
 	m.logJobID = 42
 	m.logFromView = tuiViewTasks
@@ -3100,7 +2110,7 @@ func TestTUILogVisibleLinesFixJob(t *testing.T) {
 func TestTUILogNavFromTasks(t *testing.T) {
 	// Left/right in log view opened from tasks should navigate
 	// through fixJobs, not m.jobs.
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewLog
 	m.logJobID = 20
 	m.logFromView = tuiViewTasks
@@ -3156,7 +2166,7 @@ func TestTUILogNavFromTasks(t *testing.T) {
 // Branch filter tests
 
 func TestReviewFixPanelOpenFromReview(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewReview
 	done := storage.JobStatusDone
 	job := storage.ReviewJob{ID: 1, Status: done}
@@ -3183,7 +2193,7 @@ func TestReviewFixPanelOpenFromReview(t *testing.T) {
 }
 
 func TestReviewFixPanelTabTogglesReviewFocus(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewReview
 	m.reviewFixPanelOpen = true
 	m.reviewFixPanelFocused = true
@@ -3204,7 +2214,7 @@ func TestReviewFixPanelTabTogglesReviewFocus(t *testing.T) {
 }
 
 func TestReviewFixPanelTextInput(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewReview
 	m.reviewFixPanelOpen = true
 	m.reviewFixPanelFocused = true
@@ -3220,7 +2230,7 @@ func TestReviewFixPanelTextInput(t *testing.T) {
 }
 
 func TestReviewFixPanelTextNotCapturedWhenUnfocused(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewReview
 	m.reviewFixPanelOpen = true
 	m.reviewFixPanelFocused = false // review has focus
@@ -3233,7 +2243,7 @@ func TestReviewFixPanelTextNotCapturedWhenUnfocused(t *testing.T) {
 }
 
 func TestReviewFixPanelEscWhenFocusedClosesPanel(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewReview
 	m.reviewFixPanelOpen = true
 	m.reviewFixPanelFocused = true
@@ -3253,7 +2263,7 @@ func TestReviewFixPanelEscWhenFocusedClosesPanel(t *testing.T) {
 }
 
 func TestReviewFixPanelEscWhenUnfocusedClosesPanel(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewReview
 	m.reviewFixPanelOpen = true
 	m.reviewFixPanelFocused = false // review has focus
@@ -3273,7 +2283,7 @@ func TestReviewFixPanelEscWhenUnfocusedClosesPanel(t *testing.T) {
 }
 
 func TestReviewFixPanelPendingConsumedOnLoad(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.reviewFixPanelPending = true
 	m.fixPromptJobID = 5
 	m.selectedJobID = 5
@@ -3322,7 +2332,7 @@ func TestReviewFixPanelEnterSubmitsAndNavigatesToTasks(t *testing.T) {
 }
 
 func TestReviewFixPanelBackspaceDeletesRune(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewReview
 	m.reviewFixPanelOpen = true
 	m.reviewFixPanelFocused = true
@@ -3371,7 +2381,7 @@ func TestFixKeyFromQueueFetchesReviewWithPendingFlag(t *testing.T) {
 }
 
 func TestFixPanelClosedOnReviewNavNext(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewReview
 	done := storage.JobStatusDone
 	job1 := storage.ReviewJob{ID: 1, Status: done}
@@ -3403,7 +2413,7 @@ func TestFixPanelClosedOnReviewNavNext(t *testing.T) {
 }
 
 func TestFixPanelClosedOnReviewNavPrev(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewReview
 	done := storage.JobStatusDone
 	job1 := storage.ReviewJob{ID: 1, Status: done}
@@ -3432,7 +2442,7 @@ func TestFixPanelClosedOnReviewNavPrev(t *testing.T) {
 }
 
 func TestFixPanelClosedOnQuitFromReview(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewReview
 	done := storage.JobStatusDone
 	job := storage.ReviewJob{ID: 1, Status: done}
@@ -3461,7 +2471,7 @@ func TestFixPanelClosedOnQuitFromReview(t *testing.T) {
 }
 
 func TestFixPanelPendingNotConsumedByWrongReview(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.reviewFixPanelPending = true
 	m.fixPromptJobID = 5
 	m.selectedJobID = 10
@@ -3482,7 +2492,7 @@ func TestFixPanelPendingNotConsumedByWrongReview(t *testing.T) {
 }
 
 func TestFixPanelPendingClearedOnStaleFetch(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.reviewFixPanelPending = true
 	m.fixPromptJobID = 5
 	m.selectedJobID = 10 // User navigated away
@@ -3505,7 +2515,7 @@ func TestFixPanelPendingClearedOnStaleFetch(t *testing.T) {
 }
 
 func TestFixPanelClosedOnPromptKey(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewReview
 	done := storage.JobStatusDone
 	job := storage.ReviewJob{ID: 1, Status: done}
@@ -3540,7 +2550,7 @@ func TestFixPanelClosedOnPromptKey(t *testing.T) {
 }
 
 func TestFixPanelPendingClearedOnEscFromReview(t *testing.T) {
-	m := newTuiModel("http://localhost")
+	m := newTuiModel("http://localhost", WithExternalIODisabled())
 	m.currentView = tuiViewReview
 	done := storage.JobStatusDone
 	job := storage.ReviewJob{ID: 1, Status: done}
@@ -3564,5 +2574,623 @@ func TestFixPanelPendingClearedOnEscFromReview(t *testing.T) {
 	}
 	if got.fixPromptJobID != 0 {
 		t.Errorf("Expected fixPromptJobID=0, got %d", got.fixPromptJobID)
+	}
+}
+
+func TestTUIRenderViews(t *testing.T) {
+	verdictPass := "P"
+
+	tests := []struct {
+		name                      string
+		view                      tuiView
+		branch                    string
+		review                    *storage.Review
+		wantContains              []string
+		wantAbsent                []string
+		checkContentStartsOnLine3 bool
+		checkContentStartsOnLine4 bool
+		checkNoVerdictOnLine3     bool
+	}{
+		{
+			name:   "review view with branch and addressed",
+			view:   tuiViewReview,
+			branch: "feature/test",
+			review: &storage.Review{
+				ID:        10,
+				Output:    "Some review output",
+				Addressed: true,
+				Job: &storage.ReviewJob{
+					ID:       1,
+					GitRef:   "abc1234",
+					RepoName: "myrepo",
+					Agent:    "codex",
+				},
+			},
+			wantContains: []string{"on feature/test", "[ADDRESSED]", "myrepo", "abc1234"},
+		},
+		{
+			name: "review view with model",
+			view: tuiViewReview,
+			review: &storage.Review{
+				ID:     10,
+				Agent:  "codex",
+				Output: "Some review output",
+				Job: &storage.ReviewJob{
+					ID:       1,
+					GitRef:   "abc1234",
+					RepoName: "myrepo",
+					Agent:    "codex",
+					Model:    "o3",
+				},
+			},
+			wantContains: []string{"(codex: o3)"},
+		},
+		{
+			name: "review view without model",
+			view: tuiViewReview,
+			review: &storage.Review{
+				ID:     10,
+				Agent:  "codex",
+				Output: "Some review output",
+				Job: &storage.ReviewJob{
+					ID:       1,
+					GitRef:   "abc1234",
+					RepoName: "myrepo",
+					Agent:    "codex",
+					Model:    "",
+				},
+			},
+			wantContains: []string{"(codex)"},
+			wantAbsent:   []string{"(codex:"},
+		},
+		{
+			name: "prompt view with model",
+			view: tuiViewPrompt,
+			review: &storage.Review{
+				ID:     10,
+				Agent:  "codex",
+				Prompt: "Review this code",
+				Job: &storage.ReviewJob{
+					ID:     1,
+					GitRef: "abc1234",
+					Agent:  "codex",
+					Model:  "o3",
+				},
+			},
+			wantContains: []string{"#1", "(codex: o3)"},
+		},
+		{
+			name: "prompt view without model",
+			view: tuiViewPrompt,
+			review: &storage.Review{
+				ID:     10,
+				Agent:  "codex",
+				Prompt: "Review this code",
+				Job: &storage.ReviewJob{
+					ID:     1,
+					GitRef: "abc1234",
+					Agent:  "codex",
+					Model:  "",
+				},
+			},
+			wantContains: []string{"(codex)"},
+			wantAbsent:   []string{"(codex:"},
+		},
+		{
+			name:   "review view no branch for range",
+			view:   tuiViewReview,
+			branch: "",
+			review: &storage.Review{
+				ID:     10,
+				Output: "Some review output",
+				Job: &storage.ReviewJob{
+					ID:       1,
+					GitRef:   "abc123..def456",
+					RepoName: "myrepo",
+					Agent:    "codex",
+				},
+			},
+			wantContains: []string{"abc123..def456"},
+			wantAbsent:   []string{" on "},
+		},
+		{
+			name: "review view no blank line without verdict",
+			view: tuiViewReview,
+			review: &storage.Review{
+				ID:     10,
+				Output: "Line 1\nLine 2\nLine 3",
+				Job: &storage.ReviewJob{
+					ID:       1,
+					GitRef:   "abc1234",
+					RepoName: "myrepo",
+					Agent:    "codex",
+					Verdict:  nil,
+				},
+			},
+			wantContains:              []string{"Review", "abc1234"},
+			checkContentStartsOnLine3: true,
+		},
+		{
+			name: "review view verdict on line 2",
+			view: tuiViewReview,
+			review: &storage.Review{
+				ID:     10,
+				Output: "Line 1\nLine 2\nLine 3",
+				Job: &storage.ReviewJob{
+					ID:       1,
+					GitRef:   "abc1234",
+					RepoName: "myrepo",
+					Agent:    "codex",
+					Verdict:  &verdictPass,
+				},
+			},
+			wantContains:              []string{"Review", "abc1234", "Verdict"},
+			checkContentStartsOnLine4: true,
+		},
+		{
+			name: "review view addressed without verdict",
+			view: tuiViewReview,
+			review: &storage.Review{
+				ID:        10,
+				Output:    "Line 1\n\nLine 2\n\nLine 3",
+				Addressed: true,
+				Job: &storage.ReviewJob{
+					ID:       1,
+					GitRef:   "abc1234",
+					RepoName: "myrepo",
+					Agent:    "codex",
+					Verdict:  nil,
+				},
+			},
+			wantContains:              []string{"Review", "abc1234", "[ADDRESSED]"},
+			checkContentStartsOnLine4: true,
+			checkNoVerdictOnLine3:     true,
+		},
+		{
+			name:   "failed job no branch shown",
+			view:   tuiViewReview,
+			branch: "",
+			review: &storage.Review{
+				Agent:  "codex",
+				Output: "Job failed:\n\nsome error",
+				Job: &storage.ReviewJob{
+					ID:       1,
+					GitRef:   "abc1234",
+					RepoName: "myrepo",
+					Agent:    "codex",
+					Status:   storage.JobStatusFailed,
+				},
+			},
+			wantAbsent: []string{" on "},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := setupRenderModel(tt.view, tt.review, withModelBranch(tt.branch))
+			output := m.View()
+
+			for _, want := range tt.wantContains {
+				assertOutputContains(t, output, want)
+			}
+			for _, absent := range tt.wantAbsent {
+				assertAbsent(t, output, absent)
+			}
+
+			// Specific check for layout tests (Lines 0, 1, 2)
+			if tt.checkContentStartsOnLine3 {
+				lines := strings.Split(output, "\n")
+				foundContent := false
+				for _, line := range lines[2:] {
+					if strings.Contains(stripANSI(line), "Line 1") {
+						foundContent = true
+						break
+					}
+				}
+				if !foundContent {
+					t.Errorf("Content should contain 'Line 1' after header, output:\n%s", output)
+				}
+			}
+			if tt.checkContentStartsOnLine4 {
+				lines := strings.Split(output, "\n")
+				foundContent := false
+				for _, line := range lines[3:] {
+					if strings.Contains(stripANSI(line), "Line 1") {
+						foundContent = true
+						break
+					}
+				}
+				if !foundContent {
+					t.Errorf("Content should contain 'Line 1' after addressed/verdict line, output:\n%s", output)
+				}
+			}
+			if tt.checkNoVerdictOnLine3 {
+				lines := strings.Split(output, "\n")
+				if len(lines) > 2 && strings.Contains(lines[2], "Verdict") {
+					t.Errorf("Line 2 should not contain 'Verdict' when no verdict is set, got: %s", lines[2])
+				}
+			}
+		})
+	}
+}
+
+func TestTUILogOutputTable(t *testing.T) {
+	dummyFmtr := &streamFormatter{}
+
+	tests := []struct {
+		name             string
+		initialView      tuiView
+		initialJobStatus storage.JobStatus
+		initialJobError  string
+		initialLogLines  []logLine
+		initialStreaming bool
+		initialFetchSeq  uint64
+		initialLoading   bool
+		initialOffset    int64
+		initialFmtr      *streamFormatter
+
+		msg tuiLogOutputMsg
+
+		wantView       tuiView
+		wantLinesLen   int
+		wantLines      []string
+		wantLinesNil   bool
+		wantLinesEmpty bool
+		wantStreaming  bool
+		wantFlashMsg   string
+		wantLoading    bool
+		wantOffset     int64
+		wantFmtr       *streamFormatter
+	}{
+		{
+			name:             "updates formatter from message",
+			initialView:      tuiViewLog,
+			initialStreaming: true,
+			msg:              tuiLogOutputMsg{fmtr: dummyFmtr, hasMore: true, append: true},
+			wantView:         tuiViewLog,
+			wantFmtr:         dummyFmtr,
+			wantStreaming:    true,
+			wantLinesNil:     true,
+		},
+		{
+			name:             "persists formatter when message has none",
+			initialView:      tuiViewLog,
+			initialStreaming: true,
+			initialFmtr:      dummyFmtr,
+			msg:              tuiLogOutputMsg{hasMore: true, append: true},
+			wantView:         tuiViewLog,
+			wantFmtr:         dummyFmtr,
+			wantStreaming:    true,
+			wantLinesNil:     true,
+		},
+		{
+			name:             "preserves lines on empty response",
+			initialView:      tuiViewLog,
+			initialStreaming: true,
+			initialFetchSeq:  1,
+			initialLogLines:  []logLine{{text: "Line 1"}, {text: "Line 2"}, {text: "Line 3"}},
+			msg:              tuiLogOutputMsg{lines: []logLine{}, hasMore: false, err: nil, append: true, seq: 1},
+			wantView:         tuiViewLog,
+			wantLinesLen:     3,
+			wantLines:        []string{"Line 1", "Line 2", "Line 3"},
+			wantStreaming:    false,
+		},
+		{
+			name:             "updates lines when streaming",
+			initialView:      tuiViewLog,
+			initialStreaming: true,
+			initialLogLines:  []logLine{{text: "Old line"}},
+			msg:              tuiLogOutputMsg{lines: []logLine{{text: "Old line"}, {text: "New line"}}, hasMore: true, err: nil},
+			wantView:         tuiViewLog,
+			wantLinesLen:     2,
+			wantLines:        []string{"Old line", "New line"},
+			wantStreaming:    true,
+		},
+		{
+			name:             "err no log shows job error",
+			initialView:      tuiViewLog,
+			initialJobStatus: storage.JobStatusFailed,
+			initialJobError:  "agent timeout after 300s",
+			initialStreaming: false,
+			msg:              tuiLogOutputMsg{err: errNoLog},
+			wantView:         tuiViewQueue,
+			wantFlashMsg:     "agent timeout",
+			wantLinesNil:     true,
+		},
+		{
+			name:             "err no log generic for non failed",
+			initialView:      tuiViewLog,
+			initialJobStatus: storage.JobStatusDone,
+			msg:              tuiLogOutputMsg{err: errNoLog},
+			wantView:         tuiViewQueue,
+			wantFlashMsg:     "No log available for this job",
+			wantLinesNil:     true,
+		},
+		{
+			name:             "running job keeps waiting",
+			initialView:      tuiViewLog,
+			initialStreaming: true,
+			initialLogLines:  nil,
+			msg:              tuiLogOutputMsg{lines: nil, hasMore: true},
+			wantView:         tuiViewLog,
+			wantLinesLen:     0,
+			wantLinesNil:     true,
+			wantStreaming:    true,
+		},
+		{
+			name:            "ignored when not in log view",
+			initialView:     tuiViewQueue,
+			initialLogLines: []logLine{{text: "Previous session line"}},
+			msg:             tuiLogOutputMsg{lines: []logLine{{text: "Should be ignored"}}, hasMore: false, err: nil},
+			wantView:        tuiViewQueue,
+			wantLinesLen:    1,
+			wantLines:       []string{"Previous session line"},
+		},
+		{
+			name:             "append mode",
+			initialView:      tuiViewLog,
+			initialStreaming: true,
+			initialLogLines:  []logLine{{text: "Line 1"}, {text: "Line 2"}},
+			initialOffset:    100,
+			msg:              tuiLogOutputMsg{lines: []logLine{{text: "Line 3"}, {text: "Line 4"}}, hasMore: true, newOffset: 200, append: true},
+			wantView:         tuiViewLog,
+			wantLinesLen:     4,
+			wantLines:        []string{"Line 1", "Line 2", "Line 3", "Line 4"},
+			wantStreaming:    true,
+			wantOffset:       200,
+		},
+		{
+			name:             "append no new lines",
+			initialView:      tuiViewLog,
+			initialStreaming: true,
+			initialLogLines:  []logLine{{text: "Existing"}},
+			initialOffset:    100,
+			msg:              tuiLogOutputMsg{hasMore: true, newOffset: 100, append: true},
+			wantView:         tuiViewLog,
+			wantLinesLen:     1,
+			wantLines:        []string{"Existing"},
+			wantStreaming:    true,
+			wantOffset:       100,
+		},
+		{
+			name:             "replace mode",
+			initialView:      tuiViewLog,
+			initialStreaming: false,
+			initialLogLines:  []logLine{{text: "Old line 1"}, {text: "Old line 2"}},
+			msg:              tuiLogOutputMsg{lines: []logLine{{text: "New line 1"}}, hasMore: false, newOffset: 50, append: false},
+			wantView:         tuiViewLog,
+			wantLinesLen:     1,
+			wantLines:        []string{"New line 1"},
+			wantStreaming:    false,
+			wantOffset:       50,
+		},
+		{
+			name:             "stale seq dropped",
+			initialView:      tuiViewLog,
+			initialStreaming: true,
+			initialFetchSeq:  5,
+			initialLoading:   true,
+			initialLogLines:  []logLine{{text: "Current"}},
+			msg:              tuiLogOutputMsg{lines: []logLine{{text: "Stale data"}}, hasMore: true, newOffset: 999, append: false, seq: 3},
+			wantView:         tuiViewLog,
+			wantLinesLen:     1,
+			wantLines:        []string{"Current"},
+			wantStreaming:    true,
+			wantLoading:      true,
+			wantOffset:       0,
+		},
+		{
+			name:             "offset reset",
+			initialView:      tuiViewLog,
+			initialStreaming: true,
+			initialFetchSeq:  1,
+			initialOffset:    500,
+			initialLogLines:  []logLine{{text: "Old line 1"}, {text: "Old line 2"}},
+			msg:              tuiLogOutputMsg{lines: []logLine{{text: "Reset line 1"}}, hasMore: true, newOffset: 100, append: false, seq: 1},
+			wantView:         tuiViewLog,
+			wantLinesLen:     1,
+			wantLines:        []string{"Reset line 1"},
+			wantStreaming:    true,
+			wantOffset:       100,
+		},
+		{
+			name:             "replace mode empty clears stale",
+			initialView:      tuiViewLog,
+			initialStreaming: true,
+			initialFetchSeq:  1,
+			initialLogLines:  []logLine{{text: "Stale line 1"}, {text: "Stale line 2"}},
+			msg:              tuiLogOutputMsg{lines: nil, hasMore: false, newOffset: 0, append: false, seq: 1},
+			wantView:         tuiViewLog,
+			wantLinesLen:     0,
+			wantLinesEmpty:   true,
+			wantStreaming:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTuiModel("http://localhost", WithExternalIODisabled())
+			m.currentView = tt.initialView
+			m.logJobID = 42
+			m.logFromView = tuiViewQueue
+			m.logStreaming = tt.initialStreaming
+			m.logFetchSeq = tt.initialFetchSeq
+			m.logLoading = tt.initialLoading
+			m.logOffset = tt.initialOffset
+			m.logFmtr = tt.initialFmtr
+			m.height = 30
+
+			if tt.initialJobStatus != "" || tt.initialJobError != "" {
+				m.jobs = []storage.ReviewJob{
+					makeJob(42, withStatus(tt.initialJobStatus), withError(tt.initialJobError)),
+				}
+			}
+
+			if tt.initialLogLines != nil {
+				m.logLines = tt.initialLogLines
+			}
+
+			m2, _ := updateModel(t, m, tt.msg)
+
+			if m2.currentView != tt.wantView {
+				t.Errorf("Expected view %d, got %d", tt.wantView, m2.currentView)
+			}
+			if tt.wantLinesNil {
+				if m2.logLines != nil {
+					t.Errorf("Expected logLines to be nil, got %#v", m2.logLines)
+				}
+			} else if tt.wantLinesEmpty {
+				if m2.logLines == nil || len(m2.logLines) != 0 {
+					t.Errorf("Expected logLines to be an empty slice, got %#v", m2.logLines)
+				}
+			} else if m2.logLines == nil {
+				t.Errorf("Expected logLines to not be nil")
+			}
+			if len(m2.logLines) != tt.wantLinesLen {
+				t.Errorf("Expected %d lines, got %d", tt.wantLinesLen, len(m2.logLines))
+			}
+			for i, line := range tt.wantLines {
+				if i < len(m2.logLines) && m2.logLines[i].text != line {
+					t.Errorf("Line %d expected %q, got %q", i, line, m2.logLines[i].text)
+				}
+			}
+			if m2.logStreaming != tt.wantStreaming {
+				t.Errorf("Expected streaming %v, got %v", tt.wantStreaming, m2.logStreaming)
+			}
+			if tt.wantFlashMsg != "" && !strings.Contains(m2.flashMessage, tt.wantFlashMsg) {
+				t.Errorf("Expected flash message to contain %q, got %q", tt.wantFlashMsg, m2.flashMessage)
+			}
+			if m2.logLoading != tt.wantLoading {
+				t.Errorf("Expected logLoading %v, got %v", tt.wantLoading, m2.logLoading)
+			}
+			if m2.logOffset != tt.wantOffset {
+				t.Errorf("Expected logOffset %d, got %d", tt.wantOffset, m2.logOffset)
+			}
+			if tt.wantFmtr != nil && m2.logFmtr != tt.wantFmtr {
+				t.Errorf("Expected logFmtr to match pointer %p, got %p", tt.wantFmtr, m2.logFmtr)
+			}
+		})
+	}
+}
+
+func TestTUIVisibleLinesCalculationTable(t *testing.T) {
+	verdictPass := "P"
+	verdictFail := "F"
+
+	tests := []struct {
+		name                     string
+		width                    int
+		height                   int
+		branch                   string
+		reviewAgent              string
+		jobRef                   string
+		jobRepoName              string
+		jobAgent                 string
+		jobVerdict               *string
+		addressed                bool
+		wantVisibleLines         int
+		wantContains             []string
+		checkVisibleContentCount bool
+	}{
+		{
+			name:                     "no verdict",
+			width:                    120,
+			height:                   10,
+			jobRef:                   "abc1234",
+			jobAgent:                 "codex",
+			jobVerdict:               nil,
+			wantVisibleLines:         5, // height 10 - 5 non-content = 5
+			checkVisibleContentCount: true,
+		},
+		{
+			name:             "with verdict",
+			width:            120,
+			height:           10,
+			jobRef:           "abc1234",
+			jobAgent:         "codex",
+			jobVerdict:       &verdictPass,
+			wantVisibleLines: 4, // height 10 - 6 non-content = 4
+		},
+		{
+			name:             "narrow terminal",
+			width:            50,
+			height:           10,
+			jobRef:           "abc1234",
+			jobAgent:         "codex",
+			jobVerdict:       nil,
+			wantVisibleLines: 3, // height 10 - 7 non-content = 3
+		},
+		{
+			name:             "narrow terminal with verdict",
+			width:            50,
+			height:           10,
+			jobRef:           "abc1234",
+			jobAgent:         "codex",
+			jobVerdict:       &verdictFail,
+			wantVisibleLines: 2, // height 10 - 8 non-content = 2
+			wantContains:     []string{"Verdict"},
+		},
+		{
+			name:             "long title wraps",
+			width:            50,
+			height:           12,
+			branch:           "feature/very-long-branch-name",
+			reviewAgent:      "claude-code",
+			jobRef:           "abc1234567890..def5678901234",
+			jobRepoName:      "very-long-repository-name-here",
+			jobAgent:         "claude-code",
+			jobVerdict:       nil,
+			addressed:        true,
+			wantVisibleLines: 2, // height 12 - 10 non-content = 2
+			wantContains:     []string{"very-long-repository-name-here", "feature/very-long-branch-name", "[ADDRESSED]"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			review := &storage.Review{
+				ID:        10,
+				Output:    "L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10\nL11\nL12\nL13\nL14\nL15\nL16\nL17\nL18\nL19\nL20",
+				Addressed: tt.addressed,
+				Agent:     tt.reviewAgent,
+				Job: &storage.ReviewJob{
+					ID:       1,
+					GitRef:   tt.jobRef,
+					RepoName: tt.jobRepoName,
+					Agent:    tt.jobAgent,
+					Verdict:  tt.jobVerdict,
+				},
+			}
+
+			m := setupRenderModel(tuiViewReview, review, withModelBranch(tt.branch))
+			m.width = tt.width
+			m.height = tt.height
+
+			output := m.View()
+
+			expectedIndicator := fmt.Sprintf("[1-%d of %d lines]", tt.wantVisibleLines, 21)
+			if !strings.Contains(output, expectedIndicator) {
+				t.Errorf("Expected scroll indicator '%s', output: %s", expectedIndicator, output)
+			}
+
+			if tt.checkVisibleContentCount {
+				contentCount := 0
+				for line := range strings.SplitSeq(output, "\n") {
+					trimmed := strings.TrimSpace(stripANSI(line))
+					if len(trimmed) >= 2 && trimmed[0] == 'L' && trimmed[1] >= '0' && trimmed[1] <= '9' {
+						contentCount++
+					}
+				}
+				if contentCount == 0 {
+					t.Error("Expected at least some content lines visible")
+				}
+			}
+
+			for _, want := range tt.wantContains {
+				if !strings.Contains(output, want) {
+					t.Errorf("Expected output to contain %q", want)
+				}
+			}
+		})
 	}
 }

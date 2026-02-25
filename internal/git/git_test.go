@@ -125,24 +125,16 @@ func TestIsUnbornHead(t *testing.T) {
 	}
 
 	t.Run("true for empty repo", func(t *testing.T) {
-		dir := t.TempDir()
-		runGit(t, dir, "init")
-		if !IsUnbornHead(dir) {
+		repo := NewTestRepo(t)
+		if !IsUnbornHead(repo.Dir) {
 			t.Error("expected IsUnbornHead=true for empty repo")
 		}
 	})
 
 	t.Run("false after first commit", func(t *testing.T) {
-		dir := t.TempDir()
-		runGit(t, dir, "init")
-		runGit(t, dir, "config", "user.email", "test@test.com")
-		runGit(t, dir, "config", "user.name", "Test")
-		if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("x"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		runGit(t, dir, "add", ".")
-		runGit(t, dir, "commit", "-m", "init")
-		if IsUnbornHead(dir) {
+		repo := NewTestRepo(t)
+		repo.CommitFile("file.txt", "x", "init")
+		if IsUnbornHead(repo.Dir) {
 			t.Error("expected IsUnbornHead=false after commit")
 		}
 	})
@@ -157,25 +149,15 @@ func TestIsUnbornHead(t *testing.T) {
 	t.Run("false for corrupt ref", func(t *testing.T) {
 		// Simulate a repo where HEAD's target branch exists but points to
 		// a missing object — this is NOT unborn, it's corrupt.
-		dir := t.TempDir()
-		runGit(t, dir, "init")
-		runGit(t, dir, "config", "user.email", "test@test.com")
-		runGit(t, dir, "config", "user.name", "Test")
-		if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("x"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		runGit(t, dir, "add", ".")
-		runGit(t, dir, "commit", "-m", "init")
+		repo := NewTestRepo(t)
+		repo.CommitFile("file.txt", "x", "init")
 
 		// Corrupt the branch ref by writing a bogus SHA.
 		// Read the actual HEAD target to avoid hardcoding main/master.
-		headRef := strings.TrimSpace(runGit(t, dir, "symbolic-ref", "HEAD"))
-		refPath := filepath.Join(dir, ".git", headRef)
-		if err := os.WriteFile(refPath, []byte("0000000000000000000000000000000000000000\n"), 0644); err != nil {
-			t.Fatal(err)
-		}
+		headRef := strings.TrimSpace(repo.Run("symbolic-ref", "HEAD"))
+		repo.WriteFile(filepath.Join(".git", headRef), "0000000000000000000000000000000000000000\n")
 
-		if IsUnbornHead(dir) {
+		if IsUnbornHead(repo.Dir) {
 			t.Error("expected IsUnbornHead=false for corrupt ref (ref exists but object is missing)")
 		}
 	})
@@ -341,12 +323,7 @@ func TestIsRebaseInProgress(t *testing.T) {
 		}
 
 		// Get the actual gitdir for the worktree to simulate rebase
-		gitDirCmd := exec.Command("git", "-C", wt.Dir, "rev-parse", "--git-dir")
-		gitDirOut, err := gitDirCmd.Output()
-		if err != nil {
-			t.Fatalf("git rev-parse --git-dir failed: %v", err)
-		}
-		worktreeGitDir := strings.TrimSpace(string(gitDirOut))
+		worktreeGitDir := strings.TrimSpace(wt.Run("rev-parse", "--git-dir"))
 		if !filepath.IsAbs(worktreeGitDir) {
 			worktreeGitDir = filepath.Join(wt.Dir, worktreeGitDir)
 		}
@@ -364,9 +341,9 @@ func TestIsRebaseInProgress(t *testing.T) {
 }
 
 func TestGetCommitInfo(t *testing.T) {
-	repo := NewTestRepoWithAuthor(t, "Test Author")
-
 	t.Run("commit with subject only", func(t *testing.T) {
+		repo := NewTestRepoWithAuthor(t, "Test Author")
+
 		repo.CommitFile("file1.txt", "content", "Simple subject")
 
 		commitSHA := repo.HeadSHA()
@@ -388,14 +365,12 @@ func TestGetCommitInfo(t *testing.T) {
 	})
 
 	t.Run("commit with subject and body", func(t *testing.T) {
+		repo := NewTestRepoWithAuthor(t, "Test Author")
 		repo.WriteFile("file2.txt", "content2")
 		repo.Run("add", ".")
 
 		commitMsg := "Subject line\n\nThis is the body.\nIt has multiple lines.\n\nAnd paragraphs."
-		cmd := exec.Command("git", "-C", repo.Dir, "commit", "-m", commitMsg)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git commit failed: %v\n%s", err, out)
-		}
+		repo.Run("commit", "-m", commitMsg)
 
 		commitSHA := repo.HeadSHA()
 
@@ -416,14 +391,12 @@ func TestGetCommitInfo(t *testing.T) {
 	})
 
 	t.Run("commit with pipe in message", func(t *testing.T) {
+		repo := NewTestRepoWithAuthor(t, "Test Author")
 		repo.WriteFile("file3.txt", "content3")
 		repo.Run("add", ".")
 
 		commitMsg := "Fix bug | important\n\nDetails: foo | bar | baz"
-		cmd := exec.Command("git", "-C", repo.Dir, "commit", "-m", commitMsg)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git commit failed: %v\n%s", err, out)
-		}
+		repo.Run("commit", "-m", commitMsg)
 
 		commitSHA := repo.HeadSHA()
 
@@ -442,13 +415,13 @@ func TestGetCommitInfo(t *testing.T) {
 }
 
 func TestGetBranchName(t *testing.T) {
-	repo := NewTestRepo(t)
-	repo.CommitFile("file.txt", "content", "initial")
-
-	commitSHA := repo.HeadSHA()
-	expectedBranch := repo.Run("rev-parse", "--abbrev-ref", "HEAD")
-
 	t.Run("valid commit on branch", func(t *testing.T) {
+		repo := NewTestRepo(t)
+		repo.CommitFile("file.txt", "content", "initial")
+
+		commitSHA := repo.HeadSHA()
+		expectedBranch := repo.Run("rev-parse", "--abbrev-ref", "HEAD")
+
 		branch := GetBranchName(repo.Dir, commitSHA)
 		if branch != expectedBranch {
 			t.Errorf("expected %s, got %s", expectedBranch, branch)
@@ -456,6 +429,12 @@ func TestGetBranchName(t *testing.T) {
 	})
 
 	t.Run("commit behind branch head", func(t *testing.T) {
+		repo := NewTestRepo(t)
+		repo.CommitFile("file.txt", "content", "initial")
+
+		commitSHA := repo.HeadSHA()
+		expectedBranch := repo.Run("rev-parse", "--abbrev-ref", "HEAD")
+
 		repo.CommitFile("file2.txt", "content2", "second")
 
 		branch := GetBranchName(repo.Dir, commitSHA)
@@ -465,6 +444,10 @@ func TestGetBranchName(t *testing.T) {
 	})
 
 	t.Run("non-existent repo returns empty", func(t *testing.T) {
+		repo := NewTestRepo(t)
+		repo.CommitFile("file.txt", "content", "initial")
+		commitSHA := repo.HeadSHA()
+
 		nonRepo := t.TempDir()
 		branch := GetBranchName(nonRepo, commitSHA)
 		if branch != "" {
@@ -473,6 +456,9 @@ func TestGetBranchName(t *testing.T) {
 	})
 
 	t.Run("invalid SHA returns empty", func(t *testing.T) {
+		repo := NewTestRepo(t)
+		repo.CommitFile("file.txt", "content", "initial")
+
 		branch := GetBranchName(repo.Dir, "0000000000000000000000000000000000000000")
 		if branch != "" {
 			t.Errorf("expected empty string, got %s", branch)
@@ -481,10 +467,10 @@ func TestGetBranchName(t *testing.T) {
 }
 
 func TestGetCurrentBranch(t *testing.T) {
-	repo := NewTestRepo(t)
-	repo.CommitFile("file.txt", "content", "initial")
-
 	t.Run("returns current branch", func(t *testing.T) {
+		repo := NewTestRepo(t)
+		repo.CommitFile("file.txt", "content", "initial")
+
 		expectedBranch := repo.Run("rev-parse", "--abbrev-ref", "HEAD")
 
 		branch := GetCurrentBranch(repo.Dir)
@@ -494,6 +480,9 @@ func TestGetCurrentBranch(t *testing.T) {
 	})
 
 	t.Run("returns branch after checkout", func(t *testing.T) {
+		repo := NewTestRepo(t)
+		repo.CommitFile("file.txt", "content", "initial")
+
 		repo.Run("checkout", "-b", "feature-branch")
 
 		branch := GetCurrentBranch(repo.Dir)
@@ -503,6 +492,9 @@ func TestGetCurrentBranch(t *testing.T) {
 	})
 
 	t.Run("returns empty for detached HEAD", func(t *testing.T) {
+		repo := NewTestRepo(t)
+		repo.CommitFile("file.txt", "content", "initial")
+
 		sha := repo.HeadSHA()
 		repo.Run("checkout", sha)
 
@@ -522,10 +514,10 @@ func TestGetCurrentBranch(t *testing.T) {
 }
 
 func TestHasUncommittedChanges(t *testing.T) {
-	repo := NewTestRepo(t)
-	repo.CommitFile("file.txt", "initial", "initial")
-
 	t.Run("no changes", func(t *testing.T) {
+		repo := NewTestRepo(t)
+		repo.CommitFile("file.txt", "initial", "initial")
+
 		hasChanges, err := HasUncommittedChanges(repo.Dir)
 		if err != nil {
 			t.Fatalf("HasUncommittedChanges failed: %v", err)
@@ -536,11 +528,11 @@ func TestHasUncommittedChanges(t *testing.T) {
 	})
 
 	t.Run("staged changes", func(t *testing.T) {
+		repo := NewTestRepo(t)
+		repo.CommitFile("file.txt", "initial", "initial")
+
 		repo.WriteFile("file.txt", "modified")
 		repo.Run("add", ".")
-		defer func() {
-			repo.Run("checkout", "file.txt")
-		}()
 
 		hasChanges, err := HasUncommittedChanges(repo.Dir)
 		if err != nil {
@@ -552,10 +544,10 @@ func TestHasUncommittedChanges(t *testing.T) {
 	})
 
 	t.Run("unstaged changes", func(t *testing.T) {
+		repo := NewTestRepo(t)
+		repo.CommitFile("file.txt", "initial", "initial")
+
 		repo.WriteFile("file.txt", "unstaged")
-		defer func() {
-			repo.Run("checkout", "file.txt")
-		}()
 
 		hasChanges, err := HasUncommittedChanges(repo.Dir)
 		if err != nil {
@@ -567,8 +559,10 @@ func TestHasUncommittedChanges(t *testing.T) {
 	})
 
 	t.Run("untracked file", func(t *testing.T) {
+		repo := NewTestRepo(t)
+		repo.CommitFile("file.txt", "initial", "initial")
+
 		repo.WriteFile("untracked.txt", "new")
-		defer os.Remove(filepath.Join(repo.Dir, "untracked.txt"))
 
 		hasChanges, err := HasUncommittedChanges(repo.Dir)
 		if err != nil {
@@ -581,14 +575,11 @@ func TestHasUncommittedChanges(t *testing.T) {
 }
 
 func TestGetDirtyDiff(t *testing.T) {
-	repo := NewTestRepo(t)
-	repo.CommitFile("file.txt", "initial\n", "initial")
-
 	t.Run("includes tracked file changes", func(t *testing.T) {
+		repo := NewTestRepo(t)
+		repo.CommitFile("file.txt", "initial\n", "initial")
+
 		repo.WriteFile("file.txt", "modified\n")
-		defer func() {
-			repo.Run("checkout", "file.txt")
-		}()
 
 		diff, err := GetDirtyDiff(repo.Dir)
 		if err != nil {
@@ -603,8 +594,10 @@ func TestGetDirtyDiff(t *testing.T) {
 	})
 
 	t.Run("includes untracked files", func(t *testing.T) {
+		repo := NewTestRepo(t)
+		repo.CommitFile("file.txt", "initial\n", "initial")
+
 		repo.WriteFile("newfile.txt", "new content\n")
-		defer os.Remove(filepath.Join(repo.Dir, "newfile.txt"))
 
 		diff, err := GetDirtyDiff(repo.Dir)
 		if err != nil {
@@ -622,12 +615,11 @@ func TestGetDirtyDiff(t *testing.T) {
 	})
 
 	t.Run("includes both tracked and untracked", func(t *testing.T) {
+		repo := NewTestRepo(t)
+		repo.CommitFile("file.txt", "initial\n", "initial")
+
 		repo.WriteFile("file.txt", "changed\n")
 		repo.WriteFile("another.txt", "another\n")
-		defer func() {
-			repo.Run("checkout", "file.txt")
-			os.Remove(filepath.Join(repo.Dir, "another.txt"))
-		}()
 
 		diff, err := GetDirtyDiff(repo.Dir)
 		if err != nil {
@@ -642,10 +634,10 @@ func TestGetDirtyDiff(t *testing.T) {
 	})
 
 	t.Run("handles binary files", func(t *testing.T) {
-		if err := os.WriteFile(filepath.Join(repo.Dir, "binary.bin"), []byte("hello\x00world"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		defer os.Remove(filepath.Join(repo.Dir, "binary.bin"))
+		repo := NewTestRepo(t)
+		repo.CommitFile("file.txt", "initial\n", "initial")
+
+		repo.WriteFile("binary.bin", "hello\x00world")
 
 		diff, err := GetDirtyDiff(repo.Dir)
 		if err != nil {
@@ -759,7 +751,8 @@ func TestIsExcludedFile(t *testing.T) {
 	}
 }
 
-func TestGetDiffExcludesGeneratedFiles(t *testing.T) {
+func setupDiffExcludesGeneratedFilesTest(t *testing.T) (*TestRepo, string) {
+	t.Helper()
 	repo := NewTestRepo(t)
 	repo.CommitFile("initial.txt", "initial content", "initial")
 
@@ -771,7 +764,10 @@ func TestGetDiffExcludesGeneratedFiles(t *testing.T) {
 	repo.CommitAll("add files")
 
 	sha := repo.HeadSHA()
+	return repo, sha
+}
 
+func TestGetDiffExcludesGeneratedFiles(t *testing.T) {
 	assertExcluded := func(t *testing.T, diff string) {
 		t.Helper()
 		if !strings.Contains(diff, "keep.txt") {
@@ -789,6 +785,7 @@ func TestGetDiffExcludesGeneratedFiles(t *testing.T) {
 	}
 
 	t.Run("GetDiff", func(t *testing.T) {
+		repo, sha := setupDiffExcludesGeneratedFilesTest(t)
 		diff, err := GetDiff(repo.Dir, sha)
 		if err != nil {
 			t.Fatalf("GetDiff failed: %v", err)
@@ -797,6 +794,7 @@ func TestGetDiffExcludesGeneratedFiles(t *testing.T) {
 	})
 
 	t.Run("GetRangeDiff", func(t *testing.T) {
+		repo, _ := setupDiffExcludesGeneratedFilesTest(t)
 		diff, err := GetRangeDiff(repo.Dir, "HEAD~1..HEAD")
 		if err != nil {
 			t.Fatalf("GetRangeDiff failed: %v", err)
@@ -941,7 +939,8 @@ func TestLocalBranchName(t *testing.T) {
 	}
 }
 
-func TestGetRangeFilesChanged(t *testing.T) {
+func setupRangeFilesChangedTest(t *testing.T) (*TestRepo, string) {
+	t.Helper()
 	repo := NewTestRepo(t)
 	repo.Run("symbolic-ref", "HEAD", "refs/heads/main")
 	repo.CommitFile("base.txt", "base", "base commit")
@@ -953,7 +952,12 @@ func TestGetRangeFilesChanged(t *testing.T) {
 	repo.CommitFile("docs.md", "# Docs", "add docs")
 	repo.CommitFile("config.yml", "key: val", "add config")
 
+	return repo, baseSHA
+}
+
+func TestGetRangeFilesChanged(t *testing.T) {
 	t.Run("returns changed files in range", func(t *testing.T) {
+		repo, baseSHA := setupRangeFilesChangedTest(t)
 		files, err := GetRangeFilesChanged(repo.Dir, baseSHA+"..HEAD")
 		if err != nil {
 			t.Fatalf("GetRangeFilesChanged failed: %v", err)
@@ -973,6 +977,7 @@ func TestGetRangeFilesChanged(t *testing.T) {
 	})
 
 	t.Run("empty range returns nil", func(t *testing.T) {
+		repo, _ := setupRangeFilesChangedTest(t)
 		files, err := GetRangeFilesChanged(repo.Dir, "HEAD..HEAD")
 		if err != nil {
 			t.Fatalf("GetRangeFilesChanged failed: %v", err)
@@ -1080,6 +1085,21 @@ func TestCommitErrorHookFailedFalseForGPGSigningFailure(t *testing.T) {
 
 	// Force GPG signing with a non-existent key
 	repo.Run("config", "commit.gpgsign", "true")
+
+	// Create a dummy GPG script that always fails
+	// Windows and Unix need different scripts
+	dummyGPG := filepath.Join(repo.Dir, "fail-gpg")
+	if runtime.GOOS == "windows" {
+		dummyGPG += ".bat"
+		repo.WriteFile("fail-gpg.bat", "@echo off\nexit /b 1\n")
+	} else {
+		repo.WriteFile("fail-gpg", "#!/bin/sh\nexit 1\n")
+		if err := os.Chmod(dummyGPG, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	repo.Run("config", "gpg.program", dummyGPG) // Force failure deterministically
 	repo.Run("config", "user.signingkey", "DEADBEEF00000000")
 
 	repo.WriteFile("new.txt", "content")
@@ -1087,9 +1107,7 @@ func TestCommitErrorHookFailedFalseForGPGSigningFailure(t *testing.T) {
 
 	_, err := CreateCommit(repo.Dir, "should fail from gpg")
 	if err == nil {
-		// Some CI environments may have gpg configured in a way
-		// that doesn't fail. Skip rather than give a false pass.
-		t.Skip("commit succeeded unexpectedly (gpg may be configured)")
+		t.Fatal("expected commit to fail due to gpg.program=false")
 	}
 
 	var commitErr *CommitError
@@ -1136,7 +1154,8 @@ func TestHasCommitHooksIgnoresDirectories(t *testing.T) {
 	}
 }
 
-func TestIsAncestor(t *testing.T) {
+func setupAncestorTest(t *testing.T) (*TestRepo, string, string, string) {
+	t.Helper()
 	repo := NewTestRepo(t)
 	repo.Run("symbolic-ref", "HEAD", "refs/heads/main")
 
@@ -1152,7 +1171,12 @@ func TestIsAncestor(t *testing.T) {
 	repo.CommitFile("divergent.txt", "divergent", "divergent commit")
 	divergentSHA := repo.HeadSHA()
 
+	return repo, baseSHA, secondSHA, divergentSHA
+}
+
+func TestIsAncestor(t *testing.T) {
 	t.Run("base is ancestor of second", func(t *testing.T) {
+		repo, baseSHA, secondSHA, _ := setupAncestorTest(t)
 		isAnc, err := IsAncestor(repo.Dir, baseSHA, secondSHA)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -1163,6 +1187,7 @@ func TestIsAncestor(t *testing.T) {
 	})
 
 	t.Run("second is not ancestor of base", func(t *testing.T) {
+		repo, baseSHA, secondSHA, _ := setupAncestorTest(t)
 		isAnc, err := IsAncestor(repo.Dir, secondSHA, baseSHA)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -1173,6 +1198,7 @@ func TestIsAncestor(t *testing.T) {
 	})
 
 	t.Run("divergent is not ancestor of second", func(t *testing.T) {
+		repo, _, secondSHA, divergentSHA := setupAncestorTest(t)
 		isAnc, err := IsAncestor(repo.Dir, divergentSHA, secondSHA)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -1183,6 +1209,7 @@ func TestIsAncestor(t *testing.T) {
 	})
 
 	t.Run("base is ancestor of divergent", func(t *testing.T) {
+		repo, baseSHA, _, divergentSHA := setupAncestorTest(t)
 		isAnc, err := IsAncestor(repo.Dir, baseSHA, divergentSHA)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -1193,6 +1220,7 @@ func TestIsAncestor(t *testing.T) {
 	})
 
 	t.Run("commit is ancestor of itself", func(t *testing.T) {
+		repo, baseSHA, _, _ := setupAncestorTest(t)
 		isAnc, err := IsAncestor(repo.Dir, baseSHA, baseSHA)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -1203,6 +1231,7 @@ func TestIsAncestor(t *testing.T) {
 	})
 
 	t.Run("bad object returns error", func(t *testing.T) {
+		repo, _, _, _ := setupAncestorTest(t)
 		_, err := IsAncestor(repo.Dir, "badbadbadbadbadbadbadbadbadbadbadbadbad", "HEAD")
 		if err == nil {
 			t.Error("expected error for bad object")
@@ -1431,11 +1460,7 @@ func TestWorktreePathForBranch(t *testing.T) {
 		repo.Run("branch", "wt-preexist")
 
 		wtDir := t.TempDir() // creates the directory — it already exists
-		cmd := exec.Command("git", "-C", repo.Dir, "worktree", "add", wtDir, "wt-preexist")
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("git worktree add into pre-existing empty dir failed: %v\n%s", err, out)
-		}
+		repo.Run("worktree", "add", wtDir, "wt-preexist")
 		t.Cleanup(func() {
 			rmCmd := exec.Command("git", "-C", repo.Dir, "worktree", "remove", wtDir)
 			_ = rmCmd.Run()

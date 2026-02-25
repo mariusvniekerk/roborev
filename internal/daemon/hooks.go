@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/roborev-dev/roborev/internal/config"
 	gitpkg "github.com/roborev-dev/roborev/internal/git"
@@ -16,19 +17,27 @@ import (
 type HookRunner struct {
 	cfgGetter   ConfigGetter
 	broadcaster Broadcaster
+	logger      *log.Logger
 	subID       int
 	stopCh      chan struct{}
+	idleCh      chan chan struct{}
+	wg          sync.WaitGroup
 }
 
 // NewHookRunner creates a new HookRunner that subscribes to events from the broadcaster.
-func NewHookRunner(cfgGetter ConfigGetter, broadcaster Broadcaster) *HookRunner {
+func NewHookRunner(cfgGetter ConfigGetter, broadcaster Broadcaster, logger *log.Logger) *HookRunner {
+	if logger == nil {
+		logger = log.Default()
+	}
 	subID, eventCh := broadcaster.Subscribe("")
 
 	hr := &HookRunner{
 		cfgGetter:   cfgGetter,
 		broadcaster: broadcaster,
+		logger:      logger,
 		subID:       subID,
 		stopCh:      make(chan struct{}),
+		idleCh:      make(chan chan struct{}),
 	}
 
 	go hr.listen(eventCh)
@@ -39,6 +48,7 @@ func NewHookRunner(cfgGetter ConfigGetter, broadcaster Broadcaster) *HookRunner 
 // listen processes events from the broadcaster and fires matching hooks.
 func (hr *HookRunner) listen(eventCh <-chan Event) {
 	for {
+		// Prioritize processing events
 		select {
 		case <-hr.stopCh:
 			return
@@ -47,7 +57,57 @@ func (hr *HookRunner) listen(eventCh <-chan Event) {
 				return
 			}
 			hr.handleEvent(event)
+			continue
+		default:
 		}
+
+		select {
+		case <-hr.stopCh:
+			return
+		case req := <-hr.idleCh:
+			// Drain any currently queued events before acknowledging idle
+		drainLoop:
+			for {
+				select {
+				case <-hr.stopCh:
+					close(req)
+					return
+				case event, ok := <-eventCh:
+					if !ok {
+						close(req)
+						return
+					}
+					hr.handleEvent(event)
+				default:
+					break drainLoop
+				}
+			}
+			// Wait for in-flight hooks here (inside the listener) so
+			// no new wg.Add(1) can race with wg.Wait().
+			hr.wg.Wait()
+			close(req)
+		case event, ok := <-eventCh:
+			if !ok {
+				return
+			}
+			hr.handleEvent(event)
+		}
+	}
+}
+
+// WaitUntilIdle blocks until the currently queued events are drained and
+// all in-flight hooks have finished. It is a point-in-time barrier: events
+// arriving after the drain starts are handled on the next listener iteration.
+func (hr *HookRunner) WaitUntilIdle() {
+	ch := make(chan struct{})
+	select {
+	case hr.idleCh <- ch:
+	case <-hr.stopCh:
+		return
+	}
+	select {
+	case <-ch:
+	case <-hr.stopCh:
 	}
 }
 
@@ -91,11 +151,12 @@ func (hr *HookRunner) handleEvent(event Event) {
 
 		fired++
 		// Run async so hooks don't block workers
-		go runHook(cmd, event.Repo)
+		hr.wg.Add(1)
+		go hr.runHook(cmd, event.Repo)
 	}
 
 	if fired > 0 {
-		log.Printf("Hooks: fired %d hook(s) for %s (job %d)", fired, event.Type, event.JobID)
+		hr.logger.Printf("Hooks: fired %d hook(s) for %s (job %d)", fired, event.Type, event.JobID)
 	}
 }
 
@@ -134,11 +195,11 @@ func beadsCommand(event Event) string {
 	switch event.Type {
 	case "review.failed":
 		title := fmt.Sprintf("Review failed for %s (%s): run roborev show %d", repoName, shortSHA, event.JobID)
-		return fmt.Sprintf("bd create %q -p 1", title)
+		return fmt.Sprintf("bd create %s -p 1", shellEscape(title))
 	case "review.completed":
 		if event.Verdict == "F" {
 			title := fmt.Sprintf("Review findings for %s (%s): roborev show %d / one-shot fix with roborev fix %d", repoName, shortSHA, event.JobID, event.JobID)
-			return fmt.Sprintf("bd create %q -p 2", title)
+			return fmt.Sprintf("bd create %s -p 2", shellEscape(title))
 		}
 		return "" // No issue for passing reviews
 	default:
@@ -185,7 +246,8 @@ func shellEscape(s string) string {
 
 // runHook executes a shell command in the given working directory.
 // Errors are logged but never propagated.
-func runHook(command, workDir string) {
+func (hr *HookRunner) runHook(command, workDir string) {
+	defer hr.wg.Done()
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		// Use PowerShell for reliable path handling and command execution.
@@ -201,10 +263,10 @@ func runHook(command, workDir string) {
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Printf("Hook error (cmd=%q dir=%q): %v\n%s", command, workDir, err, output)
+		hr.logger.Printf("Hook error (cmd=%q dir=%q): %v\n%s", command, workDir, err, output)
 		return
 	}
 	if len(output) > 0 {
-		log.Printf("Hook output (cmd=%q): %s", command, output)
+		hr.logger.Printf("Hook output (cmd=%q): %s", command, output)
 	}
 }

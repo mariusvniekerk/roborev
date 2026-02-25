@@ -13,7 +13,27 @@ import (
 // waitForJobStatus polls until the job reaches one of the given statuses.
 func (c *workerTestContext) waitForJobStatus(t *testing.T, jobID int64, statuses ...storage.JobStatus) *storage.ReviewJob {
 	t.Helper()
-	return testutil.WaitForJobStatus(t, c.DB, jobID, 10*time.Second, statuses...)
+
+	waitingForFailure := false
+	for _, status := range statuses {
+		if status == storage.JobStatusFailed {
+			waitingForFailure = true
+			break
+		}
+	}
+
+	waitStatuses := statuses
+	if !waitingForFailure {
+		waitStatuses = append(statuses, storage.JobStatusFailed)
+	}
+
+	job := testutil.WaitForJobStatus(t, c.DB, jobID, 10*time.Second, waitStatuses...)
+
+	if !waitingForFailure && job.Status == storage.JobStatusFailed {
+		t.Fatalf("job failed unexpectedly: %s", job.Error)
+	}
+
+	return job
 }
 
 func TestWorkerPoolE2E(t *testing.T) {
@@ -22,24 +42,22 @@ func TestWorkerPoolE2E(t *testing.T) {
 	job := tc.createJob(t, sha)
 
 	tc.Pool.Start()
+	defer tc.Pool.Stop()
 	finalJob := tc.waitForJobStatus(t, job.ID, storage.JobStatusDone, storage.JobStatusFailed)
-	tc.Pool.Stop()
 
-	if finalJob.Status != storage.JobStatusDone && finalJob.Status != storage.JobStatusFailed {
-		t.Errorf("Job should be done or failed, got %s", finalJob.Status)
+	if finalJob.Status != storage.JobStatusDone {
+		t.Fatalf("Expected job to complete successfully, got status: %s", finalJob.Status)
 	}
 
-	if finalJob.Status == storage.JobStatusDone {
-		review, err := tc.DB.GetReviewByCommitSHA(sha)
-		if err != nil {
-			t.Fatalf("GetReviewByCommitSHA failed: %v", err)
-		}
-		if review.Agent != "test" {
-			t.Errorf("Expected agent 'test', got '%s'", review.Agent)
-		}
-		if review.Output == "" {
-			t.Error("Review output should not be empty")
-		}
+	review, err := tc.DB.GetReviewByCommitSHA(sha)
+	if err != nil {
+		t.Fatalf("GetReviewByCommitSHA failed: %v", err)
+	}
+	if review.Agent != "test" {
+		t.Errorf("Expected agent 'test', got '%s'", review.Agent)
+	}
+	if review.Output == "" {
+		t.Error("Review output should not be empty")
 	}
 }
 
