@@ -43,6 +43,110 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.handleGlobalKey(msg)
 }
 
+func (m model) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if msg.Action != tea.MouseActionPress {
+		return m, nil
+	}
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		if m.currentView == viewTasks {
+			if m.fixSelectedIdx > 0 {
+				m.fixSelectedIdx--
+			}
+			return m, nil
+		}
+		return m.handleUpKey()
+	case tea.MouseButtonWheelDown:
+		if m.currentView == viewTasks {
+			if m.fixSelectedIdx < len(m.fixJobs)-1 {
+				m.fixSelectedIdx++
+			}
+			return m, nil
+		}
+		return m.handleDownKey()
+	case tea.MouseButtonLeft:
+		switch m.currentView {
+		case viewQueue:
+			m.handleQueueMouseClick(msg.X, msg.Y)
+		case viewTasks:
+			m.handleTasksMouseClick(msg.Y)
+		}
+		return m, nil
+	default:
+		return m, nil
+	}
+}
+
+func (m *model) handleQueueMouseClick(_ int, y int) {
+	visibleJobList := m.getVisibleJobs()
+	if len(visibleJobList) == 0 {
+		return
+	}
+
+	visibleRows := m.queueVisibleRows()
+	start := 0
+	end := len(visibleJobList)
+	if len(visibleJobList) > visibleRows {
+		visibleSelectedIdx := m.getVisibleSelectedIdx()
+		if visibleSelectedIdx < 0 {
+			visibleSelectedIdx = 0
+		}
+		start = max(visibleSelectedIdx-visibleRows/2, 0)
+		end = start + visibleRows
+		if end > len(visibleJobList) {
+			end = len(visibleJobList)
+			start = max(end-visibleRows, 0)
+		}
+	}
+	row := y - 5 // rows start after title, status, update, header, separator
+	if row < 0 || row >= visibleRows {
+		return
+	}
+	visibleIdx := start + row
+	if visibleIdx < start || visibleIdx >= end {
+		return
+	}
+
+	targetJobID := visibleJobList[visibleIdx].ID
+	for i := range m.jobs {
+		if m.jobs[i].ID == targetJobID {
+			m.selectedIdx = i
+			m.selectedJobID = targetJobID
+			return
+		}
+	}
+}
+
+func (m model) tasksVisibleWindow(totalJobs int) (int, int, int) {
+	tasksHelpRows := [][]helpItem{
+		{{"enter", "view"}, {"P", "parent"}, {"p", "patch"}, {"A", "apply"}, {"l", "log"}, {"x", "cancel"}, {"?", "help"}, {"T/esc", "back"}},
+	}
+	tasksHelpLines := len(reflowHelpRows(tasksHelpRows, m.width))
+	visibleRows := max(m.height-(6+tasksHelpLines), 1)
+	startIdx := 0
+	if m.fixSelectedIdx >= visibleRows {
+		startIdx = m.fixSelectedIdx - visibleRows + 1
+	}
+	endIdx := min(totalJobs, startIdx+visibleRows)
+	return visibleRows, startIdx, endIdx
+}
+
+func (m *model) handleTasksMouseClick(y int) {
+	if m.fixShowHelp || len(m.fixJobs) == 0 {
+		return
+	}
+	visibleRows, start, end := m.tasksVisibleWindow(len(m.fixJobs))
+	row := y - 3 // rows start after title, header, separator
+	if row < 0 || row >= visibleRows {
+		return
+	}
+	idx := start + row
+	if idx < start || idx >= end {
+		return
+	}
+	m.fixSelectedIdx = idx
+}
+
 // handleCommentKey handles key input in the comment modal.
 func (m model) handleCommentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
@@ -1723,9 +1827,21 @@ func (m model) handleTasksKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.flashView = m.currentView
 		}
 		return m, nil
-	case "r":
-		// Refresh
-		return m, m.fetchFixJobs()
+	case "P":
+		// Open parent review for this fix task
+		if len(m.fixJobs) > 0 && m.fixSelectedIdx < len(m.fixJobs) {
+			job := m.fixJobs[m.fixSelectedIdx]
+			if job.ParentJobID == nil || *job.ParentJobID == 0 {
+				m.flashMessage = "No parent review for this task"
+				m.flashExpiresAt = time.Now().Add(2 * time.Second)
+				m.flashView = viewTasks
+				return m, nil
+			}
+			m.selectedJobID = *job.ParentJobID
+			m.reviewFromView = viewTasks
+			return m, m.fetchReview(*job.ParentJobID)
+		}
+		return m, nil
 	case "?":
 		m.fixShowHelp = !m.fixShowHelp
 		return m, nil

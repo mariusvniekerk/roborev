@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -30,19 +31,24 @@ func (m model) renderTasksView() string {
 		return b.String()
 	}
 
-	// Column layout: status, job, parent are fixed; ref and subject split remaining space.
-	const statusW = 8                                     // "canceled" is the longest
-	const idW = 5                                         // "#" + 4-digit number
-	const parentW = 11                                    // "fixes #NNNN"
-	fixedW := 2 + statusW + 1 + idW + 1 + parentW + 1 + 1 // prefix + inter-column spaces
-	flexW := max(m.width-fixedW, 15)
-	// Ref gets 25% of flexible space, subject gets 75%
-	refW := max(7, flexW*25/100)
-	subjectW := max(5, flexW-refW-1)
+	// Column layout: status, job, parent, queued, elapsed are fixed.
+	// Branch/repo/ref+subject split remaining space.
+	const statusW = 8                                                                  // "canceled" is the longest
+	const idW = 5                                                                      // "#" + 4-digit number
+	const parentW = 11                                                                 // "fixes #NNNN"
+	const queuedW = 12                                                                 // "Jan 02 15:04"
+	const elapsedW = 8                                                                 // "59m59s"
+	fixedW := 2 + statusW + 1 + idW + 1 + parentW + 1 + queuedW + 1 + elapsedW + 1 + 1 // prefix + inter-column spaces
+	flexW := max(m.width-fixedW, 20)
+	branchW := max(1, flexW*20/100)
+	repoW := max(1, flexW*24/100)
+	refSubjectW := max(1, flexW-branchW-repoW-2)
 
 	// Header
-	header := fmt.Sprintf("  %-*s %-*s %-*s %-*s %s",
-		statusW, "Status", idW, "Job", parentW, "Parent", refW, "Ref", "Subject")
+	header := fmt.Sprintf("  %-*s %-*s %-*s %-*s %*s %-*s %-*s %-*s",
+		statusW, "Status", idW, "Job", parentW, "Parent",
+		queuedW, "Queued", elapsedW, "Elapsed",
+		branchW, "Branch", repoW, "Repo", refSubjectW, "Ref/Subject")
 	b.WriteString(statusStyle.Render(header))
 	b.WriteString("\x1b[K\n")
 	b.WriteString("  " + strings.Repeat("-", min(m.width-4, 200)))
@@ -50,7 +56,7 @@ func (m model) renderTasksView() string {
 
 	// Render each fix job
 	tasksHelpRows := [][]helpItem{
-		{{"↵", "view"}, {"p", "patch"}, {"A", "apply"}, {"l", "log"}, {"x", "cancel"}, {"r", "refresh"}, {"?", "help"}, {"T/esc", "back"}},
+		{{"enter", "view"}, {"P", "parent"}, {"p", "patch"}, {"A", "apply"}, {"l", "log"}, {"x", "cancel"}, {"?", "help"}, {"T/esc", "back"}},
 	}
 	tasksHelpLines := len(reflowHelpRows(tasksHelpRows, m.width))
 	visibleRows := m.height - (6 + tasksHelpLines) // title + header + separator + status + scroll + help(N)
@@ -84,7 +90,7 @@ func (m model) renderTasksView() string {
 			statusStyle = canceledStyle
 		case storage.JobStatusApplied:
 			statusLabel = "applied"
-			statusStyle = doneStyle
+			statusStyle = runningStyle
 		case storage.JobStatusRebased:
 			statusLabel = "rebased"
 			statusStyle = canceledStyle
@@ -94,20 +100,50 @@ func (m model) renderTasksView() string {
 		if job.ParentJobID != nil {
 			parentRef = fmt.Sprintf("fixes #%d", *job.ParentJobID)
 		}
-		ref := job.GitRef
-		if len(ref) > refW {
-			ref = ref[:max(1, refW-3)] + "..."
+		queued := ""
+		if !job.EnqueuedAt.IsZero() {
+			queued = job.EnqueuedAt.Local().Format("Jan 02 15:04")
 		}
-		subject := truncateString(job.CommitSubject, subjectW)
+		elapsed := ""
+		if job.StartedAt != nil {
+			if job.FinishedAt != nil {
+				elapsed = job.FinishedAt.Sub(*job.StartedAt).Round(time.Second).String()
+			} else {
+				elapsed = time.Since(*job.StartedAt).Round(time.Second).String()
+			}
+		}
+		branch := truncateString(job.Branch, branchW)
+		defaultRepoName := job.RepoName
+		if defaultRepoName == "" && job.RepoPath != "" {
+			defaultRepoName = filepath.Base(job.RepoPath)
+		}
+		repo := m.getDisplayName(job.RepoPath, defaultRepoName)
+		if m.status.MachineID != "" && job.SourceMachineID != "" && job.SourceMachineID != m.status.MachineID {
+			repo += " [R]"
+		}
+		repo = truncateString(repo, repoW)
+
+		refSubject := job.GitRef
+		if job.CommitSubject != "" {
+			if refSubject != "" {
+				refSubject += " "
+			}
+			refSubject += job.CommitSubject
+		}
+		refSubject = truncateString(refSubject, refSubjectW)
 
 		if i == m.fixSelectedIdx {
-			line := fmt.Sprintf("  %-*s #%-4d %-*s %-*s %s",
-				statusW, statusLabel, job.ID, parentW, parentRef, refW, ref, subject)
+			line := fmt.Sprintf("  %-*s #%-4d %-*s %-*s %*s %-*s %-*s %-*s",
+				statusW, statusLabel, job.ID, parentW, parentRef,
+				queuedW, queued, elapsedW, elapsed,
+				branchW, branch, repoW, repo, refSubjectW, refSubject)
 			b.WriteString(selectedStyle.Render(line))
 		} else {
 			styledStatus := statusStyle.Render(fmt.Sprintf("%-*s", statusW, statusLabel))
-			rest := fmt.Sprintf(" #%-4d %-*s %-*s %s",
-				job.ID, parentW, parentRef, refW, ref, subject)
+			rest := fmt.Sprintf(" #%-4d %-*s %-*s %*s %-*s %-*s %-*s",
+				job.ID, parentW, parentRef,
+				queuedW, queued, elapsedW, elapsed,
+				branchW, branch, repoW, repo, refSubjectW, refSubject)
 			b.WriteString("  " + styledStatus + rest)
 		}
 		b.WriteString("\x1b[K\n")
@@ -139,12 +175,12 @@ func (m model) renderTasksHelpOverlay(b *strings.Builder) string {
 		"",
 		"  Keybindings",
 		"    enter/l    View review output (ready) or error (failed) or log (running)",
+		"    P          Open the parent review for this fix task",
 		"    p          View the patch diff for a ready job",
 		"    A          Apply patch from a ready job to your working tree",
 		"    R          Re-run fix against current HEAD (when patch is stale)",
 		"    F          Trigger a new fix from a review (from queue view)",
 		"    x          Cancel a queued or running job",
-		"    r          Refresh the task list",
 		"    T/esc      Return to the main queue view",
 		"    ?          Toggle this help",
 		"",

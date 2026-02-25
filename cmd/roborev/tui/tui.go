@@ -572,6 +572,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		return m.handleKeyMsg(msg)
+	case tea.MouseMsg:
+		return m.handleMouseMsg(msg)
 	case tea.WindowSizeMsg:
 		return m.handleWindowSizeMsg(msg)
 	case tickMsg:
@@ -687,6 +689,7 @@ func Run(cfg Config) error {
 	p := tea.NewProgram(
 		newModel(cfg.ServerAddr, opts...),
 		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
 	)
 	_, err := p.Run()
 	return err

@@ -3,12 +3,46 @@ package tui
 import (
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/roborev-dev/roborev/internal/storage"
+)
+
+func mouseLeftClick(x, y int) tea.MouseMsg {
+	return tea.MouseMsg{
+		X:      x,
+		Y:      y,
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+	}
+}
+
+func mouseWheelDown() tea.MouseMsg {
+	return tea.MouseMsg{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonWheelDown,
+	}
+}
+
+func mouseWheelUp() tea.MouseMsg {
+	return tea.MouseMsg{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonWheelUp,
+	}
+}
+
+func newTuiModel(serverAddr string) model {
+	return newModel(serverAddr, withExternalIODisabled())
+}
+
+const (
+	tuiViewQueue  = viewQueue
+	tuiViewTasks  = viewTasks
+	tuiViewReview = viewReview
 )
 
 func TestTUIQueueNavigation(t *testing.T) {
@@ -128,6 +162,228 @@ func TestTUIQueueNavigation(t *testing.T) {
 				t.Errorf("expected selectedJobID %d, got %d", tt.wantJobID, m2.selectedJobID)
 			}
 		})
+	}
+}
+
+func TestTUIQueueMouseClickSelectsVisibleRow(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewQueue
+	m.width = 120
+	m.height = 14
+	m.jobs = []storage.ReviewJob{
+		makeJob(1),
+		makeJob(2),
+		makeJob(3),
+		makeJob(4),
+		makeJob(5),
+	}
+	m.selectedIdx = 0
+	m.selectedJobID = 1
+
+	// rowStartY=5, so y=6 targets the second visible row (job ID 2)
+	m2, _ := updateModel(t, m, mouseLeftClick(4, 6))
+
+	if m2.selectedJobID != 2 {
+		t.Fatalf("expected selected job ID 2, got %d", m2.selectedJobID)
+	}
+	if m2.selectedIdx != 1 {
+		t.Fatalf("expected selectedIdx 1, got %d", m2.selectedIdx)
+	}
+}
+
+func TestTUIQueueMouseHeaderClickDoesNotSort(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewQueue
+	m.width = 120
+	m.height = 14
+	m.jobs = []storage.ReviewJob{
+		makeJob(3),
+		makeJob(1),
+		makeJob(2),
+	}
+	m.selectedIdx = 1
+	m.selectedJobID = 1
+
+	// Header y is 3; clicking header should be a no-op.
+	m2, _ := updateModel(t, m, mouseLeftClick(2, 3))
+	if got := []int64{m2.jobs[0].ID, m2.jobs[1].ID, m2.jobs[2].ID}; !slices.Equal(got, []int64{3, 1, 2}) {
+		t.Fatalf("expected header click not to reorder rows, got %v", got)
+	}
+	if m2.selectedJobID != 1 || m2.selectedIdx != 1 {
+		t.Fatalf("expected selection unchanged after header click, got id=%d idx=%d", m2.selectedJobID, m2.selectedIdx)
+	}
+}
+
+func TestTUIQueueMouseIgnoredOutsideQueueView(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewReview
+	m.jobs = []storage.ReviewJob{
+		makeJob(2),
+		makeJob(1),
+	}
+	m.selectedIdx = 0
+	m.selectedJobID = 2
+
+	m2, _ := updateModel(t, m, mouseLeftClick(2, 3))
+	if m2.selectedIdx != 0 || m2.selectedJobID != 2 {
+		t.Fatalf("expected selection unchanged outside queue view, got id=%d idx=%d", m2.selectedJobID, m2.selectedIdx)
+	}
+	if !slices.Equal([]int64{m2.jobs[0].ID, m2.jobs[1].ID}, []int64{2, 1}) {
+		t.Fatalf("expected job order unchanged outside queue view")
+	}
+}
+
+func TestTUIQueueMouseWheelScrollsSelection(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewQueue
+	m.jobs = []storage.ReviewJob{
+		makeJob(1),
+		makeJob(2),
+		makeJob(3),
+	}
+	m.selectedIdx = 0
+	m.selectedJobID = 1
+
+	m2, _ := updateModel(t, m, mouseWheelDown())
+	if m2.selectedIdx != 1 || m2.selectedJobID != 2 {
+		t.Fatalf("expected wheel down to select job 2, got idx=%d id=%d", m2.selectedIdx, m2.selectedJobID)
+	}
+
+	m3, _ := updateModel(t, m2, mouseWheelUp())
+	if m3.selectedIdx != 0 || m3.selectedJobID != 1 {
+		t.Fatalf("expected wheel up to select job 1, got idx=%d id=%d", m3.selectedIdx, m3.selectedJobID)
+	}
+}
+
+func TestTUITasksMouseClickSelectsRow(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewTasks
+	m.width = 140
+	m.height = 24
+	m.fixJobs = []storage.ReviewJob{
+		{ID: 101, Status: storage.JobStatusQueued},
+		{ID: 102, Status: storage.JobStatusRunning},
+		{ID: 103, Status: storage.JobStatusDone},
+	}
+	m.fixSelectedIdx = 0
+
+	// Tasks rows start at y=3, so y=4 targets the second row.
+	m2, _ := updateModel(t, m, mouseLeftClick(2, 4))
+	if m2.fixSelectedIdx != 1 {
+		t.Fatalf("expected tasks click to select idx=1, got %d", m2.fixSelectedIdx)
+	}
+}
+
+func TestTUITasksMouseWheelScrollsSelection(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewTasks
+	m.fixJobs = []storage.ReviewJob{
+		{ID: 101, Status: storage.JobStatusQueued},
+		{ID: 102, Status: storage.JobStatusRunning},
+		{ID: 103, Status: storage.JobStatusDone},
+	}
+	m.fixSelectedIdx = 0
+
+	m2, _ := updateModel(t, m, mouseWheelDown())
+	if m2.fixSelectedIdx != 1 {
+		t.Fatalf("expected tasks wheel down to select idx=1, got %d", m2.fixSelectedIdx)
+	}
+
+	m3, _ := updateModel(t, m2, mouseWheelUp())
+	if m3.fixSelectedIdx != 0 {
+		t.Fatalf("expected tasks wheel up to select idx=0, got %d", m3.fixSelectedIdx)
+	}
+}
+
+func TestTUITasksParentShortcutOpensParentReview(t *testing.T) {
+	parentID := int64(77)
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewTasks
+	m.fixJobs = []storage.ReviewJob{
+		{ID: 101, Status: storage.JobStatusDone, ParentJobID: &parentID},
+	}
+	m.fixSelectedIdx = 0
+
+	m2, cmd := pressKey(m, 'P')
+	if cmd == nil {
+		t.Fatal("expected fetchReview command for parent shortcut")
+	}
+	if m2.selectedJobID != parentID {
+		t.Fatalf("expected selectedJobID=%d, got %d", parentID, m2.selectedJobID)
+	}
+	if m2.reviewFromView != tuiViewTasks {
+		t.Fatalf("expected reviewFromView=tuiViewTasks, got %v", m2.reviewFromView)
+	}
+}
+
+func TestTUITasksParentShortcutWithoutParentShowsFlash(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewTasks
+	m.fixJobs = []storage.ReviewJob{
+		{ID: 101, Status: storage.JobStatusDone},
+	}
+	m.fixSelectedIdx = 0
+
+	m2, cmd := pressKey(m, 'P')
+	if cmd != nil {
+		t.Fatal("expected no command when task has no parent")
+	}
+	if m2.flashMessage != "No parent review for this task" {
+		t.Fatalf("expected parent-missing flash message, got %q", m2.flashMessage)
+	}
+	if m2.flashView != tuiViewTasks {
+		t.Fatalf("expected flashView=tuiViewTasks, got %v", m2.flashView)
+	}
+}
+
+func TestTUITasksViewShowsQueuedColumn(t *testing.T) {
+	enqueued := time.Date(2026, time.February, 25, 16, 42, 0, 0, time.Local)
+	started := enqueued.Add(30 * time.Second)
+	finished := started.Add(1 * time.Minute)
+	parentID := int64(42)
+
+	m := newTuiModel("http://localhost")
+	m.width = 140
+	m.height = 24
+	m.fixJobs = []storage.ReviewJob{
+		{
+			ID:            1001,
+			Status:        storage.JobStatusDone,
+			ParentJobID:   &parentID,
+			RepoName:      "repo-alpha",
+			Branch:        "feature/tasks-view",
+			GitRef:        "abc1234",
+			CommitSubject: "Fix flaky task tests",
+			EnqueuedAt:    enqueued,
+			StartedAt:     &started,
+			FinishedAt:    &finished,
+		},
+	}
+
+	out := stripANSI(m.renderTasksView())
+	if !strings.Contains(out, "Queued") {
+		t.Fatalf("expected tasks header to contain Queued column, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Elapsed") {
+		t.Fatalf("expected tasks header to contain Elapsed column, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Branch") || !strings.Contains(out, "Repo") {
+		t.Fatalf("expected tasks header to contain Branch/Repo columns, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Ref/Subject") {
+		t.Fatalf("expected tasks header to contain Ref/Subject column, got:\n%s", out)
+	}
+	if !strings.Contains(out, enqueued.Format("Jan 02 15:04")) {
+		t.Fatalf("expected tasks row to include queued timestamp, got:\n%s", out)
+	}
+	if !strings.Contains(out, "1m0s") {
+		t.Fatalf("expected tasks row to include elapsed duration, got:\n%s", out)
+	}
+	if !strings.Contains(out, "feature/task") || !strings.Contains(out, "repo-alpha") {
+		t.Fatalf("expected tasks row to include branch/repo values, got:\n%s", out)
+	}
+	if !strings.Contains(out, "abc1234 Fix flaky task tests") {
+		t.Fatalf("expected tasks row to include combined ref/subject value, got:\n%s", out)
 	}
 }
 

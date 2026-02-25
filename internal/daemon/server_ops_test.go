@@ -457,6 +457,54 @@ func TestHandleFixJobStaleValidation(t *testing.T) {
 	db.ClaimJob("w1")
 	db.CompleteJob(reviewJob.ID, "test", "prompt", "FAIL: issues found")
 
+	t.Run("fix job inherits parent commit metadata", func(t *testing.T) {
+		req := testutil.MakeJSONRequest(
+			t, http.MethodPost, "/api/job/fix",
+			fixJobRequest{ParentJobID: reviewJob.ID},
+		)
+		w := httptest.NewRecorder()
+		server.handleFixJob(w, req)
+
+		if w.Code != http.StatusCreated {
+			t.Fatalf(
+				"Expected 201 for fix enqueue, got %d: %s",
+				w.Code, w.Body.String(),
+			)
+		}
+
+		var fixJob storage.ReviewJob
+		testutil.DecodeJSON(t, w, &fixJob)
+		if fixJob.CommitID == nil || *fixJob.CommitID != commit.ID {
+			t.Fatalf(
+				"Expected fix job commit_id=%d, got %v",
+				commit.ID, fixJob.CommitID,
+			)
+		}
+		if fixJob.CommitSubject != commit.Subject {
+			t.Fatalf(
+				"Expected fix job commit_subject %q, got %q",
+				commit.Subject, fixJob.CommitSubject,
+			)
+		}
+
+		stored, err := db.GetJobByID(fixJob.ID)
+		if err != nil {
+			t.Fatalf("GetJobByID(%d): %v", fixJob.ID, err)
+		}
+		if stored.CommitID == nil || *stored.CommitID != commit.ID {
+			t.Fatalf(
+				"Expected stored fix job commit_id=%d, got %v",
+				commit.ID, stored.CommitID,
+			)
+		}
+		if stored.CommitSubject != commit.Subject {
+			t.Fatalf(
+				"Expected stored fix job commit_subject %q, got %q",
+				commit.Subject, stored.CommitSubject,
+			)
+		}
+	})
+
 	t.Run("fix job as parent is rejected", func(t *testing.T) {
 		// Create a fix job and try to use it as a parent
 		fixJob, _ := db.EnqueueJob(storage.EnqueueOpts{

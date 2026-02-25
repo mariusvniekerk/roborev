@@ -1982,9 +1982,17 @@ func (s *Server) handleFixJob(w http.ResponseWriter, r *http.Request) {
 		log.Printf("fix job for parent %d: no git ref or branch available, falling back to HEAD", req.ParentJobID)
 	}
 
+	// Carry over commit linkage when the parent is commit-based so
+	// fix jobs retain commit metadata (e.g. subject) in list views.
+	var commitID int64
+	if parentJob.CommitID != nil {
+		commitID = *parentJob.CommitID
+	}
+
 	// Enqueue the fix job
 	job, err := s.db.EnqueueJob(storage.EnqueueOpts{
 		RepoID:      parentJob.RepoID,
+		CommitID:    commitID,
 		GitRef:      fixGitRef,
 		Branch:      parentJob.Branch,
 		Agent:       agentName,
@@ -1999,6 +2007,9 @@ func (s *Server) handleFixJob(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeInternalError(w, fmt.Sprintf("enqueue fix job: %v", err))
 		return
+	}
+	if commitID > 0 {
+		job.CommitSubject = parentJob.CommitSubject
 	}
 
 	writeJSONWithStatus(w, http.StatusCreated, job)
