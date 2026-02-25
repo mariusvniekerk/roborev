@@ -155,25 +155,38 @@ func (m tuiModel) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if entry.repoIdx == -1 {
-			// "All" -- clear all filters
-			m.activeRepoFilter = nil
-			m.activeBranchFilter = ""
-			m.filterStack = nil
+			// "All" -- clear unlocked filters only
+			if !m.lockedRepoFilter {
+				m.activeRepoFilter = nil
+				m.removeFilterFromStack(filterTypeRepo)
+			}
+			if !m.lockedBranchFilter {
+				m.activeBranchFilter = ""
+				m.removeFilterFromStack(filterTypeBranch)
+			}
 		} else if entry.branchIdx == -1 {
 			// Repo node -- filter by repo only
 			node := m.filterTree[entry.repoIdx]
-			m.activeRepoFilter = node.rootPaths
-			m.activeBranchFilter = ""
-			m.removeFilterFromStack(filterTypeBranch)
-			m.pushFilter(filterTypeRepo)
+			if !m.lockedRepoFilter {
+				m.activeRepoFilter = node.rootPaths
+				m.pushFilter(filterTypeRepo)
+			}
+			if !m.lockedBranchFilter {
+				m.activeBranchFilter = ""
+				m.removeFilterFromStack(filterTypeBranch)
+			}
 		} else {
 			// Branch node -- filter by repo + branch
 			node := m.filterTree[entry.repoIdx]
 			branch := node.children[entry.branchIdx]
-			m.activeRepoFilter = node.rootPaths
-			m.activeBranchFilter = branch.name
-			m.pushFilter(filterTypeRepo)
-			m.pushFilter(filterTypeBranch)
+			if !m.lockedRepoFilter {
+				m.activeRepoFilter = node.rootPaths
+				m.pushFilter(filterTypeRepo)
+			}
+			if !m.lockedBranchFilter {
+				m.activeBranchFilter = branch.name
+				m.pushFilter(filterTypeBranch)
+			}
 		}
 		m.currentView = tuiViewQueue
 		m.filterSearch = ""
@@ -990,6 +1003,10 @@ func (m tuiModel) handleFilterOpenKey() (tea.Model, tea.Cmd) {
 	if m.currentView != tuiViewQueue {
 		return m, nil
 	}
+	// Block filter modal when both repo and branch are locked via CLI flags
+	if m.lockedRepoFilter && m.lockedBranchFilter {
+		return m, nil
+	}
 	m.filterTree = nil
 	m.filterFlatList = nil
 	m.filterSelectedIdx = 0
@@ -1003,6 +1020,10 @@ func (m tuiModel) handleFilterOpenKey() (tea.Model, tea.Cmd) {
 
 func (m tuiModel) handleBranchFilterOpenKey() (tea.Model, tea.Cmd) {
 	if m.currentView != tuiViewQueue {
+		return m, nil
+	}
+	// Block branch filter when locked via CLI flag
+	if m.lockedBranchFilter {
 		return m, nil
 	}
 	m.filterBranchMode = true
