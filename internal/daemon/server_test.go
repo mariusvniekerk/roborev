@@ -3584,6 +3584,59 @@ func TestHandleFixJobStaleValidation(t *testing.T) {
 	db.ClaimJob("w1")
 	db.CompleteJob(reviewJob.ID, "test", "prompt", "FAIL: issues found")
 
+	t.Run("fix job keeps commit metadata empty when parent has no commit", func(t *testing.T) {
+		// Create a range-style parent review job (commit_id is NULL)
+		rangeParent, err := db.EnqueueJob(storage.EnqueueOpts{
+			RepoID:  repo.ID,
+			GitRef:  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa..bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			Branch:  "feature/no-commit-parent",
+			Agent:   "test",
+			JobType: storage.JobTypeRange,
+		})
+		if err != nil {
+			t.Fatalf("EnqueueJob(range parent): %v", err)
+		}
+
+		// Complete it so handleFixJob can build a fix prompt from review output.
+		if _, err := db.Exec(`UPDATE review_jobs SET status = 'running' WHERE id = ?`, rangeParent.ID); err != nil {
+			t.Fatalf("set range parent running: %v", err)
+		}
+		if err := db.CompleteJob(rangeParent.ID, "test", "prompt", "FAIL: range issues found"); err != nil {
+			t.Fatalf("CompleteJob(range parent): %v", err)
+		}
+
+		body := map[string]any{
+			"parent_job_id": rangeParent.ID,
+		}
+		req := testutil.MakeJSONRequest(t, http.MethodPost, "/api/job/fix", body)
+		w := httptest.NewRecorder()
+		server.handleFixJob(w, req)
+
+		if w.Code != http.StatusCreated {
+			t.Fatalf("Expected 201 for range-parent fix enqueue, got %d: %s", w.Code, w.Body.String())
+		}
+
+		var fixJob storage.ReviewJob
+		testutil.DecodeJSON(t, w, &fixJob)
+		if fixJob.CommitID != nil {
+			t.Fatalf("Expected fix job commit_id to be nil for parent without commit, got %v", *fixJob.CommitID)
+		}
+		if fixJob.CommitSubject != "" {
+			t.Fatalf("Expected fix job commit_subject to be empty for parent without commit, got %q", fixJob.CommitSubject)
+		}
+
+		stored, err := db.GetJobByID(fixJob.ID)
+		if err != nil {
+			t.Fatalf("GetJobByID(%d): %v", fixJob.ID, err)
+		}
+		if stored.CommitID != nil {
+			t.Fatalf("Expected stored fix job commit_id to be nil for parent without commit, got %v", *stored.CommitID)
+		}
+		if stored.CommitSubject != "" {
+			t.Fatalf("Expected stored fix job commit_subject to be empty for parent without commit, got %q", stored.CommitSubject)
+		}
+	})
+
 	t.Run("fix job as parent is rejected", func(t *testing.T) {
 		// Create a fix job and try to use it as a parent
 		fixJob, _ := db.EnqueueJob(storage.EnqueueOpts{
