@@ -44,6 +44,7 @@ Examples:
   roborev wait --job 42          # Force as job ID
   roborev wait --job 10 20 30    # Wait for multiple job IDs
   roborev wait --sha HEAD~1      # Wait for job matching HEAD~1`,
+		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// In quiet mode, suppress cobra's error output
 			if quiet {
@@ -169,7 +170,13 @@ Examples:
 // waitMultiple resolves multiple args to job IDs and waits for all concurrently.
 // Returns exit code 1 if any job fails or has a FAIL verdict.
 func waitMultiple(cmd *cobra.Command, args []string, forceJobID, quiet bool) error {
-	// Resolve all args to job IDs first (before contacting daemon)
+	// Ensure daemon is running before any resolution
+	if err := ensureDaemon(); err != nil {
+		return fmt.Errorf("daemon not running: %w", err)
+	}
+
+	// Resolve all args to job IDs
+	repoRoot, _ := git.GetRepoRoot(".")
 	jobIDs := make([]int64, 0, len(args))
 	for _, arg := range args {
 		if forceJobID {
@@ -181,24 +188,19 @@ func waitMultiple(cmd *cobra.Command, args []string, forceJobID, quiet bool) err
 		} else {
 			// Try git ref first
 			var ref string
-			if repoRoot, err := git.GetRepoRoot("."); err == nil {
+			if repoRoot != "" {
 				if _, err := git.ResolveSHA(repoRoot, arg); err == nil {
 					ref = arg
 				}
 			}
 			if ref != "" {
-				// Resolve to SHA, then find job
-				repoRoot, _ := git.GetRepoRoot(".")
 				sha, err := git.ResolveSHA(repoRoot, ref)
 				if err != nil {
 					return fmt.Errorf("invalid git ref: %s", ref)
 				}
-				if err := ensureDaemon(); err != nil {
-					return fmt.Errorf("daemon not running: %w", err)
-				}
 				mainRoot, _ := git.GetMainRepoRoot(".")
 				if mainRoot == "" {
-					mainRoot, _ = git.GetRepoRoot(".")
+					mainRoot = repoRoot
 				}
 				job, err := findJobForCommit(mainRoot, sha)
 				if err != nil {
@@ -224,14 +226,11 @@ func waitMultiple(cmd *cobra.Command, args []string, forceJobID, quiet bool) err
 		}
 	}
 
-	// Ensure daemon is running
-	if err := ensureDaemon(); err != nil {
-		return fmt.Errorf("daemon not running: %w", err)
-	}
-
 	addr := getDaemonAddr()
 
-	// Wait for all jobs concurrently
+	// Wait for all jobs concurrently.
+	// Always poll in quiet mode to avoid interleaved output from goroutines;
+	// we display results serially after all complete.
 	type result struct {
 		jobID int64
 		err   error
@@ -242,13 +241,13 @@ func waitMultiple(cmd *cobra.Command, args []string, forceJobID, quiet bool) err
 		wg.Add(1)
 		go func(idx int, jobID int64) {
 			defer wg.Done()
-			err := waitForJob(cmd, addr, jobID, quiet)
+			err := waitForJob(cmd, addr, jobID, true)
 			results[idx] = result{jobID: jobID, err: err}
 		}(i, id)
 	}
 	wg.Wait()
 
-	// Collect errors: any failure means exit 1
+	// Report results serially
 	var firstErr error
 	for _, r := range results {
 		if r.err != nil {
