@@ -253,6 +253,32 @@ func TestKiloReviewNonZeroExitFallsBackToStdout(t *testing.T) {
 	assertContains(t, err.Error(), "something went wrong")
 }
 
+func TestKiloReviewExitZeroNonJSONStdout(t *testing.T) {
+	t.Parallel()
+	skipIfWindows(t)
+
+	// Kilo exits 0 but writes only non-JSON text to stdout.
+	// parseOpenCodeJSON extracts nothing; the raw stdout
+	// should be surfaced as an error.
+	mock := mockAgentCLI(t, MockCLIOpts{
+		StdoutLines: []string{
+			"Error: invalid configuration",
+		},
+		ExitCode: 0,
+	})
+
+	a := NewKiloAgent(mock.CmdPath)
+	_, err := a.Review(
+		context.Background(), t.TempDir(), "HEAD", "prompt", nil,
+	)
+	if err == nil {
+		t.Fatal(
+			"expected error when stdout is non-JSON",
+		)
+	}
+	assertContains(t, err.Error(), "invalid configuration")
+}
+
 // kiloTextEvent returns a JSONL line representing a text event
 // in the opencode/kilo --format json envelope.
 func kiloTextEvent(text string) string {

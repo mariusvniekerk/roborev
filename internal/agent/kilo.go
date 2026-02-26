@@ -169,13 +169,20 @@ func (a *KiloAgent) Review(
 	}
 
 	if result == "" {
-		// No review text parsed. If stderr has content, the
-		// agent likely printed an error (e.g. model not found)
-		// that should be surfaced instead of a generic message.
+		// No review text parsed. Surface stderr or non-JSON
+		// stdout so the actual error is visible instead of
+		// a generic "no output" message.
 		errOut := stripTerminalControls(stderrBuf.String())
 		if errOut = strings.TrimSpace(errOut); errOut != "" {
 			return "", fmt.Errorf(
 				"kilo produced no output: %s", errOut,
+			)
+		}
+		if raw := strings.TrimSpace(
+			stripTerminalControls(stdoutRaw.String()),
+		); raw != "" {
+			return "", fmt.Errorf(
+				"kilo produced no output: %s", raw,
 			)
 		}
 		return "No review output generated", nil
