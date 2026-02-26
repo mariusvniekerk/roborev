@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
@@ -180,7 +181,7 @@ func (a *KiloAgent) Review(
 		}
 		if raw := strings.TrimSpace(
 			stripTerminalControls(stdoutRaw.String()),
-		); raw != "" {
+		); raw != "" && hasNonJSONLine(raw) {
 			return "", fmt.Errorf(
 				"kilo produced no output: %s", raw,
 			)
@@ -188,6 +189,22 @@ func (a *KiloAgent) Review(
 		return "No review output generated", nil
 	}
 	return result, nil
+}
+
+// hasNonJSONLine returns true if s contains any non-empty line
+// that is not valid JSON. Used to distinguish plain-text error
+// output from valid JSONL with no text events.
+func hasNonJSONLine(s string) bool {
+	for line := range strings.SplitSeq(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !json.Valid([]byte(line)) {
+			return true
+		}
+	}
+	return false
 }
 
 func init() {

@@ -279,6 +279,30 @@ func TestKiloReviewExitZeroNonJSONStdout(t *testing.T) {
 	assertContains(t, err.Error(), "invalid configuration")
 }
 
+func TestKiloReviewExitZeroJSONOnlyNoText(t *testing.T) {
+	t.Parallel()
+	skipIfWindows(t)
+
+	// Kilo exits 0 with valid JSONL but no text events (e.g.,
+	// only step/tool events). This is a valid run that produced
+	// no review text — should return the generic message, not
+	// an error.
+	stepEvent := `{"type":"step","part":{"type":"tool","name":"read"}}`
+	mock := mockAgentCLI(t, MockCLIOpts{
+		StdoutLines: []string{stepEvent},
+		ExitCode:    0,
+	})
+
+	a := NewKiloAgent(mock.CmdPath)
+	result, err := a.Review(
+		context.Background(), t.TempDir(), "HEAD", "prompt", nil,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertEqual(t, result, "No review output generated")
+}
+
 // kiloTextEvent returns a JSONL line representing a text event
 // in the opencode/kilo --format json envelope.
 func kiloTextEvent(text string) string {
