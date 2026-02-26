@@ -3,7 +3,6 @@ package agent
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
@@ -79,7 +78,7 @@ func (a *KiloAgent) kiloVariant() string {
 }
 
 func (a *KiloAgent) buildArgs() []string {
-	args := []string{"run", "--format", "default"}
+	args := []string{"run", "--format", "json"}
 	if a.Model != "" {
 		args = append(args, "--model", a.Model)
 	}
@@ -96,33 +95,70 @@ func (a *KiloAgent) CommandLine() string {
 	return a.Command + " " + strings.Join(a.buildArgs(), " ")
 }
 
-func (a *KiloAgent) Review(ctx context.Context, repoPath, commitSHA, prompt string, output io.Writer) (string, error) {
+// Review runs kilo with --format json and parses the JSONL stream
+// (same envelope as opencode: {"type":"...","part":{"type":"text","text":"..."}}).
+func (a *KiloAgent) Review(
+	ctx context.Context,
+	repoPath, commitSHA, prompt string,
+	output io.Writer,
+) (string, error) {
 	cmd := exec.CommandContext(ctx, a.Command, a.buildArgs()...)
 	cmd.Dir = repoPath
 	cmd.Stdin = strings.NewReader(prompt)
 
-	var stdout, stderr bytes.Buffer
-	if sw := newSyncWriter(output); sw != nil {
-		cmd.Stdout = io.MultiWriter(&stdout, sw)
-		cmd.Stderr = io.MultiWriter(&stderr, sw)
+	sw := newSyncWriter(output)
+
+	var stderrBuf bytes.Buffer
+	if sw != nil {
+		cmd.Stderr = io.MultiWriter(&stderrBuf, sw)
 	} else {
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
+		cmd.Stderr = &stderrBuf
 	}
 
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf(
-			"kilo failed: %w\nstderr: %s",
-			err, stderrOrStdout(stderr, stdout),
-		)
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("create stdout pipe: %w", err)
 	}
 
-	result := filterToolCallLines(stdout.String())
-	if len(result) == 0 {
-		// No review text on stdout. If stderr has content, the
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("start kilo: %w", err)
+	}
+	defer stdoutPipe.Close()
+
+	result, parseErr := parseOpenCodeJSON(stdoutPipe, sw)
+
+	if waitErr := cmd.Wait(); waitErr != nil {
+		var detail strings.Builder
+		fmt.Fprintf(&detail, "kilo failed")
+		if parseErr != nil {
+			fmt.Fprintf(&detail, "\nstream: %v", parseErr)
+		}
+		errOut := stripTerminalControls(stderrBuf.String())
+		if errOut != "" {
+			fmt.Fprintf(&detail, "\nstderr: %s", errOut)
+		}
+		if result != "" {
+			partial := result
+			if len(partial) > 500 {
+				partial = partial[:500] + "..."
+			}
+			fmt.Fprintf(
+				&detail, "\npartial output: %s", partial,
+			)
+		}
+		return "", fmt.Errorf("%s: %w", detail.String(), waitErr)
+	}
+
+	if parseErr != nil {
+		return result, parseErr
+	}
+
+	if result == "" {
+		// No review text parsed. If stderr has content, the
 		// agent likely printed an error (e.g. model not found)
 		// that should be surfaced instead of a generic message.
-		if errOut := strings.TrimSpace(stderr.String()); errOut != "" {
+		errOut := stripTerminalControls(stderrBuf.String())
+		if errOut = strings.TrimSpace(errOut); errOut != "" {
 			return "", fmt.Errorf(
 				"kilo produced no output: %s", errOut,
 			)
@@ -130,64 +166,6 @@ func (a *KiloAgent) Review(ctx context.Context, repoPath, commitSHA, prompt stri
 		return "No review output generated", nil
 	}
 	return result, nil
-}
-
-// stderrOrStdout returns stderr content if non-empty, otherwise
-// stdout. Some CLIs (especially Node.js) print errors to stdout
-// instead of stderr; this ensures the error is always captured.
-func stderrOrStdout(stderr, stdout bytes.Buffer) string {
-	if s := strings.TrimSpace(stderr.String()); s != "" {
-		return s
-	}
-	return strings.TrimSpace(stdout.String())
-}
-
-// filterToolCallLines removes lines that look like JSON tool-call
-// objects from plain-text CLI output. Kilo's --format default mode
-// interleaves tool-call JSON ({"name":...,"arguments":...}) with
-// human-readable review text; we keep only the review text.
-func filterToolCallLines(s string) string {
-	var kept []string
-	for line := range strings.SplitSeq(s, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			kept = append(kept, line)
-			continue
-		}
-		if isToolCallJSON(trimmed) {
-			continue
-		}
-		kept = append(kept, line)
-	}
-	return strings.TrimRight(strings.Join(kept, "\n"), "\n")
-}
-
-// isToolCallJSON returns true if line matches the tool-call
-// envelope exactly: a JSON object with only "name" (string) and
-// "arguments" (object) keys. The caller must trim whitespace
-// before passing the line.
-func isToolCallJSON(line string) bool {
-	if len(line) == 0 || line[0] != '{' {
-		return false
-	}
-	var obj map[string]json.RawMessage
-	if json.Unmarshal([]byte(line), &obj) != nil {
-		return false
-	}
-	if len(obj) != 2 {
-		return false
-	}
-	nameRaw, hasName := obj["name"]
-	argsRaw, hasArgs := obj["arguments"]
-	if !hasName || !hasArgs {
-		return false
-	}
-	var name string
-	if json.Unmarshal(nameRaw, &name) != nil {
-		return false
-	}
-	trimmedArgs := bytes.TrimSpace(argsRaw)
-	return len(trimmedArgs) > 0 && trimmedArgs[0] == '{'
 }
 
 func init() {

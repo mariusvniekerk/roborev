@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -92,21 +94,31 @@ func TestKiloReviewPipesPromptViaStdin(t *testing.T) {
 	assertNotContains(t, args, prompt)
 }
 
-func TestKiloReviewFiltersToolCallLines(t *testing.T) {
+func TestKiloReviewExtractsTextFromJSONL(t *testing.T) {
 	t.Parallel()
 	skipIfWindows(t)
 
 	stdoutLines := []string{
-		makeToolCallJSON("read", map[string]any{"path": "/foo"}),
-		"**Review:** Fix the typo.",
-		makeToolCallJSON("edit", map[string]any{}),
-		"Done.",
+		kiloTextEvent("**Review:** Fix the typo."),
+		kiloTextEvent("Done."),
 	}
 
 	result, _, _ := runKiloMockReview(t, "", "prompt", stdoutLines)
-	assertContains(t, result, "**Review:**")
+	assertContains(t, result, "**Review:** Fix the typo.")
 	assertContains(t, result, "Done.")
-	assertNotContains(t, result, `"name":"read"`)
+}
+
+func TestKiloReviewStripsANSIFromJSONL(t *testing.T) {
+	t.Parallel()
+	skipIfWindows(t)
+
+	stdoutLines := []string{
+		kiloTextEvent("\x1b[31mred\x1b[0m text"),
+	}
+
+	result, _, _ := runKiloMockReview(t, "", "prompt", stdoutLines)
+	assertContains(t, result, "red text")
+	assertNotContains(t, result, "\x1b[")
 }
 
 func TestKiloAgenticAutoFlag(t *testing.T) {
@@ -149,145 +161,11 @@ func TestKiloVariantFlag(t *testing.T) {
 	}
 }
 
-func TestIsToolCallJSON(t *testing.T) {
+func TestKiloUsesJSONFormat(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name string
-		line string
-		want bool
-	}{
-		{
-			"real tool call",
-			`{"name":"read","arguments":{"path":"/foo"}}`,
-			true,
-		},
-		{
-			"tool call with empty args",
-			`{"name":"edit","arguments":{}}`,
-			true,
-		},
-		{
-			"plain text",
-			"Fix the typo on line 5.",
-			false,
-		},
-		{
-			"empty string",
-			"",
-			false,
-		},
-		{
-			"JSON without arguments key",
-			`{"name":"read","path":"/foo"}`,
-			false,
-		},
-		{
-			"JSON without name key",
-			`{"arguments":{"path":"/foo"}}`,
-			false,
-		},
-		{
-			"name is number not string",
-			`{"name":42,"arguments":{}}`,
-			false,
-		},
-		{
-			"arguments is array not object",
-			`{"name":"fn","arguments":["a","b"]}`,
-			false,
-		},
-		{
-			"arguments is string not object",
-			`{"name":"fn","arguments":"hello"}`,
-			false,
-		},
-		{
-			"JSON with extra keys rejected",
-			`{"name":"John","arguments":{"x":1},"age":30}`,
-			false,
-		},
-		{
-			"invalid JSON",
-			`{"name":"read","arguments":`,
-			false,
-		},
-		{
-			"JSON array not object",
-			`[{"name":"read"}]`,
-			false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := isToolCallJSON(tt.line)
-			if got != tt.want {
-				t.Errorf("isToolCallJSON(%q) = %v, want %v", tt.line, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestFilterToolCallLines(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name  string
-		input string
-		want  string
-	}{
-		{
-			"strips tool calls, keeps review text",
-			"**Review:** Fix the bug.\n" +
-				`{"name":"read","arguments":{"path":"/foo"}}` + "\n" +
-				"Done.",
-			"**Review:** Fix the bug.\nDone.",
-		},
-		{
-			"preserves JSON code snippet in review",
-			"Here is an example:\n" +
-				`{"name":"fn","arguments":["a","b"]}` + "\n" +
-				"Note the array arguments.",
-			"Here is an example:\n" +
-				`{"name":"fn","arguments":["a","b"]}` + "\n" +
-				"Note the array arguments.",
-		},
-		{
-			"all tool calls returns empty",
-			`{"name":"read","arguments":{}}`,
-			"",
-		},
-		{
-			"preserves blank lines",
-			"Line 1\n\nLine 3",
-			"Line 1\n\nLine 3",
-		},
-		{
-			"empty input",
-			"",
-			"",
-		},
-		{
-			"indented tool call is still filtered",
-			"Review:\n" +
-				`  {"name":"read","arguments":{"path":"/x"}}` + "\n" +
-				"End.",
-			"Review:\nEnd.",
-		},
-		{
-			"preserves JSON example with extra keys",
-			`{"name":"config","arguments":{"a":1},"version":"2"}`,
-			`{"name":"config","arguments":{"a":1},"version":"2"}`,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := filterToolCallLines(tt.input)
-			if got != tt.want {
-				t.Errorf("filterToolCallLines() =\n%q\nwant:\n%q", got, tt.want)
-			}
-		})
-	}
+	a := NewKiloAgent("kilo")
+	cl := a.CommandLine()
+	assertContains(t, cl, "--format json")
 }
 
 func TestKiloReviewStderrOnExitZero(t *testing.T) {
@@ -330,14 +208,16 @@ func TestKiloReviewNonZeroExitSurfacesStderr(t *testing.T) {
 	assertContains(t, err.Error(), "Model not found")
 }
 
-func TestKiloReviewNonZeroExitFallsBackToStdout(t *testing.T) {
+func TestKiloReviewStderrStripsANSI(t *testing.T) {
 	t.Parallel()
 	skipIfWindows(t)
 
-	// Some CLIs print errors to stdout instead of stderr.
+	// Kilo outputs ANSI-colored errors; verify they get stripped.
 	mock := mockAgentCLI(t, MockCLIOpts{
-		StdoutLines: []string{"fatal: something went wrong"},
-		ExitCode:    1,
+		StderrLines: []string{
+			"\x1b[0m\x1b[91m\x1b[0m\x1b[1mError: \x1b[0m\x1b[0mModel not found",
+		},
+		ExitCode: 1,
 	})
 
 	a := NewKiloAgent(mock.CmdPath)
@@ -347,14 +227,36 @@ func TestKiloReviewNonZeroExitFallsBackToStdout(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error on non-zero exit")
 	}
-	assertContains(t, err.Error(), "something went wrong")
+	assertContains(t, err.Error(), "Error: Model not found")
+	assertNotContains(t, err.Error(), "\x1b[")
 }
 
-func runKiloMockReview(t *testing.T, model, prompt string, stdoutLines []string) (output, args, stdin string) {
+// kiloTextEvent returns a JSONL line representing a text event
+// in the opencode/kilo --format json envelope.
+func kiloTextEvent(text string) string {
+	part := map[string]string{"type": "text", "text": text}
+	partJSON, err := json.Marshal(part)
+	if err != nil {
+		panic(fmt.Sprintf("kiloTextEvent: %v", err))
+	}
+	ev := map[string]json.RawMessage{
+		"type": json.RawMessage(`"text"`),
+		"part": partJSON,
+	}
+	b, err := json.Marshal(ev)
+	if err != nil {
+		panic(fmt.Sprintf("kiloTextEvent: %v", err))
+	}
+	return string(b)
+}
+
+func runKiloMockReview(
+	t *testing.T, model, prompt string, stdoutLines []string,
+) (output, args, stdin string) {
 	t.Helper()
 
 	if stdoutLines == nil {
-		stdoutLines = []string{"ok"}
+		stdoutLines = []string{kiloTextEvent("ok")}
 	}
 
 	mock := mockAgentCLI(t, MockCLIOpts{
@@ -368,7 +270,9 @@ func runKiloMockReview(t *testing.T, model, prompt string, stdoutLines []string)
 		a.Model = model
 	}
 
-	out, err := a.Review(context.Background(), t.TempDir(), "HEAD", prompt, nil)
+	out, err := a.Review(
+		context.Background(), t.TempDir(), "HEAD", prompt, nil,
+	)
 	if err != nil {
 		t.Fatalf("Review failed: %v", err)
 	}
