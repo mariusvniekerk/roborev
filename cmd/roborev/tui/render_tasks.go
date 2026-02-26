@@ -90,7 +90,7 @@ func (m model) renderTasksView() string {
 			statusStyle = canceledStyle
 		case storage.JobStatusApplied:
 			statusLabel = "applied"
-			statusStyle = runningStyle
+			statusStyle = doneStyle
 		case storage.JobStatusRebased:
 			statusLabel = "rebased"
 			statusStyle = canceledStyle

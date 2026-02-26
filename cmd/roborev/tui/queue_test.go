@@ -255,6 +255,47 @@ func TestTUIQueueMouseWheelScrollsSelection(t *testing.T) {
 	}
 }
 
+func TestTUIQueueMouseClickScrolledWindow(t *testing.T) {
+	m := newTuiModel("http://localhost")
+	m.currentView = tuiViewQueue
+	m.width = 120
+	m.height = 12 // small terminal
+
+	// Create more jobs than fit on screen.
+	for i := range 20 {
+		m.jobs = append(m.jobs, makeJob(int64(i+1)))
+	}
+
+	visibleRows := m.queueVisibleRows()
+	if visibleRows >= 20 {
+		t.Skipf(
+			"terminal too tall for scroll test: %d visible rows",
+			visibleRows,
+		)
+	}
+
+	// Select a job near the bottom to shift the visible window.
+	m.selectedIdx = 15
+	m.selectedJobID = 16
+
+	// Click the first data row (y=5). In a scrolled window the
+	// first visible row is not job 1 — it's whatever start is.
+	m2, _ := updateModel(t, m, mouseLeftClick(4, 5))
+
+	// The clicked job should NOT be job 1 (it scrolled past).
+	if m2.selectedJobID == 1 {
+		t.Fatal(
+			"scrolled click selected job 1; expected a later job",
+		)
+	}
+	// Verify the selection is within the visible window.
+	if m2.selectedIdx < 0 || m2.selectedIdx >= len(m.jobs) {
+		t.Fatalf(
+			"selectedIdx %d out of range", m2.selectedIdx,
+		)
+	}
+}
+
 func TestTUITasksMouseClickSelectsRow(t *testing.T) {
 	m := newTuiModel("http://localhost")
 	m.currentView = tuiViewTasks
