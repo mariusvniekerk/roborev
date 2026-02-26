@@ -167,70 +167,90 @@ Examples:
 	return cmd
 }
 
-// waitMultiple resolves multiple args to job IDs and waits for all concurrently.
-// Returns exit code 1 if any job fails or has a FAIL verdict.
-func waitMultiple(cmd *cobra.Command, args []string, forceJobID, quiet bool) error {
-	// Ensure daemon is running before any resolution
-	if err := ensureDaemon(); err != nil {
-		return fmt.Errorf("daemon not running: %w", err)
-	}
+// resolvedArg holds locally-validated arg data before daemon contact.
+type resolvedArg struct {
+	jobID int64  // set if arg is a numeric job ID
+	sha   string // set if arg is a git ref (resolved SHA)
+	ref   string // original ref string (for error messages)
+}
 
-	// Resolve all args to job IDs
+// waitMultiple resolves multiple args to job IDs and waits for all
+// concurrently. Returns exit code 1 if any job fails or has a FAIL
+// verdict.
+func waitMultiple(
+	cmd *cobra.Command,
+	args []string,
+	forceJobID, quiet bool,
+) error {
+	// Phase 1: Local validation (no daemon contact).
 	repoRoot, _ := git.GetRepoRoot(".")
-	jobIDs := make([]int64, 0, len(args))
+	resolved := make([]resolvedArg, 0, len(args))
 	for _, arg := range args {
 		if forceJobID {
 			id, err := strconv.ParseInt(arg, 10, 64)
 			if err != nil || id <= 0 {
 				return fmt.Errorf("invalid job ID: %s", arg)
 			}
-			jobIDs = append(jobIDs, id)
+			resolved = append(resolved, resolvedArg{jobID: id})
 		} else {
 			// Try git ref first
-			var ref string
+			var sha string
 			if repoRoot != "" {
-				if _, err := git.ResolveSHA(repoRoot, arg); err == nil {
-					ref = arg
+				if s, err := git.ResolveSHA(repoRoot, arg); err == nil {
+					sha = s
 				}
 			}
-			if ref != "" {
-				sha, err := git.ResolveSHA(repoRoot, ref)
-				if err != nil {
-					return fmt.Errorf("invalid git ref: %s", ref)
-				}
-				mainRoot, _ := git.GetMainRepoRoot(".")
-				if mainRoot == "" {
-					mainRoot = repoRoot
-				}
-				job, err := findJobForCommit(mainRoot, sha)
-				if err != nil {
-					return err
-				}
-				if job == nil {
-					if !quiet {
-						cmd.Printf("No job found for %s\n", ref)
-					}
-					cmd.SilenceErrors = true
-					cmd.SilenceUsage = true
-					return &exitError{code: 1}
-				}
-				jobIDs = append(jobIDs, job.ID)
+			if sha != "" {
+				resolved = append(resolved, resolvedArg{sha: sha, ref: arg})
 			} else {
-				// Try as numeric job ID
 				id, err := strconv.ParseInt(arg, 10, 64)
 				if err != nil || id <= 0 {
-					return fmt.Errorf("argument %q is not a valid git ref or job ID", arg)
+					return fmt.Errorf(
+						"argument %q is not a valid git ref or job ID",
+						arg,
+					)
 				}
-				jobIDs = append(jobIDs, id)
+				resolved = append(resolved, resolvedArg{jobID: id})
 			}
 		}
+	}
+
+	// Phase 2: Ensure daemon is running.
+	if err := ensureDaemon(); err != nil {
+		return fmt.Errorf("daemon not running: %w", err)
+	}
+
+	// Phase 3: Resolve git refs to job IDs via daemon.
+	jobIDs := make([]int64, 0, len(resolved))
+	for _, r := range resolved {
+		if r.jobID != 0 {
+			jobIDs = append(jobIDs, r.jobID)
+			continue
+		}
+		mainRoot, _ := git.GetMainRepoRoot(".")
+		if mainRoot == "" {
+			mainRoot = repoRoot
+		}
+		job, err := findJobForCommit(mainRoot, r.sha)
+		if err != nil {
+			return err
+		}
+		if job == nil {
+			if !quiet {
+				cmd.Printf("No job found for %s\n", r.ref)
+			}
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
+			return &exitError{code: 1}
+		}
+		jobIDs = append(jobIDs, job.ID)
 	}
 
 	addr := getDaemonAddr()
 
 	// Wait for all jobs concurrently.
-	// Always poll in quiet mode to avoid interleaved output from goroutines;
-	// we display results serially after all complete.
+	// Always poll in quiet mode to avoid interleaved output from
+	// goroutines; we display results serially after all complete.
 	type result struct {
 		jobID int64
 		err   error
@@ -247,32 +267,39 @@ func waitMultiple(cmd *cobra.Command, args []string, forceJobID, quiet bool) err
 	}
 	wg.Wait()
 
-	// Report results serially
-	var firstErr error
+	// Report results serially.
+	var hasErr bool
 	for _, r := range results {
-		if r.err != nil {
-			if firstErr == nil {
-				firstErr = r.err
-			}
-			if errors.Is(r.err, ErrJobNotFound) {
-				if !quiet {
-					cmd.Printf("No job found for job %d\n", r.jobID)
-				}
+		if r.err == nil {
+			continue
+		}
+		hasErr = true
+		if !quiet {
+			switch {
+			case errors.Is(r.err, ErrJobNotFound):
+				cmd.Printf("Job %d: no job found\n", r.jobID)
+			case isExitCode(r.err, 1):
+				cmd.Printf("Job %d: review has issues\n", r.jobID)
+			default:
+				cmd.Printf("Job %d: %v\n", r.jobID, r.err)
 			}
 		}
 	}
 
-	if firstErr != nil {
+	if hasErr {
 		cmd.SilenceErrors = true
 		cmd.SilenceUsage = true
-		if _, isExitErr := firstErr.(*exitError); isExitErr {
-			return firstErr
-		}
-		if errors.Is(firstErr, ErrJobNotFound) {
-			return &exitError{code: 1}
-		}
-		return firstErr
+		return &exitError{code: 1}
 	}
 
 	return nil
+}
+
+// isExitCode reports whether err is an *exitError with the given code.
+func isExitCode(err error, code int) bool {
+	var e *exitError
+	if errors.As(err, &e) {
+		return e.code == code
+	}
+	return false
 }

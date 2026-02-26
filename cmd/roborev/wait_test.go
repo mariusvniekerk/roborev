@@ -328,6 +328,69 @@ func TestWaitMultipleJobIDsOneFails(t *testing.T) {
 	requireExitCode(t, err, 1)
 }
 
+func TestWaitMultipleJobIDsOneFailsReportsOutput(t *testing.T) {
+	setupFastPolling(t)
+
+	// One job passes, one has issues. The failure message should
+	// appear in stdout (not suppressed).
+	handler := newMultiJobMockHandler(map[int64]mockJobResult{
+		10: {
+			job:    storage.ReviewJob{ID: 10, Agent: "test", Status: "done"},
+			review: &storage.Review{ID: 1, JobID: 10, Agent: "test", Output: "No issues found."},
+		},
+		20: {
+			job:    storage.ReviewJob{ID: 20, Agent: "test", Status: "done"},
+			review: &storage.Review{ID: 2, JobID: 20, Agent: "test", Output: "Found 1 issue:\n1. Bug"},
+		},
+	})
+	newWaitEnv(t, handler)
+
+	stdout, err := runWait(t, "--job", "10", "20")
+	requireExitCode(t, err, 1)
+	if !strings.Contains(stdout, "Job 20: review has issues") {
+		t.Errorf("expected failure message for job 20, got: %q", stdout)
+	}
+	// Passing job should not appear in output.
+	if strings.Contains(stdout, "Job 10") {
+		t.Errorf("expected no message for passing job 10, got: %q", stdout)
+	}
+}
+
+func TestWaitMultipleJobIDsNotFoundReportsOutput(t *testing.T) {
+	setupFastPolling(t)
+
+	// Job 10 passes, job 99 does not exist. The "no job found"
+	// message should appear in stdout.
+	handler := newMultiJobMockHandler(map[int64]mockJobResult{
+		10: {
+			job:    storage.ReviewJob{ID: 10, Agent: "test", Status: "done"},
+			review: &storage.Review{ID: 1, JobID: 10, Agent: "test", Output: "No issues found."},
+		},
+		// 99 is absent — will produce ErrJobNotFound
+	})
+	newWaitEnv(t, handler)
+
+	stdout, err := runWait(t, "--job", "10", "99")
+	requireExitCode(t, err, 1)
+	if !strings.Contains(stdout, "Job 99: no job found") {
+		t.Errorf("expected 'no job found' for job 99, got: %q", stdout)
+	}
+}
+
+func TestWaitMultipleValidationBeforeDaemon(t *testing.T) {
+	// Validation errors for --job should surface before contacting
+	// the daemon. This test does NOT start a mock daemon.
+	repo := newTestGitRepo(t)
+	repo.CommitFile("file.txt", "content", "initial commit")
+	chdir(t, repo.Dir)
+
+	_, err := runWait(t, "--job", "10", "abc")
+	assertErrorContains(t, err, "invalid job ID")
+
+	_, err = runWait(t, "--job", "10", "0")
+	assertErrorContains(t, err, "invalid job ID")
+}
+
 func TestWaitMultipleJobIDsValidation(t *testing.T) {
 	// --sha is incompatible with multiple args
 	repo := newTestGitRepo(t)
