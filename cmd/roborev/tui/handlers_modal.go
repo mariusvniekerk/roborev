@@ -348,6 +348,8 @@ func (m model) handleTasksKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "T":
 		m.currentView = viewQueue
 		return m, nil
+	case "o":
+		return m.handleColumnOptionsKey()
 	case "up", "k":
 		if m.fixSelectedIdx > 0 {
 			m.fixSelectedIdx--

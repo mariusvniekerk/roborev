@@ -702,11 +702,51 @@ func hiddenColumnsToNames(hidden map[int]bool) []string {
 	return names
 }
 
+// parseColumnOrder converts config names to ordered queue column IDs.
+// Any toggleable columns not in the config list are appended at the end in default order.
+func parseColumnOrder(names []string) []int {
+	if len(names) == 0 {
+		result := make([]int, len(toggleableColumns))
+		copy(result, toggleableColumns)
+		return result
+	}
+	lookup := map[string]int{}
+	for id, name := range columnConfigNames {
+		lookup[name] = id
+	}
+	seen := map[int]bool{}
+	var order []int
+	for _, n := range names {
+		if id, ok := lookup[strings.ToLower(n)]; ok && !seen[id] {
+			order = append(order, id)
+			seen[id] = true
+		}
+	}
+	// Append any missing toggleable columns
+	for _, col := range toggleableColumns {
+		if !seen[col] {
+			order = append(order, col)
+		}
+	}
+	return order
+}
+
+// columnOrderToNames converts ordered queue column IDs to config names.
+func columnOrderToNames(order []int) []string {
+	names := make([]string, 0, len(order))
+	for _, col := range order {
+		if name, ok := columnConfigNames[col]; ok {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 // visibleColumns returns the ordered list of column indices to display,
 // always including colSel and colJobID, plus any non-hidden toggleable columns.
 func (m model) visibleColumns() []int {
 	cols := []int{colSel, colJobID}
-	for _, c := range toggleableColumns {
+	for _, c := range m.columnOrder {
 		if !m.hiddenColumns[c] {
 			cols = append(cols, c)
 		}
@@ -714,10 +754,12 @@ func (m model) visibleColumns() []int {
 	return cols
 }
 
-// saveColumnOptions persists hidden columns and border settings to config.
+// saveColumnOptions persists hidden columns, border settings, and column order to config.
 func (m model) saveColumnOptions() tea.Cmd {
 	hidden := hiddenColumnsToNames(m.hiddenColumns)
 	borders := m.colBordersOn
+	colOrd := columnOrderToNames(m.columnOrder)
+	taskColOrd := taskColumnOrderToNames(m.taskColumnOrder)
 	return func() tea.Msg {
 		cfg, err := config.LoadGlobal()
 		if err != nil {
@@ -725,6 +767,8 @@ func (m model) saveColumnOptions() tea.Cmd {
 		}
 		cfg.HiddenColumns = hidden
 		cfg.ColumnBorders = borders
+		cfg.ColumnOrder = colOrd
+		cfg.TaskColumnOrder = taskColOrd
 		config.SaveGlobal(cfg)
 		return nil
 	}
@@ -759,7 +803,7 @@ func (m model) renderColumnOptionsView() string {
 
 	b.WriteString("\n")
 	helpRows := [][]helpItem{
-		{{"space", "toggle"}, {"esc", "close"}},
+		{{"j/k", "move"}, {"space", "toggle"}, {"esc", "close"}},
 	}
 	b.WriteString(renderHelpTable(helpRows, m.width))
 

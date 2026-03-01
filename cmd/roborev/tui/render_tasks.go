@@ -25,6 +25,89 @@ const (
 	tcolCount             // total number of task columns
 )
 
+// taskToggleableColumns is the ordered list of task columns the user can show/hide/reorder.
+// tcolSel is always visible and not included here.
+var taskToggleableColumns = []int{tcolStatus, tcolJobID, tcolParent, tcolQueued, tcolElapsed, tcolBranch, tcolRepo, tcolRefSubject}
+
+// taskColumnNames maps task column constants to display names.
+var taskColumnNames = map[int]string{
+	tcolStatus:     "Status",
+	tcolJobID:      "Job",
+	tcolParent:     "Parent",
+	tcolQueued:     "Queued",
+	tcolElapsed:    "Elapsed",
+	tcolBranch:     "Branch",
+	tcolRepo:       "Repo",
+	tcolRefSubject: "Ref/Subject",
+}
+
+// taskColumnConfigNames maps task column constants to config file names.
+var taskColumnConfigNames = map[int]string{
+	tcolStatus:     "status",
+	tcolJobID:      "job",
+	tcolParent:     "parent",
+	tcolQueued:     "queued",
+	tcolElapsed:    "elapsed",
+	tcolBranch:     "branch",
+	tcolRepo:       "repo",
+	tcolRefSubject: "ref_subject",
+}
+
+// taskColumnDisplayName returns the display name for a task column constant.
+func taskColumnDisplayName(col int) string {
+	if name, ok := taskColumnNames[col]; ok {
+		return name
+	}
+	return "?"
+}
+
+// parseTaskColumnOrder converts config names to ordered task column IDs.
+// Any columns not in the config list are appended at the end in default order.
+func parseTaskColumnOrder(names []string) []int {
+	if len(names) == 0 {
+		result := make([]int, len(taskToggleableColumns))
+		copy(result, taskToggleableColumns)
+		return result
+	}
+	lookup := map[string]int{}
+	for id, name := range taskColumnConfigNames {
+		lookup[name] = id
+	}
+	seen := map[int]bool{}
+	var order []int
+	for _, n := range names {
+		if id, ok := lookup[strings.ToLower(n)]; ok && !seen[id] {
+			order = append(order, id)
+			seen[id] = true
+		}
+	}
+	// Append any missing toggleable columns
+	for _, col := range taskToggleableColumns {
+		if !seen[col] {
+			order = append(order, col)
+		}
+	}
+	return order
+}
+
+// taskColumnOrderToNames converts ordered task column IDs to config names.
+func taskColumnOrderToNames(order []int) []string {
+	names := make([]string, 0, len(order))
+	for _, col := range order {
+		if name, ok := taskColumnConfigNames[col]; ok {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// visibleTaskColumns returns the ordered list of task column indices to display.
+func (m model) visibleTaskColumns() []int {
+	cols := []int{tcolSel}
+	cols = append(cols, m.taskColumnOrder...)
+	return cols
+}
+
 // taskCells returns plain text cell values for a fix job row.
 // Order: status, jobID, parent, queued, elapsed, branch, repo, refSubject
 // (tcolStatus through tcolRefSubject, 8 values).
@@ -113,20 +196,21 @@ func (m model) renderTasksView() string {
 
 	// Help row calculation for visible rows
 	tasksHelpRows := [][]helpItem{
-		{{"enter", "view"}, {"P", "parent"}, {"p", "patch"}, {"A", "apply"}, {"l", "log"}, {"x", "cancel"}, {"?", "help"}, {"T/esc", "back"}},
+		{{"enter", "view"}, {"P", "parent"}, {"p", "patch"}, {"A", "apply"}, {"l", "log"}, {"x", "cancel"}, {"o", "options"}, {"?", "help"}, {"T/esc", "back"}},
 	}
 	tasksHelpLines := len(reflowHelpRows(tasksHelpRows, m.width))
 	visibleRows := m.height - (6 + tasksHelpLines) // title + header + separator + status + scroll + help(N)
 	visibleRows = max(visibleRows, 1)
 
-	// All columns are always visible in the tasks view.
-	visCols := make([]int, tcolCount)
-	for i := range visCols {
-		visCols[i] = i
-	}
+	// Columns in user-configured order.
+	visCols := m.visibleTaskColumns()
 
 	// Build full row data for ALL fixJobs (stable widths across scroll).
-	allHeaders := [tcolCount]string{"", "Status", "Job", "Parent", "Queued", "Elapsed", "Branch", "Repo", "Ref/Subject"}
+	allHeaders := make(map[int]string, tcolCount)
+	allHeaders[tcolSel] = ""
+	for col, name := range taskColumnNames {
+		allHeaders[col] = name
+	}
 	allFullRows := make([][]string, len(m.fixJobs))
 	for i, job := range m.fixJobs {
 		cells := m.taskCells(job)

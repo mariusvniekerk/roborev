@@ -156,17 +156,28 @@ func (m model) handleBranchFilterOpenKey() (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleColumnOptionsKey() (tea.Model, tea.Cmd) {
-	if m.currentView != viewQueue {
+	if m.currentView != viewQueue && m.currentView != viewTasks {
 		return m, nil
 	}
-	// Build option list from toggleable columns
+	m.colOptionsReturnView = m.currentView
+
 	var opts []columnOption
-	for _, col := range toggleableColumns {
-		opts = append(opts, columnOption{
-			id:      col,
-			name:    columnDisplayName(col),
-			enabled: !m.hiddenColumns[col],
-		})
+	if m.currentView == viewTasks {
+		for _, col := range m.taskColumnOrder {
+			opts = append(opts, columnOption{
+				id:      col,
+				name:    taskColumnDisplayName(col),
+				enabled: true,
+			})
+		}
+	} else {
+		for _, col := range m.columnOrder {
+			opts = append(opts, columnOption{
+				id:      col,
+				name:    columnDisplayName(col),
+				enabled: !m.hiddenColumns[col],
+			})
+		}
 	}
 	// Add borders toggle
 	opts = append(opts, columnOption{
@@ -181,20 +192,43 @@ func (m model) handleColumnOptionsKey() (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleColumnOptionsInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	lastColumnIdx := len(m.colOptionsList) - 2 // last column item (before borders)
+
 	switch msg.String() {
 	case "esc":
-		m.currentView = viewQueue
+		m.currentView = m.colOptionsReturnView
 		return m, nil
 	case "ctrl+c":
 		return m, tea.Quit
-	case "j", "down":
-		if m.colOptionsIdx < len(m.colOptionsList)-1 {
-			m.colOptionsIdx++
+	case "down", "up":
+		if msg.String() == "down" {
+			if m.colOptionsIdx < len(m.colOptionsList)-1 {
+				m.colOptionsIdx++
+			}
+		} else {
+			if m.colOptionsIdx > 0 {
+				m.colOptionsIdx--
+			}
 		}
 		return m, nil
-	case "k", "up":
-		if m.colOptionsIdx > 0 {
+	case "j":
+		// Move current column down in order
+		if m.colOptionsIdx >= 0 && m.colOptionsIdx < lastColumnIdx {
+			m.colOptionsList[m.colOptionsIdx], m.colOptionsList[m.colOptionsIdx+1] =
+				m.colOptionsList[m.colOptionsIdx+1], m.colOptionsList[m.colOptionsIdx]
+			m.colOptionsIdx++
+			m.syncColumnOrderFromOptions()
+			return m, m.saveColumnOptions()
+		}
+		return m, nil
+	case "k":
+		// Move current column up in order
+		if m.colOptionsIdx > 0 && m.colOptionsIdx <= lastColumnIdx {
+			m.colOptionsList[m.colOptionsIdx], m.colOptionsList[m.colOptionsIdx-1] =
+				m.colOptionsList[m.colOptionsIdx-1], m.colOptionsList[m.colOptionsIdx]
 			m.colOptionsIdx--
+			m.syncColumnOrderFromOptions()
+			return m, m.saveColumnOptions()
 		}
 		return m, nil
 	case " ", "enter":
@@ -205,6 +239,11 @@ func (m model) handleColumnOptionsInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// Borders toggle
 				m.colBordersOn = opt.enabled
 			} else {
+				if m.colOptionsReturnView == viewTasks {
+					// Tasks view: no visibility toggle (all columns always shown)
+					opt.enabled = true
+					return m, nil
+				}
 				if opt.enabled {
 					delete(m.hiddenColumns, opt.id)
 				} else {
@@ -219,6 +258,22 @@ func (m model) handleColumnOptionsInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// syncColumnOrderFromOptions updates m.columnOrder or m.taskColumnOrder
+// from the current colOptionsList (excluding the borders toggle).
+func (m *model) syncColumnOrderFromOptions() {
+	var order []int
+	for _, opt := range m.colOptionsList {
+		if opt.id != colOptionBorders {
+			order = append(order, opt.id)
+		}
+	}
+	if m.colOptionsReturnView == viewTasks {
+		m.taskColumnOrder = order
+	} else {
+		m.columnOrder = order
+	}
 }
 
 func (m model) handleHideAddressedKey() (tea.Model, tea.Cmd) {

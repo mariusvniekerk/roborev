@@ -386,10 +386,13 @@ type model struct {
 	worktreeConfirmBranch string // Branch name for worktree confirmation prompt
 
 	// Column options modal
-	colOptionsIdx  int            // Cursor in modal
-	colOptionsList []columnOption // Items in modal (columns + borders toggle)
-	colBordersOn   bool           // Column borders enabled
-	hiddenColumns  map[int]bool   // Set of hidden column IDs
+	colOptionsIdx        int            // Cursor in modal
+	colOptionsList       []columnOption // Items in modal (columns + borders toggle)
+	colBordersOn         bool           // Column borders enabled
+	hiddenColumns        map[int]bool   // Set of hidden column IDs
+	columnOrder          []int          // Ordered toggleable queue columns
+	taskColumnOrder      []int          // Ordered task columns
+	colOptionsReturnView viewKind       // Return-to view from column options
 }
 
 // isConnectionError checks if an error indicates a network/connection failure
@@ -421,6 +424,8 @@ func newModel(serverAddr string, opts ...option) model {
 	tabWidth := 2
 	columnBorders := false
 	hiddenCols := map[int]bool{}
+	colOrder := parseColumnOrder(nil)
+	taskColOrder := parseTaskColumnOrder(nil)
 	var cwdRepoRoot, cwdBranch string
 
 	if !opt.disableExternalIO {
@@ -438,6 +443,8 @@ func newModel(serverAddr string, opts ...option) model {
 			}
 			columnBorders = cfg.ColumnBorders
 			hiddenCols = parseHiddenColumns(cfg.HiddenColumns)
+			colOrder = parseColumnOrder(cfg.ColumnOrder)
+			taskColOrder = parseTaskColumnOrder(cfg.TaskColumnOrder)
 		}
 
 		// Detect current repo/branch for filter sort priority
@@ -494,6 +501,8 @@ func newModel(serverAddr string, opts ...option) model {
 		mdCache:                newMarkdownCache(tabWidth),
 		colBordersOn:           columnBorders,
 		hiddenColumns:          hiddenCols,
+		columnOrder:            colOrder,
+		taskColumnOrder:        taskColOrder,
 	}
 }
 
