@@ -307,15 +307,11 @@ func (m model) renderQueueView() string {
 
 		// Compute total fixed consumption
 		totalFixed := 0
-		totalFlex := 0
-		flexContentTotal := 0
 		for ti, c := range visCols {
 			sp := spacing(ti, c)
 			if fw, ok := fixedWidth[c]; ok {
 				totalFixed += fw + sp
 			} else {
-				totalFlex++
-				flexContentTotal += contentWidth[c]
 				totalFixed += sp // spacing is always consumed
 			}
 		}
@@ -328,60 +324,66 @@ func (m model) renderQueueView() string {
 		colWidths := make(map[int]int, len(visCols))
 		maps.Copy(colWidths, fixedWidth)
 
-		if totalFlex > 0 && remaining > 0 {
-			// Distribute proportionally to content width
+		// Build visible-only flex list once.
+		var visFlex []int
+		for _, c := range flexCols {
+			if !m.hiddenColumns[c] {
+				visFlex = append(visFlex, c)
+			}
+		}
+
+		if len(visFlex) > 0 && remaining > 0 {
+			// Two-phase distribution: first guarantee each flex
+			// column at least min(contentWidth, equalShare), then
+			// distribute surplus proportionally to remaining
+			// content headroom. This prevents a single wide column
+			// from starving narrower ones.
+			equalShare := remaining / len(visFlex)
+
+			// Phase 1: allocate floors.
 			distributed := 0
-			for _, c := range flexCols {
-				if m.hiddenColumns[c] {
-					continue
-				}
-				if flexContentTotal > 0 {
-					colWidths[c] = max(remaining*contentWidth[c]/flexContentTotal, 1)
-				} else {
-					colWidths[c] = max(remaining/totalFlex, 1)
-				}
+			totalHeadroom := 0
+			headroom := make(map[int]int, len(visFlex))
+			for _, c := range visFlex {
+				floor := min(contentWidth[c], equalShare)
+				colWidths[c] = max(floor, 1)
 				distributed += colWidths[c]
-			}
-
-			// Cap Branch at 3/2 of Repo to prevent Branch from
-			// starving Repo when branch names are long.
-			if !m.hiddenColumns[colBranch] && !m.hiddenColumns[colRepo] {
-				maxBranch := colWidths[colRepo] * 3 / 2
-				if colWidths[colBranch] > maxBranch {
-					excess := colWidths[colBranch] - maxBranch
-					colWidths[colBranch] = maxBranch
-					colWidths[colRepo] += excess
+				headroom[c] = contentWidth[c] - floor
+				if headroom[c] > 0 {
+					totalHeadroom += headroom[c]
 				}
 			}
 
-			// Correct rounding: add leftover to first visible flex
-			// column on undershoot, drain overflow across visible
-			// flex columns (widest first) on overshoot from
-			// max(...,1) inflation.
-			if distributed < remaining {
-				for _, c := range flexCols {
-					if !m.hiddenColumns[c] {
-						colWidths[c] += remaining - distributed
-						break
+			// Phase 2: distribute surplus proportionally to
+			// content headroom (columns already at content width
+			// have zero headroom and get nothing extra).
+			surplus := remaining - distributed
+			if surplus > 0 && totalHeadroom > 0 {
+				phase2 := 0
+				for i, c := range visFlex {
+					var extra int
+					if i == len(visFlex)-1 {
+						extra = surplus - phase2
+					} else {
+						extra = surplus * max(headroom[c], 0) / totalHeadroom
 					}
+					colWidths[c] += extra
+					phase2 += extra
 				}
-			} else {
-				// Build visible-only flex list for overflow drain.
-				var visFlex []int
-				for _, c := range flexCols {
-					if !m.hiddenColumns[c] {
-						visFlex = append(visFlex, c)
-					}
+			} else if surplus > 0 {
+				// All columns at content width — distribute
+				// remaining space equally.
+				for i, c := range visFlex {
+					extra := surplus / (len(visFlex) - i)
+					colWidths[c] += extra
+					surplus -= extra
 				}
-				drainFlexOverflow(visFlex, colWidths, distributed-remaining)
 			}
-		} else if totalFlex > 0 {
-			// No remaining space: give flex columns 1 char each to avoid
-			// overflow at very narrow terminal widths.
-			for _, c := range flexCols {
-				if !m.hiddenColumns[c] {
-					colWidths[c] = 1
-				}
+		} else if len(visFlex) > 0 {
+			// No remaining space: give flex columns 1 char each to
+			// avoid overflow at very narrow terminal widths.
+			for _, c := range visFlex {
+				colWidths[c] = 1
 			}
 		}
 

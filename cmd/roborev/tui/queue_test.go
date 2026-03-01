@@ -1837,16 +1837,17 @@ func TestTUIQueueFlexOvershootHandled(t *testing.T) {
 	}
 }
 
-func TestTUIQueueBranchDoesNotStarveRepo(t *testing.T) {
-	// When branch names are much longer than repo names, the branch
-	// column should not take more than 1.5x the repo column width.
+func TestTUIQueueFlexColumnsGetContentWidth(t *testing.T) {
+	// Each flex column should get at least its content width when
+	// total content fits within remaining space, even if one column
+	// has much more content than the others.
 	m := newModel("http://localhost", withExternalIODisabled())
 	m.width = 120
 	m.height = 20
 	m.jobs = []storage.ReviewJob{
 		makeJob(1,
 			withRef("abc1234"),
-			withRepoName("myrepo"),
+			withRepoName("my-project-repo"),
 			withBranch("feature/very-long-branch-name-that-takes-space"),
 			withAgent("test"),
 		),
@@ -1856,35 +1857,18 @@ func TestTUIQueueBranchDoesNotStarveRepo(t *testing.T) {
 
 	output := m.renderQueueView()
 
-	// Find the header line containing "Branch" and "Repo" to measure
-	// their rendered column widths.
+	// Find the data row and verify repo name is not truncated.
+	found := false
 	for line := range strings.SplitSeq(output, "\n") {
 		stripped := stripTestANSI(line)
-		branchIdx := strings.Index(stripped, "Branch")
-		repoIdx := strings.Index(stripped, "Repo")
-		if branchIdx < 0 || repoIdx < 0 {
-			continue
+		if strings.Contains(stripped, "my-project-repo") {
+			found = true
+			break
 		}
-
-		// Find the column after Repo (next header or EOL)
-		agentIdx := strings.Index(stripped, "Agent")
-		branchWidth := repoIdx - branchIdx
-		repoWidth := len(stripped) - repoIdx
-		if agentIdx > repoIdx {
-			repoWidth = agentIdx - repoIdx
-		}
-
-		// Branch should not exceed 1.5x repo (with a small tolerance
-		// for rounding and padding).
-		if branchWidth > repoWidth*2 {
-			t.Errorf(
-				"Branch column (%d) is too wide relative to Repo (%d)",
-				branchWidth, repoWidth,
-			)
-		}
-		return
 	}
-	t.Error("Could not find Branch/Repo headers in output")
+	if !found {
+		t.Error("Repo name 'my-project-repo' was truncated in output")
+	}
 }
 
 func TestTUITasksStaleSelectionNoPanic(t *testing.T) {
