@@ -1808,32 +1808,50 @@ func TestTUITasksFlexOvershootHandled(t *testing.T) {
 }
 
 func TestTUIQueueFlexOvershootHandled(t *testing.T) {
-	// Same overshoot test for the queue view: skewed content with a
-	// narrow terminal should not overflow.
-	m := newModel("http://localhost", withExternalIODisabled())
-	m.width = 50
-	m.height = 20
-	m.jobs = []storage.ReviewJob{
-		makeJob(1,
-			withRef(strings.Repeat("r", 40)),
-			withRepoName(""),
-			withBranch(""),
-			withAgent("test"),
-		),
+	// Overshoot test: skewed content and narrow terminals should not
+	// cause the table to overflow, including the edge case where
+	// remaining space is positive but smaller than the number of
+	// visible flex columns (max(...,1) inflation).
+	tests := []struct {
+		name   string
+		width  int
+		ref    string
+		repo   string
+		branch string
+	}{
+		{"skewed/w=50", 50, strings.Repeat("r", 40), "", ""},
+		{"tight/w=60", 60, "abc", "repo", "main"},
+		{"tight/w=61", 61, "abc", "repo", "main"},
+		{"tight/w=62", 62, "abc", "repo", "main"},
 	}
-	m.selectedIdx = 0
-	m.selectedJobID = 1
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newModel("http://localhost", withExternalIODisabled())
+			m.width = tt.width
+			m.height = 20
+			m.jobs = []storage.ReviewJob{
+				makeJob(1,
+					withRef(tt.ref),
+					withRepoName(tt.repo),
+					withBranch(tt.branch),
+					withAgent("test"),
+				),
+			}
+			m.selectedIdx = 0
+			m.selectedJobID = 1
 
-	output := m.renderQueueView()
-	lines := strings.Split(output, "\n")
-	// Skip title(1) + status(1) + update(1) chrome lines; check table area.
-	for i := 3; i < len(lines); i++ {
-		clean := strings.ReplaceAll(lines[i], "\x1b[K", "")
-		clean = strings.ReplaceAll(clean, "\x1b[J", "")
-		if lipgloss.Width(clean) > m.width+1 {
-			t.Errorf("line %d exceeds width %d: visW=%d",
-				i, m.width, lipgloss.Width(clean))
-		}
+			output := m.renderQueueView()
+			lines := strings.Split(output, "\n")
+			// Skip chrome lines (title, status, update); check table.
+			for i := 3; i < len(lines); i++ {
+				clean := strings.ReplaceAll(lines[i], "\x1b[K", "")
+				clean = strings.ReplaceAll(clean, "\x1b[J", "")
+				if lipgloss.Width(clean) > m.width+1 {
+					t.Errorf("line %d exceeds width %d: visW=%d",
+						i, m.width, lipgloss.Width(clean))
+				}
+			}
+		})
 	}
 }
 

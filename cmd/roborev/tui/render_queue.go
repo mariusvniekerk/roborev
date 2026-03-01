@@ -342,15 +342,27 @@ func (m model) renderQueueView() string {
 
 			// Phase 1: allocate floors.
 			distributed := 0
-			totalHeadroom := 0
-			headroom := make(map[int]int, len(visFlex))
 			for _, c := range visFlex {
 				floor := min(contentWidth[c], equalShare)
 				colWidths[c] = max(floor, 1)
 				distributed += colWidths[c]
-				headroom[c] = contentWidth[c] - floor
-				if headroom[c] > 0 {
-					totalHeadroom += headroom[c]
+			}
+
+			// Drain overshoot from max(...,1) inflation when
+			// remaining < len(visFlex).
+			if distributed > remaining {
+				drainFlexOverflow(visFlex, colWidths, distributed-remaining)
+				distributed = remaining
+			}
+
+			// Compute headroom from actual allocated widths.
+			totalHeadroom := 0
+			headroom := make(map[int]int, len(visFlex))
+			for _, c := range visFlex {
+				h := contentWidth[c] - colWidths[c]
+				if h > 0 {
+					headroom[c] = h
+					totalHeadroom += h
 				}
 			}
 
@@ -365,7 +377,7 @@ func (m model) renderQueueView() string {
 					if i == len(visFlex)-1 {
 						extra = surplus - phase2
 					} else {
-						extra = surplus * max(headroom[c], 0) / totalHeadroom
+						extra = surplus * headroom[c] / totalHeadroom
 					}
 					colWidths[c] += extra
 					phase2 += extra
