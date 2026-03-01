@@ -217,13 +217,13 @@ func (m model) renderQueueView() string {
 
 		if !compact {
 			// Header (with 2-char prefix to align with row selector)
-			header := fmt.Sprintf("  %-*s %-*s %-*s %-*s %-*s %-8s %-3s %-12s %8s %s",
+			header := fmt.Sprintf("  %-*s %-*s %-*s %-*s %-*s %-8s %-12s %8s %-3s %s",
 				idWidth, "JobID",
 				colWidths.ref, "Ref",
 				colWidths.branch, "Branch",
 				colWidths.repo, "Repo",
 				colWidths.agent, "Agent",
-				"Status", "P/F", "Queued", "Elapsed", "Handled")
+				"Status", "Queued", "Elapsed", "P/F", "Handled")
 			b.WriteString(statusStyle.Render(header))
 			b.WriteString("\x1b[K\n") // Clear to end of line
 			b.WriteString("  " + strings.Repeat("-", min(m.width-4, 200)))
@@ -471,13 +471,13 @@ func (m model) renderJobLine(job storage.ReviewJob, selected bool, idWidth int, 
 		}
 	}
 
-	return fmt.Sprintf("%-*d %-*s %-*s %-*s %-*s %s %s %-12s %8s %s",
+	return fmt.Sprintf("%-*d %-*s %-*s %-*s %-*s %s %-12s %8s %s %s",
 		idWidth, job.ID,
 		colWidths.ref, ref,
 		colWidths.branch, branch,
 		colWidths.repo, repo,
 		colWidths.agent, agent,
-		styledStatus, verdict, enqueued, elapsed, addr)
+		styledStatus, enqueued, elapsed, verdict, addr)
 }
 
 // commandLineForJob computes the representative agent command line from job parameters.
