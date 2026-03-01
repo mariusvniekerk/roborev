@@ -217,7 +217,7 @@ func (m model) renderQueueView() string {
 
 		if !compact {
 			// Header (with 2-char prefix to align with row selector)
-			header := fmt.Sprintf("  %-*s %-*s %-*s %-*s %-*s %-8s %-3s %-12s %-8s %s",
+			header := fmt.Sprintf("  %-*s %-*s %-*s %-*s %-*s %-8s %-3s %-12s %8s %s",
 				idWidth, "JobID",
 				colWidths.ref, "Ref",
 				colWidths.branch, "Branch",
@@ -318,10 +318,11 @@ func (m model) renderQueueView() string {
 	return output
 }
 func (m model) calculateColumnWidths(idWidth int) columnWidths {
-	// Fixed widths: ID (idWidth), Status (8), P/F (3), Queued (12), Elapsed (8), Handled (8)
+	// Fixed widths: ID (idWidth), Status (8), P/F (3), Queued (12), Elapsed (8), Handled (3)
 	// Status width 8 accommodates "canceled" (longest status)
+	// Handled is 3 ("yes") — last column so header "Handled" extending past is fine
 	// Plus spacing: 2 (prefix) + 9 spaces between columns (one more for branch)
-	fixedWidth := 2 + idWidth + 8 + 3 + 12 + 8 + 8 + 9
+	fixedWidth := 2 + idWidth + 8 + 3 + 12 + 8 + 3 + 9
 
 	// Available width for flexible columns (ref, branch, repo, agent)
 	// Don't artificially inflate - if terminal is too narrow, columns will be tiny
@@ -397,7 +398,7 @@ func (m model) renderJobLine(job storage.ReviewJob, selected bool, idWidth int, 
 	// Format enqueue time as compact timestamp in local time
 	enqueued := job.EnqueuedAt.Local().Format("Jan 02 15:04")
 
-	// Format elapsed time
+	// Format elapsed time (right-aligned so short values like "1s" don't bleed into the queued date)
 	elapsed := ""
 	if job.StartedAt != nil {
 		if job.FinishedAt != nil {
@@ -470,7 +471,7 @@ func (m model) renderJobLine(job storage.ReviewJob, selected bool, idWidth int, 
 		}
 	}
 
-	return fmt.Sprintf("%-*d %-*s %-*s %-*s %-*s %s %s %-12s %-8s %s",
+	return fmt.Sprintf("%-*d %-*s %-*s %-*s %-*s %s %s %-12s %8s %s",
 		idWidth, job.ID,
 		colWidths.ref, ref,
 		colWidths.branch, branch,
