@@ -600,72 +600,102 @@ func (m *model) getBranchForJob(job storage.ReviewJob) string {
 	return branch
 }
 
+// isTextView reports whether v is a text-reading view where
+// mouse capture should be disabled to allow native text selection.
+func isTextView(v viewKind) bool {
+	return v == viewReview || v == viewKindPrompt
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	prevView := m.currentView
+
+	var result tea.Model
+	var cmd tea.Cmd
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		return m.handleKeyMsg(msg)
+		result, cmd = m.handleKeyMsg(msg)
 	case tea.MouseMsg:
-		return m.handleMouseMsg(msg)
+		result, cmd = m.handleMouseMsg(msg)
 	case tea.WindowSizeMsg:
-		return m.handleWindowSizeMsg(msg)
+		result, cmd = m.handleWindowSizeMsg(msg)
 	case tickMsg:
-		return m.handleTickMsg(msg)
+		result, cmd = m.handleTickMsg(msg)
 	case logTickMsg:
-		return m.handleLogTickMsg(msg)
+		result, cmd = m.handleLogTickMsg(msg)
 	case jobsMsg:
-		return m.handleJobsMsg(msg)
+		result, cmd = m.handleJobsMsg(msg)
 	case statusMsg:
-		return m.handleStatusMsg(msg)
+		result, cmd = m.handleStatusMsg(msg)
 	case updateCheckMsg:
-		return m.handleUpdateCheckMsg(msg)
+		result, cmd = m.handleUpdateCheckMsg(msg)
 	case reviewMsg:
-		return m.handleReviewMsg(msg)
+		result, cmd = m.handleReviewMsg(msg)
 	case promptMsg:
-		return m.handlePromptMsg(msg)
+		result, cmd = m.handlePromptMsg(msg)
 	case logOutputMsg:
-		return m.handleLogOutputMsg(msg)
+		result, cmd = m.handleLogOutputMsg(msg)
 	case addressedMsg:
-		return m.handleAddressedToggleMsg(msg)
+		result, cmd = m.handleAddressedToggleMsg(msg)
 	case addressedResultMsg:
-		return m.handleAddressedResultMsg(msg)
+		result, cmd = m.handleAddressedResultMsg(msg)
 	case cancelResultMsg:
-		return m.handleCancelResultMsg(msg)
+		result, cmd = m.handleCancelResultMsg(msg)
 	case rerunResultMsg:
-		return m.handleRerunResultMsg(msg)
+		result, cmd = m.handleRerunResultMsg(msg)
 	case reposMsg:
-		return m.handleReposMsg(msg)
+		result, cmd = m.handleReposMsg(msg)
 	case repoBranchesMsg:
-		return m.handleRepoBranchesMsg(msg)
+		result, cmd = m.handleRepoBranchesMsg(msg)
 	case branchesMsg:
-		return m.handleBranchesMsg(msg)
+		result, cmd = m.handleBranchesMsg(msg)
 	case commentResultMsg:
-		return m.handleCommentResultMsg(msg)
+		result, cmd = m.handleCommentResultMsg(msg)
 	case clipboardResultMsg:
-		return m.handleClipboardResultMsg(msg)
+		result, cmd = m.handleClipboardResultMsg(msg)
 	case commitMsgMsg:
-		return m.handleCommitMsgMsg(msg)
+		result, cmd = m.handleCommitMsgMsg(msg)
 	case jobsErrMsg:
-		return m.handleJobsErrMsg(msg)
+		result, cmd = m.handleJobsErrMsg(msg)
 	case paginationErrMsg:
-		return m.handlePaginationErrMsg(msg)
+		result, cmd = m.handlePaginationErrMsg(msg)
 	case errMsg:
-		return m.handleErrMsg(msg)
+		result, cmd = m.handleErrMsg(msg)
 	case reconnectMsg:
-		return m.handleReconnectMsg(msg)
+		result, cmd = m.handleReconnectMsg(msg)
 	case fixJobsMsg:
-		return m.handleFixJobsMsg(msg)
+		result, cmd = m.handleFixJobsMsg(msg)
 	case fixTriggerResultMsg:
-		return m.handleFixTriggerResultMsg(msg)
+		result, cmd = m.handleFixTriggerResultMsg(msg)
 	case patchMsg:
-		return m.handlePatchResultMsg(msg)
+		result, cmd = m.handlePatchResultMsg(msg)
 	case applyPatchResultMsg:
-		return m.handleApplyPatchResultMsg(msg)
+		result, cmd = m.handleApplyPatchResultMsg(msg)
 	case configSaveErrMsg:
 		m.colOptionsDirty = true
-		m.setFlash("Config save failed: "+msg.err.Error(), 5*time.Second, m.currentView)
-		return m, nil
+		m.setFlash(
+			"Config save failed: "+msg.err.Error(),
+			5*time.Second, m.currentView,
+		)
+		result = m
+	default:
+		result = m
 	}
-	return m, nil
+
+	// Toggle mouse capture on view transitions: disable in
+	// text-reading views so the terminal handles selection,
+	// re-enable when returning to interactive views.
+	newM := result.(model)
+	if newM.currentView != prevView {
+		switch {
+		case isTextView(newM.currentView) && !isTextView(prevView):
+			cmd = tea.Batch(cmd, tea.DisableMouse)
+		case !isTextView(newM.currentView) && isTextView(prevView):
+			cmd = tea.Batch(cmd, tea.EnableMouseCellMotion)
+		}
+	}
+
+	return result, cmd
 }
 
 func (m model) View() string {

@@ -730,6 +730,55 @@ func TestPatchFiles(t *testing.T) {
 	}
 }
 
+func TestShortRef(t *testing.T) {
+	tests := []struct {
+		name string
+		ref  string
+		want string
+	}{
+		{
+			name: "full SHA",
+			ref:  "abc1234567890def1234567890abcdef12345678",
+			want: "abc1234",
+		},
+		{
+			name: "already short",
+			ref:  "abc12",
+			want: "abc12",
+		},
+		{
+			name: "exactly 7 chars",
+			ref:  "abc1234",
+			want: "abc1234",
+		},
+		{
+			name: "range of full SHAs",
+			ref:  "abc1234567890def1234567890abcdef12345678..fed9876543210abc9876543210fedcba98765432",
+			want: "abc1234..fed9876",
+		},
+		{
+			name: "range of short SHAs",
+			ref:  "abc..def",
+			want: "abc..def",
+		},
+		{
+			name: "range with one long side",
+			ref:  "abc1234567890..def",
+			want: "abc1234..def",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shortRef(tt.ref)
+			if got != tt.want {
+				t.Errorf("shortRef(%q) = %q, want %q",
+					tt.ref, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDirtyPatchFilesError(t *testing.T) {
 	// dirtyPatchFiles should return an error when git diff fails
 	// (e.g., invalid repo path), not silently return nil.

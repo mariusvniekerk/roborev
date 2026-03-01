@@ -9,11 +9,8 @@ import (
 )
 
 func shortRef(ref string) string {
-	if strings.Contains(ref, "..") {
-		if len(ref) > 17 {
-			return ref[:17]
-		}
-		return ref
+	if before, after, ok := strings.Cut(ref, ".."); ok {
+		return git.ShortSHA(before) + ".." + git.ShortSHA(after)
 	}
 	return git.ShortSHA(ref)
 }
