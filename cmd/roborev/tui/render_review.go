@@ -236,10 +236,8 @@ func (m model) renderReviewView() string {
 
 	// Status line: version mismatch (persistent) takes priority, then flash message, then scroll indicator
 	if m.versionMismatch {
-		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "124", Dark: "196"}).Bold(true) // Red
 		b.WriteString(errorStyle.Render(fmt.Sprintf("VERSION MISMATCH: TUI %s != Daemon %s - restart TUI or daemon", version.Version, m.daemonVersion)))
 	} else if m.flashMessage != "" && time.Now().Before(m.flashExpiresAt) && m.flashView == viewReview {
-		flashStyle := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "28", Dark: "46"}) // Green
 		b.WriteString(flashStyle.Render(m.flashMessage))
 	} else if len(lines) > visibleLines {
 		scrollInfo := fmt.Sprintf("[%d-%d of %d lines]", start+1, end, len(lines))

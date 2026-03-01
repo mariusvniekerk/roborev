@@ -151,7 +151,6 @@ func (m model) renderTasksView() string {
 
 	// Flash message
 	if m.flashMessage != "" && time.Now().Before(m.flashExpiresAt) && m.flashView == viewTasks {
-		flashStyle := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "28", Dark: "46"})
 		b.WriteString(flashStyle.Render(m.flashMessage))
 	}
 	b.WriteString("\x1b[K\n")

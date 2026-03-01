@@ -127,7 +127,6 @@ func (m model) renderQueueView() string {
 	b.WriteString(titleStyle.Render(title.String()))
 	// In compact mode, show version mismatch inline since the status area is hidden
 	if compact && m.versionMismatch {
-		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "124", Dark: "196"}).Bold(true)
 		b.WriteString(" ")
 		b.WriteString(errorStyle.Render(fmt.Sprintf("MISMATCH: TUI %s != Daemon %s", version.Version, m.daemonVersion)))
 	}
@@ -177,7 +176,6 @@ func (m model) renderQueueView() string {
 
 		// Update notification on line 3 (above the table)
 		if m.updateAvailable != "" {
-			updateStyle := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "136", Dark: "226"}).Bold(true)
 			var updateMsg string
 			if m.updateIsDevBuild {
 				updateMsg = fmt.Sprintf("Dev build - latest release: %s - run 'roborev update --force'", m.updateAvailable)
@@ -533,10 +531,8 @@ func (m model) renderQueueView() string {
 		// Status line: flash message (temporary)
 		// Version mismatch takes priority over flash messages (it's persistent and important)
 		if m.versionMismatch {
-			errorStyle := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "124", Dark: "196"}).Bold(true) // Red
 			b.WriteString(errorStyle.Render(fmt.Sprintf("VERSION MISMATCH: TUI %s != Daemon %s - restart TUI or daemon", version.Version, m.daemonVersion)))
 		} else if m.flashMessage != "" && time.Now().Before(m.flashExpiresAt) && m.flashView == viewQueue {
-			flashStyle := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "28", Dark: "46"}) // Green
 			b.WriteString(flashStyle.Render(m.flashMessage))
 		}
 		b.WriteString("\x1b[K\n") // Clear to end of line
@@ -641,6 +637,10 @@ func stripControlChars(s string) string {
 	return b.String()
 }
 
+// toggleableColumns is the ordered list of columns the user can show/hide.
+// colSel and colJobID are always visible and not included here.
+var toggleableColumns = []int{colRef, colBranch, colRepo, colAgent, colStatus, colQueued, colElapsed, colPF, colHandled}
+
 // columnNames maps column constants to display names.
 var columnNames = map[int]string{
 	colRef:     "Ref",
@@ -694,7 +694,7 @@ func parseHiddenColumns(names []string) map[int]bool {
 func hiddenColumnsToNames(hidden map[int]bool) []string {
 	var names []string
 	// Maintain stable order
-	for _, col := range []int{colRef, colBranch, colRepo, colAgent, colStatus, colQueued, colElapsed, colPF, colHandled} {
+	for _, col := range toggleableColumns {
 		if hidden[col] {
 			names = append(names, columnConfigNames[col])
 		}
@@ -706,7 +706,7 @@ func hiddenColumnsToNames(hidden map[int]bool) []string {
 // always including colSel and colJobID, plus any non-hidden toggleable columns.
 func (m model) visibleColumns() []int {
 	cols := []int{colSel, colJobID}
-	for _, c := range []int{colRef, colBranch, colRepo, colAgent, colStatus, colQueued, colElapsed, colPF, colHandled} {
+	for _, c := range toggleableColumns {
 		if !m.hiddenColumns[c] {
 			cols = append(cols, c)
 		}
@@ -749,7 +749,7 @@ func (m model) renderColumnOptionsView() string {
 			line = selectedStyle.Render(line)
 		}
 		// Separator before "Column borders" item
-		if opt.id == -1 && i > 0 {
+		if opt.id == colOptionBorders && i > 0 {
 			b.WriteString("\n")
 		}
 		b.WriteString(prefix)

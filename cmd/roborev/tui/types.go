@@ -73,10 +73,13 @@ type logLine struct {
 	text string
 }
 
+// colOptionBorders is the sentinel ID for the borders toggle in the column options modal.
+const colOptionBorders = -1
+
 // columnOption represents an item in the column options modal.
-// id is the column constant (colRef..colHandled) or -1 for the borders toggle.
+// id is a column constant (colRef..colHandled) or colOptionBorders.
 type columnOption struct {
-	id      int    // column constant or -1 for borders toggle
+	id      int    // column constant or colOptionBorders
 	name    string // display label
 	enabled bool   // visible/on
 }

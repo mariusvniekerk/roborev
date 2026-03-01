@@ -59,6 +59,15 @@ var (
 			Foreground(lipgloss.AdaptiveColor{Light: "242", Dark: "246"}) // Gray (matches status/scroll text)
 	helpDescStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.AdaptiveColor{Light: "248", Dark: "240"}) // Dimmer gray for descriptions
+
+	errorStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.AdaptiveColor{Light: "124", Dark: "196"}).Bold(true) // Red
+
+	flashStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.AdaptiveColor{Light: "28", Dark: "46"}) // Green
+
+	updateStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.AdaptiveColor{Light: "136", Dark: "226"}).Bold(true) // Yellow/Gold
 )
 
 // reflowHelpRows redistributes items across rows so that when rendered
@@ -379,7 +388,6 @@ type model struct {
 	// Column options modal
 	colOptionsIdx  int            // Cursor in modal
 	colOptionsList []columnOption // Items in modal (columns + borders toggle)
-	colOptionsFrom viewKind       // Return view
 	colBordersOn   bool           // Column borders enabled
 	hiddenColumns  map[int]bool   // Set of hidden column IDs
 }

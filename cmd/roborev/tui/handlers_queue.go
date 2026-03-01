@@ -161,7 +161,7 @@ func (m model) handleColumnOptionsKey() (tea.Model, tea.Cmd) {
 	}
 	// Build option list from toggleable columns
 	var opts []columnOption
-	for _, col := range []int{colRef, colBranch, colRepo, colAgent, colStatus, colQueued, colElapsed, colPF, colHandled} {
+	for _, col := range toggleableColumns {
 		opts = append(opts, columnOption{
 			id:      col,
 			name:    columnDisplayName(col),
@@ -170,13 +170,12 @@ func (m model) handleColumnOptionsKey() (tea.Model, tea.Cmd) {
 	}
 	// Add borders toggle
 	opts = append(opts, columnOption{
-		id:      -1,
+		id:      colOptionBorders,
 		name:    "Column borders",
 		enabled: m.colBordersOn,
 	})
 	m.colOptionsList = opts
 	m.colOptionsIdx = 0
-	m.colOptionsFrom = m.currentView
 	m.currentView = viewColumnOptions
 	return m, nil
 }
@@ -184,7 +183,7 @@ func (m model) handleColumnOptionsKey() (tea.Model, tea.Cmd) {
 func (m model) handleColumnOptionsInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		m.currentView = m.colOptionsFrom
+		m.currentView = viewQueue
 		return m, nil
 	case "ctrl+c":
 		return m, tea.Quit
@@ -202,7 +201,7 @@ func (m model) handleColumnOptionsInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.colOptionsIdx >= 0 && m.colOptionsIdx < len(m.colOptionsList) {
 			opt := &m.colOptionsList[m.colOptionsIdx]
 			opt.enabled = !opt.enabled
-			if opt.id == -1 {
+			if opt.id == colOptionBorders {
 				// Borders toggle
 				m.colBordersOn = opt.enabled
 			} else {
