@@ -308,10 +308,8 @@ func (m model) handleDownKey() (tea.Model, tea.Cmd) {
 		if nextIdx >= 0 {
 			m.selectedIdx = nextIdx
 			m.updateSelectedJobID()
-			// Prefetch more jobs when approaching the end of loaded data
-			if m.canPaginate() && m.countVisibleJobsAfter(nextIdx) < queuePrefetchBuffer {
-				m.loadingMore = true
-				return m, m.fetchMoreJobs()
+			if cmd := m.maybePrefetch(nextIdx); cmd != nil {
+				return m, cmd
 			}
 		} else if m.canPaginate() {
 			m.loadingMore = true
@@ -344,10 +342,8 @@ func (m model) handleNextKey() (tea.Model, tea.Cmd) {
 		if nextIdx >= 0 {
 			m.selectedIdx = nextIdx
 			m.updateSelectedJobID()
-			// Prefetch more jobs when approaching the end of loaded data
-			if m.canPaginate() && m.countVisibleJobsAfter(nextIdx) < queuePrefetchBuffer {
-				m.loadingMore = true
-				return m, m.fetchMoreJobs()
+			if cmd := m.maybePrefetch(nextIdx); cmd != nil {
+				return m, cmd
 			}
 		} else if m.canPaginate() {
 			m.loadingMore = true

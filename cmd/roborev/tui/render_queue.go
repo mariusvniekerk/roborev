@@ -322,7 +322,10 @@ func (m model) renderQueueView() string {
 		}
 
 		remaining := m.width - totalFixed
-		// Distribute remaining space among flex columns
+		// Distribute remaining space among flex columns.
+		// colWidths stores content-only width; StyleFunc adds spacing via
+		// s.Width(w + spacing(col, logicalCol)) so the total column width
+		// on screen = content width + inter-column spacing.
 		colWidths := make(map[int]int, len(visCols))
 		for c, fw := range fixedWidth {
 			colWidths[c] = fw
@@ -352,10 +355,11 @@ func (m model) renderQueueView() string {
 				}
 			}
 		} else if totalFlex > 0 {
-			// No remaining space: give flex columns minimal width
+			// No remaining space: give flex columns 1 char each to avoid
+			// overflow at very narrow terminal widths.
 			for _, c := range flexCols {
 				if !m.hiddenColumns[c] {
-					colWidths[c] = max(contentWidth[c], 1)
+					colWidths[c] = 1
 				}
 			}
 		}
