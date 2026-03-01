@@ -248,20 +248,128 @@ func (m model) renderQueueView() string {
 		// Determine visible columns (respects hidden columns)
 		visCols := m.visibleColumns()
 
-		// Build row data — only include visible columns
+		// Build full row data for ALL visible jobs (for width computation)
 		allHeaders := [colCount]string{"", "JobID", "Ref", "Branch", "Repo", "Agent", "Status", "Queued", "Elapsed", "P/F", "Handled"}
+		allFullRows := make([][]string, len(visibleJobList))
+		for i, job := range visibleJobList {
+			cells := m.jobCells(job)
+			fullRow := make([]string, colCount)
+			fullRow[colSel] = "  "
+			fullRow[colJobID] = fmt.Sprintf("%d", job.ID)
+			copy(fullRow[colRef:], cells)
+			allFullRows[i] = fullRow
+		}
+
+		// Compute max content width for each visible column across ALL visible jobs.
+		// This prevents columns from resizing when the scroll window changes.
+		contentWidth := make(map[int]int, len(visCols))
+		for _, c := range visCols {
+			// Start with header width
+			w := len(allHeaders[c])
+			for _, fullRow := range allFullRows {
+				if cw := len(fullRow[c]); cw > w {
+					w = cw
+				}
+			}
+			contentWidth[c] = w
+		}
+
+		// Compute column widths: fixed columns get their natural size,
+		// flexible columns (Ref, Branch, Repo) absorb excess space.
+		bordersOn := m.colBordersOn
+		borderColor := lipgloss.AdaptiveColor{Light: "248", Dark: "242"}
+
+		// Spacing per column: non-first, non-sel columns get 1 char of spacing
+		// (either PaddingRight or border ▕ + PaddingLeft = 2 chars)
+		spacing := func(tableCol int, logCol int) int {
+			if logCol == colSel || tableCol == 0 {
+				return 0
+			}
+			if bordersOn {
+				return 2 // ▕ + PaddingLeft(1)
+			}
+			return 1 // PaddingRight(1)
+		}
+
+		// Fixed-width columns: exact sizes (content + padding, not counting inter-column spacing)
+		fixedWidth := map[int]int{
+			colSel:     2,
+			colJobID:   idWidth,
+			colStatus:  8,
+			colQueued:  12,
+			colElapsed: 8,
+			colPF:      3,
+			colHandled: max(contentWidth[colHandled], 7), // "Handled" header = 7
+			colAgent:   max(contentWidth[colAgent], 5),   // "Agent" header = 5
+		}
+
+		// Flexible columns absorb excess space
+		flexCols := []int{colRef, colBranch, colRepo}
+
+		// Compute total fixed consumption
+		totalFixed := 0
+		totalFlex := 0
+		flexContentTotal := 0
+		for ti, c := range visCols {
+			sp := spacing(ti, c)
+			if fw, ok := fixedWidth[c]; ok {
+				totalFixed += fw + sp
+			} else {
+				totalFlex++
+				flexContentTotal += contentWidth[c]
+				totalFixed += sp // spacing is always consumed
+			}
+		}
+
+		remaining := m.width - totalFixed
+		// Distribute remaining space among flex columns
+		colWidths := make(map[int]int, len(visCols))
+		for c, fw := range fixedWidth {
+			colWidths[c] = fw
+		}
+
+		if totalFlex > 0 && remaining > 0 {
+			// Distribute proportionally to content width
+			distributed := 0
+			for _, c := range flexCols {
+				if m.hiddenColumns[c] {
+					continue
+				}
+				if flexContentTotal > 0 {
+					colWidths[c] = remaining * contentWidth[c] / flexContentTotal
+				} else {
+					colWidths[c] = remaining / totalFlex
+				}
+				distributed += colWidths[c]
+			}
+			// Give remainder to first flex column to avoid off-by-one
+			if distributed != remaining {
+				for _, c := range flexCols {
+					if !m.hiddenColumns[c] {
+						colWidths[c] += remaining - distributed
+						break
+					}
+				}
+			}
+		} else if totalFlex > 0 {
+			// No remaining space: give flex columns minimal width
+			for _, c := range flexCols {
+				if !m.hiddenColumns[c] {
+					colWidths[c] = max(contentWidth[c], 1)
+				}
+			}
+		}
+
+		// Build visible rows for the window
+		windowJobs := visibleJobList[start:end]
 		rows := make([][]string, 0, end-start)
-		windowJobs := visibleJobList[start:end] // jobs in the visible window
-		for i, job := range windowJobs {
+		for i := range windowJobs {
 			sel := "  "
 			if start+i == visibleSelectedIdx {
 				sel = "> "
 			}
-			cells := m.jobCells(job)
-			fullRow := make([]string, colCount)
+			fullRow := allFullRows[start+i]
 			fullRow[colSel] = sel
-			fullRow[colJobID] = fmt.Sprintf("%d", job.ID)
-			copy(fullRow[colRef:], cells)
 
 			row := make([]string, len(visCols))
 			for vi, c := range visCols {
@@ -272,10 +380,6 @@ func (m model) renderQueueView() string {
 
 		// Compute the selected row index within the visible window
 		selectedWindowIdx := visibleSelectedIdx - start
-
-		// Map table column index to logical column for styling
-		borderColor := lipgloss.AdaptiveColor{Light: "248", Dark: "242"}
-		bordersOn := m.colBordersOn
 
 		// Find the last visible table column index (for padding logic)
 		lastVisCol := len(visCols) - 1
@@ -304,35 +408,25 @@ func (m model) renderQueueView() string {
 					logicalCol = visCols[col]
 				}
 
-				// Inter-column spacing: non-sel, non-last columns get right padding
-				if logicalCol != colSel && col < lastVisCol {
-					if bordersOn && col > 0 {
-						// Border provides the separator; use left border + padding instead of right padding
+				// Inter-column spacing: non-sel, non-first columns get border or padding
+				if logicalCol != colSel && col > 0 {
+					if bordersOn {
 						s = s.Border(lipgloss.Border{Left: "▕"}, false, false, false, true).
 							BorderForeground(borderColor).PaddingLeft(1)
-					} else {
+					} else if col < lastVisCol {
 						s = s.PaddingRight(1)
 					}
-				} else if bordersOn && col > 0 && logicalCol != colSel {
-					// Last column still gets a left border when borders are on
-					s = s.Border(lipgloss.Border{Left: "▕"}, false, false, false, true).
-						BorderForeground(borderColor).PaddingLeft(1)
 				}
 
-				// Fixed-width columns (width includes padding where applicable)
-				switch logicalCol {
-				case colSel:
-					s = s.Width(2) // "> " or "  ", no extra padding needed
-				case colJobID:
-					s = s.Width(idWidth + 1) // +1 for padding
-				case colStatus:
-					s = s.Width(9) // 8 + 1 padding
-				case colQueued:
-					s = s.Width(13) // 12 + 1 padding
-				case colElapsed:
-					s = s.Width(9).Align(lipgloss.Right) // 8 + 1 padding
-				case colPF:
-					s = s.Width(4) // 3 + 1 padding
+				// Set explicit width for all columns (includes spacing)
+				w := colWidths[logicalCol]
+				if w > 0 {
+					s = s.Width(w + spacing(col, logicalCol))
+				}
+
+				// Right-align elapsed column
+				if logicalCol == colElapsed {
+					s = s.Align(lipgloss.Right)
 				}
 
 				// Header row styling
