@@ -330,7 +330,7 @@ func TestTUIQueueCompactMode(t *testing.T) {
 		t.Error("compact mode should hide table header")
 	}
 	// Should NOT have help footer keys
-	if strings.Contains(output, "navigate") {
+	if strings.Contains(output, "nav") {
 		t.Error("compact mode should hide help footer")
 	}
 	// Should NOT have daemon status line
@@ -364,7 +364,7 @@ func TestTUIQueueDistractionFreeToggle(t *testing.T) {
 	if !strings.Contains(output, "JobID") {
 		t.Error("normal mode should show table header")
 	}
-	if !strings.Contains(output, "navigate") {
+	if !strings.Contains(output, "nav") {
 		t.Error("normal mode should show help footer")
 	}
 
@@ -377,7 +377,7 @@ func TestTUIQueueDistractionFreeToggle(t *testing.T) {
 	if strings.Contains(output, "JobID") {
 		t.Error("distraction-free should hide table header")
 	}
-	if strings.Contains(output, "navigate") {
+	if strings.Contains(output, "nav") {
 		t.Error("distraction-free should hide help footer")
 	}
 	if strings.Contains(output, "Daemon:") {

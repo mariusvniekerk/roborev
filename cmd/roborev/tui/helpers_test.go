@@ -518,14 +518,14 @@ func TestRenderHelpTableLinesWithinWidth(t *testing.T) {
 	helpSets := map[string][][]helpItem{
 		"queue": {
 			{{"x", "cancel"}, {"r", "rerun"}, {"l", "log"}, {"p", "prompt"}, {"c", "comment"}, {"y", "copy"}, {"m", "commit msg"}, {"F", "fix"}},
-			{{"↑/↓", "navigate"}, {"enter", "review"}, {"a", "addressed"}, {"f", "filter"}, {"h", "hide"}, {"T", "tasks"}, {"?", "help"}, {"q", "quit"}},
+			{{"↑/↓", "nav"}, {"enter", "review"}, {"a", "handled"}, {"f", "filter"}, {"h", "hide"}, {"T", "tasks"}, {"?", "help"}, {"q", "quit"}},
 		},
 		"review": {
-			{{"p", "prompt"}, {"c", "comment"}, {"m", "commit msg"}, {"a", "addressed"}, {"y", "copy"}, {"F", "fix"}},
+			{{"p", "prompt"}, {"c", "comment"}, {"m", "commit msg"}, {"a", "handled"}, {"y", "copy"}, {"F", "fix"}},
 			{{"↑/↓", "scroll"}, {"←/→", "prev/next"}, {"?", "commands"}, {"esc", "back"}},
 		},
 		"filter": {
-			{{"↑/↓", "navigate"}, {"→/←", "expand/collapse"}, {"↵", "select"}, {"esc", "cancel"}, {"type to search", ""}},
+			{{"↑/↓", "nav"}, {"→/←", "expand/collapse"}, {"↵", "select"}, {"esc", "cancel"}, {"type to search", ""}},
 		},
 		"tasks": {
 			{{"enter", "view"}, {"P", "parent"}, {"p", "patch"}, {"A", "apply"}, {"l", "log"}, {"x", "cancel"}, {"?", "help"}, {"T/esc", "back"}},
