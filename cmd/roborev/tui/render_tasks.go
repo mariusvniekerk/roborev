@@ -51,7 +51,7 @@ func (m model) renderTasksView() string {
 		branchW, "Branch", repoW, "Repo", refSubjectW, "Ref/Subject")
 	b.WriteString(statusStyle.Render(header))
 	b.WriteString("\x1b[K\n")
-	b.WriteString("  " + strings.Repeat("-", min(m.width-4, 200)))
+	b.WriteString("  " + strings.Repeat("─", min(m.width-2, 200)))
 	b.WriteString("\x1b[K\n")
 
 	// Render each fix job

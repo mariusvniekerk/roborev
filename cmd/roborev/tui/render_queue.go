@@ -226,7 +226,7 @@ func (m model) renderQueueView() string {
 				"Status", "Queued", "Elapsed", "P/F", "Handled")
 			b.WriteString(statusStyle.Render(header))
 			b.WriteString("\x1b[K\n") // Clear to end of line
-			b.WriteString("  " + strings.Repeat("-", min(m.width-4, 200)))
+			b.WriteString("  " + strings.Repeat("─", min(m.width-2, 200)))
 			b.WriteString("\x1b[K\n") // Clear to end of line
 		}
 

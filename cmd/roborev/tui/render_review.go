@@ -352,7 +352,7 @@ func (m model) renderRespondView() string {
 	// Simple text box with border
 	boxWidth := max(m.width-4, 20)
 
-	b.WriteString("+-" + strings.Repeat("-", boxWidth-2) + "-+\n")
+	b.WriteString("┌─" + strings.Repeat("─", boxWidth-2) + "─┐\n")
 
 	// Wrap text display to box width
 	textLinesWritten := 0
@@ -364,7 +364,7 @@ func (m model) renderRespondView() string {
 		// Show placeholder (styled, but we pad manually to avoid ANSI issues)
 		placeholder := "Type your comment..."
 		padded := placeholder + strings.Repeat(" ", boxWidth-2-len(placeholder))
-		b.WriteString("| " + statusStyle.Render(padded) + " |\x1b[K\n")
+		b.WriteString("│ " + statusStyle.Render(padded) + " │\x1b[K\n")
 		textLinesWritten++
 	} else {
 		lines := strings.SplitSeq(m.commentText, "\n")
@@ -378,18 +378,18 @@ func (m model) renderRespondView() string {
 			line = runewidth.Truncate(line, boxWidth-2, "")
 			// Pad based on visual width, not rune count
 			padding := max(boxWidth-2-runewidth.StringWidth(line), 0)
-			fmt.Fprintf(&b, "| %s%s |\x1b[K\n", line, strings.Repeat(" ", padding))
+			fmt.Fprintf(&b, "│ %s%s │\x1b[K\n", line, strings.Repeat(" ", padding))
 			textLinesWritten++
 		}
 	}
 
 	// Pad with empty lines if needed
 	for textLinesWritten < 3 {
-		fmt.Fprintf(&b, "| %-*s |\x1b[K\n", boxWidth-2, "")
+		fmt.Fprintf(&b, "│ %-*s │\x1b[K\n", boxWidth-2, "")
 		textLinesWritten++
 	}
 
-	b.WriteString("+-" + strings.Repeat("-", boxWidth-2) + "-+\x1b[K\n")
+	b.WriteString("└─" + strings.Repeat("─", boxWidth-2) + "─┘\x1b[K\n")
 
 	// Pad remaining space
 	linesWritten := 6 + textLinesWritten // title, blank, help, blank, top border, bottom border
