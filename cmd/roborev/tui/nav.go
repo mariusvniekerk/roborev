@@ -192,6 +192,17 @@ func (m model) findPrevVisibleJob(currentIdx int) int {
 	return -1
 }
 
+// countVisibleJobsAfter returns how many visible jobs exist after currentIdx.
+func (m model) countVisibleJobsAfter(currentIdx int) int {
+	count := 0
+	for i := currentIdx + 1; i < len(m.jobs); i++ {
+		if m.isJobVisible(m.jobs[i]) {
+			count++
+		}
+	}
+	return count
+}
+
 // findFirstVisibleJob returns the index of the first visible job.
 func (m model) findFirstVisibleJob() int {
 	for i := range m.jobs {

@@ -308,6 +308,11 @@ func (m model) handleDownKey() (tea.Model, tea.Cmd) {
 		if nextIdx >= 0 {
 			m.selectedIdx = nextIdx
 			m.updateSelectedJobID()
+			// Prefetch more jobs when approaching the end of loaded data
+			if m.canPaginate() && m.countVisibleJobsAfter(nextIdx) < queuePrefetchBuffer {
+				m.loadingMore = true
+				return m, m.fetchMoreJobs()
+			}
 		} else if m.canPaginate() {
 			m.loadingMore = true
 			return m, m.fetchMoreJobs()
@@ -339,6 +344,11 @@ func (m model) handleNextKey() (tea.Model, tea.Cmd) {
 		if nextIdx >= 0 {
 			m.selectedIdx = nextIdx
 			m.updateSelectedJobID()
+			// Prefetch more jobs when approaching the end of loaded data
+			if m.canPaginate() && m.countVisibleJobsAfter(nextIdx) < queuePrefetchBuffer {
+				m.loadingMore = true
+				return m, m.fetchMoreJobs()
+			}
 		} else if m.canPaginate() {
 			m.loadingMore = true
 			return m, m.fetchMoreJobs()
@@ -468,9 +478,11 @@ func (m model) handlePageDownKey() (tea.Model, tea.Cmd) {
 			m.selectedIdx = nextIdx
 		}
 		m.updateSelectedJobID()
-		if reachedEnd && m.canPaginate() {
-			m.loadingMore = true
-			return m, m.fetchMoreJobs()
+		if m.canPaginate() {
+			if reachedEnd || m.countVisibleJobsAfter(m.selectedIdx) < queuePrefetchBuffer {
+				m.loadingMore = true
+				return m, m.fetchMoreJobs()
+			}
 		}
 	case viewReview:
 		m.reviewScroll += pageSize
